@@ -27,17 +27,11 @@ contract WeiDAOTest is Test {
     uint256 constant W_BOB = 0.04 ether;
     uint256 constant W_CAROL = 0.02 ether;
     uint256 constant W_DAVE = 0.03 ether;
-    uint256 constant TOTAL = W_ALICE + W_BOB + W_CAROL + W_DAVE; // 0.14 ether
-
-    bytes32 root;
-    bytes32[] proofAlice;
-    bytes32[] proofBob;
-    bytes32[] proofCarol;
-    bytes32[] proofDave;
+    uint256 constant QUORUM = 0.05 ether;
 
     function setUp() public {
         nft = new NameNFT();
-        dao = new WeiDAO(address(nft), guardian);
+        dao = new WeiDAO(address(nft), guardian, QUORUM);
 
         // Configure a length-graded fee schedule (shorter = pricier), then hand WNS to the DAO.
         address deployerOwner = nft.owner();
@@ -62,13 +56,14 @@ contract WeiDAOTest is Test {
         tCarol = _register("delta", carol);
         tDave = _register("echo", dave);
 
-        // Weight = expected contribution, ranked by length via the live config.
         assertEq(dao.weightOf(tAlice), W_ALICE);
-        assertEq(dao.weightOf(tBob), W_BOB);
-        assertEq(dao.weightOf(tCarol), W_CAROL);
-        assertEq(dao.weightOf(tDave), W_DAVE);
 
-        _buildTree();
+        // Enroll all four and let them season.
+        _enroll(tAlice, alice);
+        _enroll(tBob, bob);
+        _enroll(tCarol, carol);
+        _enroll(tDave, dave);
+        vm.warp(block.timestamp + dao.MATURITY() + 1);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -81,17 +76,17 @@ contract WeiDAOTest is Test {
         uint256 id = _proposeWithdraw();
 
         vm.prank(alice);
-        dao.vote(id, tAlice, true, proofAlice);
+        dao.vote(id, tAlice, true);
         vm.prank(carol);
-        dao.vote(id, tCarol, true, proofCarol);
+        dao.vote(id, tCarol, true);
         vm.prank(dave);
-        dao.vote(id, tDave, true, proofDave);
+        dao.vote(id, tDave, true);
         vm.prank(bob);
-        dao.vote(id, tBob, false, proofBob);
+        dao.vote(id, tBob, false);
 
         assertTrue(dao.passed(id));
 
-        vm.warp(block.timestamp + dao.VOTING_PERIOD() + dao.EXECUTION_DELAY() + 1);
+        _warpToExecutable();
         dao.execute(id);
 
         assertEq(address(dao).balance, 5 ether);
@@ -104,9 +99,6 @@ contract WeiDAOTest is Test {
             address(nft),
             0,
             abi.encodeWithSelector(NameNFT.setDefaultFee.selector, uint256(0.5 ether)),
-            root,
-            TOTAL,
-            block.number,
             "raise default fee",
             tAlice
         );
@@ -126,15 +118,66 @@ contract WeiDAOTest is Test {
     }
 
     /*//////////////////////////////////////////////////////////////
+                      SEASONING / ANTI FLASH-MINT
+    //////////////////////////////////////////////////////////////*/
+
+    function testUnseasonedNameCannotVote() public {
+        // A name enrolled after the proposal exists cannot vote it.
+        uint256 tNew = _register("newbie", address(0xF00D));
+        _enroll(tNew, address(0xF00D));
+
+        uint256 id = _proposeWithdraw(); // createdAt == now; tNew just enrolled
+
+        vm.prank(address(0xF00D));
+        vm.expectRevert(WeiDAO.NotEligible.selector);
+        dao.vote(id, tNew, true);
+        assertEq(dao.voteWeight(id, tNew), 0);
+    }
+
+    function testUnenrolledNameCannotVote() public {
+        // "zulu" is registered and seasoned by time, but never enrolled.
+        uint256 tZulu = _register("zulu", alice);
+        vm.warp(block.timestamp + dao.MATURITY() + 1);
+        uint256 id = _proposeWithdraw();
+        vm.prank(alice);
+        vm.expectRevert(WeiDAO.NotEligible.selector);
+        dao.vote(id, tZulu, true);
+    }
+
+    function testReRegistrationVoidsEnrollment() public {
+        // Let "ab" fully expire, then re-register it to a new owner; stale seasoning must not
+        // carry over (epoch binding).
+        vm.warp(block.timestamp + 365 days + 90 days + 1); // past expiry + grace
+        address attacker = address(0xBAD);
+        uint256 tAb = _register("ab", attacker); // epoch bumps 1 -> 2; same tokenId
+        assertEq(tAb, tAlice);
+        assertEq(nft.ownerOf(tAlice), attacker);
+
+        // A fresh, properly seasoned proposer (the originals all expired above).
+        uint256 tProp = _register("proposer", carol);
+        _enroll(tProp, carol);
+        vm.warp(block.timestamp + dao.MATURITY() + 1);
+        vm.prank(carol);
+        uint256 id = dao.propose(
+            address(nft), 0, abi.encodeWithSelector(NameNFT.withdraw.selector), "x", tProp
+        );
+
+        // Attacker holds tAlice; its stale enrollment (epoch 1) no longer matches epoch 2.
+        assertEq(dao.voteWeight(id, tAlice), 0);
+        vm.prank(attacker);
+        vm.expectRevert(WeiDAO.NotEligible.selector);
+        dao.vote(id, tAlice, true);
+    }
+
+    /*//////////////////////////////////////////////////////////////
                      ONE-VOTE-PER-NAME / TRANSFER SAFETY
     //////////////////////////////////////////////////////////////*/
 
-    /// The core property: a name transferred mid-vote cannot be recounted for that proposal.
     function testTransferredNameCannotDoubleVote() public {
         uint256 id = _proposeWithdraw();
 
         vm.prank(alice);
-        dao.vote(id, tAlice, true, proofAlice);
+        dao.vote(id, tAlice, true);
 
         address buyer = address(0xB0FFEE);
         vm.prank(alice);
@@ -143,32 +186,26 @@ contract WeiDAOTest is Test {
 
         vm.prank(buyer);
         vm.expectRevert(WeiDAO.AlreadyVoted.selector);
-        dao.vote(id, tAlice, false, proofAlice);
+        dao.vote(id, tAlice, false);
     }
 
     function testNonOwnerCannotVoteName() public {
         uint256 id = _proposeWithdraw();
         vm.prank(bob); // bob does not own tAlice
         vm.expectRevert(WeiDAO.NotHolder.selector);
-        dao.vote(id, tAlice, true, proofAlice);
+        dao.vote(id, tAlice, true);
     }
 
     function testBatchVoteMultipleNames() public {
-        uint256 tAlice2 = _register("zephyrus", alice); // len 8 -> default fee 0.001 ether
-        uint256 wAlice2 = nft.getFee(8);
-
-        bytes32 la = _leaf(tAlice);
-        bytes32 lb = _leaf(tAlice2);
-        bytes32 batchRoot = _pair(la, lb);
+        uint256 tAlice2 = _register("zephyrus", alice); // default fee 0.001 ether
+        _enroll(tAlice2, alice);
+        vm.warp(block.timestamp + dao.MATURITY() + 1);
 
         vm.prank(alice);
         uint256 id = dao.propose(
             address(nft),
             0,
             abi.encodeWithSelector(NameNFT.setDefaultFee.selector, uint256(0.01 ether)),
-            batchRoot,
-            W_ALICE + wAlice2,
-            block.number,
             "batch",
             tAlice
         );
@@ -176,17 +213,11 @@ contract WeiDAOTest is Test {
         uint256[] memory ids = new uint256[](2);
         ids[0] = tAlice;
         ids[1] = tAlice2;
-        bytes32[][] memory proofs = new bytes32[][](2);
-        proofs[0] = new bytes32[](1);
-        proofs[0][0] = lb;
-        proofs[1] = new bytes32[](1);
-        proofs[1][0] = la;
-
         vm.prank(alice);
-        dao.voteBatch(id, ids, true, proofs);
+        dao.voteBatch(id, ids, true);
 
-        (,, uint256 forVotes,,,,,,,) = dao.proposals(id);
-        assertEq(forVotes, W_ALICE + wAlice2);
+        (,,,, uint256 forVotes,,,) = dao.proposals(id);
+        assertEq(forVotes, W_ALICE + nft.getFee(8));
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -196,20 +227,13 @@ contract WeiDAOTest is Test {
     function testProposeRequiresHolder() public {
         vm.prank(address(0xDEAD));
         vm.expectRevert(WeiDAO.NotHolder.selector);
-        dao.propose(address(nft), 0, "", root, TOTAL, block.number, "x", tAlice);
-    }
-
-    function testBadProofRejected() public {
-        uint256 id = _proposeWithdraw();
-        vm.prank(carol);
-        vm.expectRevert(WeiDAO.BadProof.selector);
-        dao.vote(id, tCarol, true, proofAlice); // carol's token, alice's proof
+        dao.propose(address(nft), 0, "", "x", tAlice);
     }
 
     function testCannotExecuteWhileOpen() public {
         uint256 id = _proposeWithdraw();
         vm.prank(alice);
-        dao.vote(id, tAlice, true, proofAlice);
+        dao.vote(id, tAlice, true);
         vm.expectRevert(WeiDAO.VotingOpen.selector);
         dao.execute(id);
     }
@@ -217,31 +241,50 @@ contract WeiDAOTest is Test {
     function testCannotExecuteDuringTimelock() public {
         uint256 id = _proposeWithdraw();
         vm.prank(alice);
-        dao.vote(id, tAlice, true, proofAlice);
-        vm.prank(carol);
-        dao.vote(id, tCarol, true, proofCarol);
-        // Voting closed but timelock not yet elapsed.
-        vm.warp(block.timestamp + dao.VOTING_PERIOD() + 1);
+        dao.vote(id, tAlice, true);
+        vm.warp(block.timestamp + dao.VOTING_PERIOD() + 1); // voting closed, timelock not elapsed
         vm.expectRevert(WeiDAO.ExecutionLocked.selector);
         dao.execute(id);
     }
+
+    function testRejectedBelowQuorum() public {
+        uint256 id = _proposeWithdraw();
+        vm.prank(carol); // 0.02 < QUORUM 0.05, majority but under quorum
+        dao.vote(id, tCarol, true);
+        assertFalse(dao.passed(id));
+        _warpToExecutable();
+        vm.expectRevert(WeiDAO.Rejected.selector);
+        dao.execute(id);
+    }
+
+    function testRejectedWhenMajorityAgainst() public {
+        uint256 id = _proposeWithdraw();
+        vm.prank(alice);
+        dao.vote(id, tAlice, false);
+        vm.prank(bob);
+        dao.vote(id, tBob, true);
+        _warpToExecutable();
+        vm.expectRevert(WeiDAO.Rejected.selector);
+        dao.execute(id);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                             GUARDIAN VETO
+    //////////////////////////////////////////////////////////////*/
 
     function testGuardianCanCancelPassingProposal() public {
         vm.deal(address(nft), 5 ether);
         uint256 id = _proposeWithdraw();
         vm.prank(alice);
-        dao.vote(id, tAlice, true, proofAlice);
-        vm.prank(carol);
-        dao.vote(id, tCarol, true, proofCarol);
+        dao.vote(id, tAlice, true);
         vm.prank(dave);
-        dao.vote(id, tDave, true, proofDave);
+        dao.vote(id, tDave, true);
         assertTrue(dao.passed(id));
 
-        // Guardian vetoes during the timelock window.
         vm.prank(guardian);
         dao.cancel(id);
 
-        vm.warp(block.timestamp + dao.VOTING_PERIOD() + dao.EXECUTION_DELAY() + 1);
+        _warpToExecutable();
         vm.expectRevert(WeiDAO.Canceled.selector);
         dao.execute(id);
         assertEq(address(nft).balance, 5 ether); // treasury untouched
@@ -263,26 +306,6 @@ contract WeiDAOTest is Test {
         dao.cancel(id);
     }
 
-    function testRejectedWhenMajorityAgainst() public {
-        uint256 id = _proposeWithdraw();
-        vm.prank(alice);
-        dao.vote(id, tAlice, false, proofAlice);
-        vm.prank(carol);
-        dao.vote(id, tCarol, false, proofCarol);
-        vm.prank(bob);
-        dao.vote(id, tBob, true, proofBob);
-        vm.warp(block.timestamp + dao.VOTING_PERIOD() + dao.EXECUTION_DELAY() + 1);
-        vm.expectRevert(WeiDAO.Rejected.selector);
-        dao.execute(id);
-    }
-
-    function testRejectedWithNoVotes() public {
-        uint256 id = _proposeWithdraw();
-        vm.warp(block.timestamp + dao.VOTING_PERIOD() + dao.EXECUTION_DELAY() + 1);
-        vm.expectRevert(WeiDAO.Rejected.selector);
-        dao.execute(id);
-    }
-
     /*//////////////////////////////////////////////////////////////
                                 HELPERS
     //////////////////////////////////////////////////////////////*/
@@ -293,9 +316,6 @@ contract WeiDAOTest is Test {
             address(nft),
             0,
             abi.encodeWithSelector(NameNFT.withdraw.selector),
-            root,
-            TOTAL,
-            block.number,
             "withdraw fees to treasury",
             tAlice
         );
@@ -303,12 +323,19 @@ contract WeiDAOTest is Test {
 
     function _passAndWarp(uint256 id) internal {
         vm.prank(alice);
-        dao.vote(id, tAlice, true, proofAlice);
-        vm.prank(carol);
-        dao.vote(id, tCarol, true, proofCarol);
+        dao.vote(id, tAlice, true);
         vm.prank(dave);
-        dao.vote(id, tDave, true, proofDave);
+        dao.vote(id, tDave, true);
+        _warpToExecutable();
+    }
+
+    function _warpToExecutable() internal {
         vm.warp(block.timestamp + dao.VOTING_PERIOD() + dao.EXECUTION_DELAY() + 1);
+    }
+
+    function _enroll(uint256 tokenId, address owner) internal {
+        vm.prank(owner);
+        dao.enroll(tokenId);
     }
 
     function _register(string memory label, address to) internal returns (uint256 tokenId) {
@@ -321,30 +348,5 @@ contract WeiDAOTest is Test {
         vm.deal(to, fee);
         tokenId = nft.reveal{value: fee}(label, secret);
         vm.stopPrank();
-    }
-
-    function _leaf(uint256 tokenId) internal pure returns (bytes32) {
-        return keccak256(bytes.concat(keccak256(abi.encode(tokenId))));
-    }
-
-    function _pair(bytes32 a, bytes32 b) internal pure returns (bytes32) {
-        return a < b ? keccak256(abi.encodePacked(a, b)) : keccak256(abi.encodePacked(b, a));
-    }
-
-    // 4-leaf sorted Merkle tree matching Solady's MerkleProofLib folding.
-    function _buildTree() internal {
-        bytes32 l0 = _leaf(tAlice);
-        bytes32 l1 = _leaf(tBob);
-        bytes32 l2 = _leaf(tCarol);
-        bytes32 l3 = _leaf(tDave);
-
-        bytes32 n01 = _pair(l0, l1);
-        bytes32 n23 = _pair(l2, l3);
-        root = _pair(n01, n23);
-
-        proofAlice = [l1, n23];
-        proofBob = [l0, n23];
-        proofCarol = [l3, n01];
-        proofDave = [l2, n01];
     }
 }
