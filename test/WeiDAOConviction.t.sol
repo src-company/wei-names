@@ -19,14 +19,18 @@ contract WeiDAOConvictionTest is Test {
     uint256 constant W_ALICE = 0.05 ether;
     uint256 constant W_CAROL = 0.02 ether;
 
-    // Test-friendly, fast decay: alpha = 0.9, so C_max = w / 0.1 = 10·w.
-    //   alice: C_max = 0.5 ether   carol: C_max = 0.2 ether
-    uint256 constant ALPHA = 0.9 ether; // 0.9 * 1e18 per second
-    uint256 constant THRESHOLD = 0.25 ether; // reachable by alice, never by carol alone
+    // Real calibration: 7-day half-life. alpha = round(2^(-1/604800) * 1e18).
+    uint256 constant ALPHA = 999_998_853_923_940_000;
+    uint256 constant HALF_LIFE = 7 days;
+
+    // threshold = convictionMax(W_ALICE) / 2  ⇒  a proposal holding alice's weight passes
+    // after exactly one half-life (7 days).
+    uint256 threshold;
 
     function setUp() public {
+        threshold = W_ALICE * 1e18 / (1e18 - ALPHA) / 2;
         nft = new NameNFT();
-        dao = new WeiDAOConviction(address(nft), guardian, ALPHA, THRESHOLD);
+        dao = new WeiDAOConviction(address(nft), guardian, ALPHA, threshold);
 
         address deployerOwner = nft.owner();
         uint256[] memory lens = new uint256[](2);
@@ -42,23 +46,55 @@ contract WeiDAOConvictionTest is Test {
 
         tAlice = _register("ab", alice);
         tCarol = _register("delta", carol);
-        assertEq(dao.weightOf(tAlice), W_ALICE);
+    }
+
+    /// The half-life is real: alice's weight held for exactly 7 days accrues conviction equal
+    /// to convictionMax/2 == threshold (α^7d ≈ 0.5).
+    function testSevenDayHalfLifeCalibration() public {
+        uint256 id = _proposeWithdraw();
+        vm.prank(alice);
+        dao.support(id, tAlice);
+
+        assertEq(dao.convictionMax(W_ALICE), 2 * threshold); // threshold == C_max/2
+
+        vm.warp(block.timestamp + HALF_LIFE);
+        // conviction(7d) = C_max·(1 − α^7d) ≈ C_max·0.5 == threshold, within fixed-point error.
+        assertApproxEqRel(dao.convictionOf(id), threshold, 0.005e18); // 0.5%
     }
 
     function testConvictionAccruesAndExecutes() public {
         vm.deal(address(nft), 5 ether);
         uint256 id = _proposeWithdraw();
-
         vm.prank(alice);
         dao.support(id, tAlice);
 
         assertEq(dao.convictionOf(id), 0); // starts at zero
-        vm.warp(block.timestamp + 10); // ~0.326 ether conviction > 0.25 threshold
+        vm.warp(block.timestamp + HALF_LIFE + 1 hours); // just past threshold
         assertTrue(dao.passed(id));
 
         dao.execute(id);
         assertEq(address(dao).balance, 5 ether);
         assertEq(address(nft).balance, 0);
+    }
+
+    function testNotPassedBeforeHalfLife() public {
+        uint256 id = _proposeWithdraw();
+        vm.prank(alice);
+        dao.support(id, tAlice);
+        vm.warp(block.timestamp + 6 days); // one day short of the half-life
+        assertFalse(dao.passed(id));
+        vm.expectRevert(WeiDAOConviction.Rejected.selector);
+        dao.execute(id);
+    }
+
+    function testInsufficientWeightNeverPasses() public {
+        // carol's C_max (0.02) < threshold (0.5·C_max of 0.05), so she can't pass alone, ever.
+        uint256 id = _proposeWithdraw();
+        vm.prank(carol);
+        dao.support(id, tCarol);
+        assertLt(dao.convictionMax(W_CAROL), threshold);
+        vm.warp(block.timestamp + 365 days); // effectively steady state
+        assertFalse(dao.passed(id));
     }
 
     function testCannotExecuteFreshSupport() public {
@@ -69,26 +105,16 @@ contract WeiDAOConvictionTest is Test {
         dao.execute(id);
     }
 
-    function testInsufficientSupportNeverPasses() public {
-        uint256 id = _proposeWithdraw();
-        vm.prank(carol); // C_max = 0.2 ether < 0.25 threshold
-        dao.support(id, tCarol);
-        vm.warp(block.timestamp + 1_000_000); // effectively steady state
-        assertFalse(dao.passed(id));
-        vm.expectRevert(WeiDAOConviction.Rejected.selector);
-        dao.execute(id);
-    }
-
     function testUnsupportDecaysConviction() public {
         uint256 id = _proposeWithdraw();
         vm.prank(alice);
         dao.support(id, tAlice);
-        vm.warp(block.timestamp + 3); // some conviction, still < threshold
+        vm.warp(block.timestamp + 3 days); // partway, still below threshold
         assertFalse(dao.passed(id));
 
         vm.prank(alice);
         dao.unsupport(id, tAlice); // weight removed; conviction now decays
-        vm.warp(block.timestamp + 100);
+        vm.warp(block.timestamp + 30 days);
         assertFalse(dao.passed(id));
         vm.expectRevert(WeiDAOConviction.Rejected.selector);
         dao.execute(id);
@@ -99,7 +125,7 @@ contract WeiDAOConvictionTest is Test {
         uint256 id = _proposeWithdraw();
         vm.prank(alice);
         dao.support(id, tAlice);
-        vm.warp(block.timestamp + 10);
+        vm.warp(block.timestamp + HALF_LIFE + 1 hours);
         assertTrue(dao.passed(id));
 
         vm.prank(guardian);

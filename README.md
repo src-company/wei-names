@@ -718,7 +718,11 @@ An alternative anti-flash-mint model that needs **no enrollment, no maturity clo
 conviction' = conviction · α^Δ  +  supportWeight · (1 − α^Δ) / (1 − α)
 ```
 
-A proposal executes once conviction ≥ `threshold`. Because conviction starts at 0 and needs *sustained* support, freshly-minted weight has ~no immediate effect — the ramp itself is the flash-mint defense and the guardian's warning window. It's support-only (no "against"), weight is captured lazily at `support` time, and the fixed-point `α^Δ` isn't precision-audited — hence a prototype for comparison, not the shipped path.
+A proposal executes once conviction ≥ `threshold`. Because conviction starts at 0 and needs *sustained* support, freshly-minted weight has ~no immediate effect — the ramp itself is the flash-mint defense and the guardian's warning window.
+
+**Calibration (7-day half-life).** `alpha` is the per-second decay; half-life = `ln(2) / -ln(alpha/1e18)`. For a 7-day half-life, `alpha = 999998853923940000` (= `round(2^(-1/604800) · 1e18)`). Tie `threshold` to it: steady-state conviction of constant weight `w` is `convictionMax(w) = w · 1e18 / (1e18 − alpha)`, so setting `threshold = convictionMax(W_req) / 2` means a proposal holding sustained weight `W_req` passes after **exactly one half-life (7 days)** — more weight passes sooner, less never reaches. (A test verifies α^7d ≈ 0.5 through the contract's own fixed-point `_pow`.)
+
+It's support-only (no "against"), weight is captured lazily at `support` time, and the fixed-point `α^Δ` isn't precision-audited — hence a prototype for comparison, not the shipped path.
 
 ---
 

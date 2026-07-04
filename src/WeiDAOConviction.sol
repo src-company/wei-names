@@ -88,10 +88,15 @@ contract WeiDAOConviction is Receiver {
     address public immutable guardian;
 
     /// @notice Per-second conviction decay α, scaled by 1e18 (0 < alpha < 1e18). Near 1e18 =
-    ///         slow decay / long memory. E.g. ~0.99999988e18 ≈ a 7-day half-life.
+    ///         slow decay / long memory. The half-life is `ln(2) / -ln(alpha/1e18)` seconds.
+    /// @dev Calibrated example — a **7-day half-life** is `alpha = 999998853923940000`
+    ///      (= round(2^(-1/604800) · 1e18)). Then `SCALE - alpha = 1146076060000`.
     uint256 public immutable alpha;
 
-    /// @notice Conviction a proposal must reach to pass (in weight-units; see contract notes).
+    /// @notice Conviction a proposal must reach to pass (weight-units).
+    /// @dev Calibrate against the half-life: set `threshold = convictionMax(W_req) / 2` so a
+    ///      proposal holding sustained weight `W_req` passes after exactly one half-life (with
+    ///      the 7-day alpha above, 7 days); more weight passes sooner, less never reaches.
     uint256 public immutable threshold;
 
     /*//////////////////////////////////////////////////////////////
@@ -224,6 +229,13 @@ contract WeiDAOConviction is Receiver {
     function convictionOf(uint256 id) public view returns (uint256) {
         Proposal storage p = proposals[id];
         return _accrue(p.conviction, p.supportWeight, block.timestamp - p.lastUpdate);
+    }
+
+    /// @notice Steady-state conviction of a constant `weight`: `weight · SCALE / (SCALE − α)`.
+    /// @dev The asymptote support of `weight` accrues toward. `threshold` is set relative to
+    ///      this (e.g. `convictionMax(W_req) / 2` ⇒ `W_req` passes in one half-life).
+    function convictionMax(uint256 weight) public view returns (uint256) {
+        return weight * SCALE / (SCALE - alpha);
     }
 
     /// @notice Whether a proposal currently meets its conviction threshold.
