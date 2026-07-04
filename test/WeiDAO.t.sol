@@ -194,6 +194,39 @@ contract WeiDAOTest is Test {
     }
 
     /*//////////////////////////////////////////////////////////////
+                    NAMES AS IDENTITY: DAO-OWNED PARENT
+    //////////////////////////////////////////////////////////////*/
+
+    /// Gift `dao.wei` to the treasury, then let governance mint role subdomains under it.
+    /// On mainnet, dao.wei is owned by z0r0z.wei; here we mirror that and gift it locally.
+    function testDaoMintsRoleSubdomainViaProposal() public {
+        address z0r0z = makeAddr("z0r0z");
+        uint256 tDao = _register("dao", z0r0z); // dao.wei
+        vm.prank(z0r0z);
+        nft.transferFrom(z0r0z, address(dao), tDao); // gift to the treasury
+        assertEq(nft.ownerOf(tDao), address(dao));
+
+        // A passed proposal mints contributor.dao.wei to a member (DAO owns the parent).
+        address member = address(0xC0FFEE);
+        vm.prank(alice);
+        uint256 id = dao.propose(
+            address(nft),
+            0,
+            abi.encodeWithSelector(
+                NameNFT.registerSubdomainFor.selector, "contributor", tDao, member
+            ),
+            "grant contributor role",
+            tAlice
+        );
+        _passAndWarp(id);
+        uint256 subId = abi.decode(dao.execute(id), (uint256));
+
+        assertEq(nft.ownerOf(subId), member);
+        assertEq(nft.getFullName(subId), "contributor.dao.wei");
+        assertEq(subId, nft.computeId("contributor.dao.wei"));
+    }
+
+    /*//////////////////////////////////////////////////////////////
                      ONE-VOTE-PER-NAME / TRANSFER SAFETY
     //////////////////////////////////////////////////////////////*/
 
