@@ -637,105 +637,66 @@ const results = await multicall.aggregate3([
 
 ## Governance (WeiDAO)
 
-`WeiDAO.sol` is an optional, minimal seasoning-based DAO that can own `NameNFT`. It is both the **treasury** (holds ETH + NFTs) and the **governor** (WNS holders vote to move funds and administer WNS). Named in homage to Wei Dai. Imports are Solady-only (`accounts/Receiver`). No Merkle tree, no off-chain indexer — everything is verified live on-chain.
+`WeiDAO.sol` is an optional DAO that can own `NameNFT` — both the **treasury** (holds ETH + NFTs) and the **governor** (WNS holders steer funds and WNS admin). Named in homage to Wei Dai. Solady-only (`accounts/Receiver`); no Merkle tree, no off-chain indexer, no enrollment, no voting deadline — everything is verified live on-chain, using **conviction voting**.
 
 ### Setup
 
-Deploy `WeiDAO(nameNFT, guardian, quorum)`, then hand WNS to it once:
+Deploy `WeiDAO(nameNFT, guardian, alpha, threshold)`, then hand WNS to it once:
 
 ```solidity
 NameNFT.transferOwnership(weiDAO);
 ```
 
-From then on `WeiDAO` is the `owner` of `NameNFT`: it receives `withdraw()` fees and is the only account that can call NameNFT's `onlyOwner` setters — reachable *only* through a passed proposal. `WeiDAO` has no admin key of its own.
+From then on `WeiDAO` is the `owner` of `NameNFT`: it receives `withdraw()` fees and is the only account that can call NameNFT's `onlyOwner` setters — reachable *only* through a passed proposal. It has no admin key of its own.
 
-### One name, one vote
+### Conviction voting
 
-WNS names are unique ERC-721 IDs, so **the tokenId is its own vote key** — no ERC-20-style balance checkpoints, no snapshot. You vote a *name*, and the name is marked as having voted on that proposal, so transferring it mid-vote cannot double-count it. Every vote is verified live:
-
-| Check | Enforced by |
-|---|---|
-| Name is seasoned (see below) | `enrollments[tokenId]` + `MATURITY` + epoch match |
-| Caller currently holds the name | `NameNFT.ownerOf(tokenId)` |
-| Name hasn't already voted | `tokenVoted[id][tokenId]` |
-| Voting weight | `NameNFT.getFee(byteLength(label))` |
-
-### Seasoning (anti flash-mint)
-
-Voting power is freely mintable — register a name, pay a fee — and that fee flows into the very treasury a drain would return. So power must not be acquirable on demand. To vote a proposal, a name must have been **enrolled** (`enroll(tokenId)`) and matured for `MATURITY` (30 days) **before that proposal was created**. A fresh registration can't satisfy the delay, so you can't react to a proposal by minting weight; an attacker must register *and* enroll a fake electorate 30 days in advance — locking capital and leaving a public on-chain footprint the whole time. Enrollment records the name's `epoch`, so a name that lapses and is re-registered loses its seasoning (a new owner cannot inherit it).
-
-`enroll` is **permissionless, existence-gated, and set-once per registration**: anyone may enroll any registered name — a keeper can season the whole namespace in a batch, so holders needn't act — but the clock can't start before the name exists, and a live enrollment can't be reset (anti-grief) until the name is re-registered.
-
-> Note: enrollment is a one-time, set-and-forget action per name. There is a one-time ~30-day bootstrap after deployment before any proposal can pass, while names season.
-
-### Weight = expected contribution, ranked by length
-
-A name's weight is `NameNFT.getFee(byteLength(label))`: exactly what a name of that length pays to register/renew under the **current on-chain fee config** (the same byte-length key NameNFT charges on). Shorter, pricier names rank higher precisely to the degree the live config prices them so; under the flat default config, one name = one vote. Only active top-level names (`parent == 0`, not expired) are eligible.
-
-### Lifecycle
-
-```
-enroll ─(30d maturity)─► propose ─► vote (3d) ─► voting closes ─► timelock (2d) ─► execute
-                                        │                                             ▲
-                                        └──────────────── guardian.cancel() ──────────┘
-```
-
-| Function | Who | Effect |
-|---|---|---|
-| `enroll(tokenId)` | anyone (permissionless) | Starts a registered name's 30-day seasoning clock; set-once per registration, binds to its current epoch. |
-| `propose(target, value, data, description, proposerTokenId)` | any active-name holder | Opens a proposal to run `target.call{value}(data)` (e.g. `NameNFT.withdraw()`, `setDefaultFee(...)`, or paying out treasury ETH). `proposerTokenId` is an anti-spam gate. |
-| `vote(id, tokenId, support)` / `voteBatch(id, tokenIds, support)` | seasoned name holders | Adds the name's live weight to for/against. |
-| `execute(id)` | anyone | After voting closes **and** the timelock elapses, runs the call if it passed: `forVotes > againstVotes` and `forVotes ≥ quorum`. |
-| `cancel(id)` | guardian only | Vetoes a not-yet-executed proposal. |
-
-### Absolute quorum
-
-A proposal passes on simple majority of cast weight **and** `forVotes ≥ quorum` (an absolute floor set at deploy, in weight-units). Because weight is denominated in fees, clearing quorum by minting costs at least `quorum` in fees paid into the treasury — so an attack must front roughly the treasury's scale in fresh capital, made *at-risk* by the timelock + guardian.
-
-### The guardian
-
-Seasoning stops reactive flash-mints and forces any electorate-stuffing to happen slowly and visibly, but a patient, well-capitalized attacker could still pre-position. The guardian is the deterministic backstop:
-
-- **Timelock** (`EXECUTION_DELAY = 2 days`) — a window after voting closes for watchers to react.
-- **Guardian** — may *only* `cancel` a not-yet-executed proposal. It can never propose, vote, execute, move funds, or change settings. Worst case it censors; it can **never steal**. Set `guardian = address(0)` to disable. In practice, a community multisig.
-
-So the chain enforces every *positive* action (seasoning, weight, ownership, one-vote-per-name, majority, quorum, timelock); the guardian holds a single emergency stop that can only ever say "no."
-
-### Parameters
-
-| Constant / immutable | Value |
-|---|---|
-| `MATURITY` | 30 days (seasoning before a proposal) |
-| `VOTING_PERIOD` | 3 days |
-| `EXECUTION_DELAY` | 2 days |
-| `quorum` | set at deploy (absolute "for" weight floor) |
-
-### Governed parameters (self-call)
-
-Because WeiDAO has no owner, it tunes its own knobs through the `msg.sender == address(this)` pattern — a setter reachable only via an executed proposal targeting the DAO itself:
-
-| Parameter | Setter | Default | Effect |
-|---|---|---|---|
-| `proposalFee` | `setProposalFee(uint256)` | `0` | ETH required to `propose` (payable); paid into the treasury as anti-spam / interest alignment. |
-| `requirePrimaryName` | `setRequirePrimaryName(bool)` | `false` | When on, a proposer must have a WNS primary name (`reverseResolve`), making proposals identity-bound. |
-
-`propose` also emits the proposer's primary name in `ProposalCreated`, so feeds read as `alice.wei proposed …` for free.
-
-### Variant: conviction voting (`WeiDAOConviction.sol`, prototype)
-
-An alternative anti-flash-mint model that needs **no enrollment, no maturity clock, and no voting deadline**. Instead of discrete ballots, you `support(id, tokenId)` a proposal and its *conviction* accrues over time from the weight backing it, decaying when support is withdrawn:
+You `support(id, tokenId)` a proposal with a name you own; the proposal's *conviction* accrues over time from the weight backing it, and decays when support is withdrawn:
 
 ```
 conviction' = conviction · α^Δ  +  supportWeight · (1 − α^Δ) / (1 − α)
 ```
 
-A proposal executes once conviction ≥ `threshold`. Because conviction starts at 0 and needs *sustained* support, freshly-minted weight has ~no immediate effect — the ramp itself is the flash-mint defense and the guardian's warning window.
+A proposal executes once `conviction ≥ threshold`. Because conviction starts at 0 and needs *sustained* support, freshly-minted weight has ~no immediate effect — **the ramp is the flash-mint defense and the guardian's warning window**. Unique ERC-721 tokenIds mean one support per name (transfer-safe): a name backs a proposal once, and a mid-flight transfer just hands control to the new owner.
 
-**Calibration (7-day half-life).** `alpha` is the per-second decay; half-life = `ln(2) / -ln(alpha/1e18)`. For a 7-day half-life, `alpha = 999998853923940000` (= `round(2^(-1/604800) · 1e18)`). Tie `threshold` to it: steady-state conviction of constant weight `w` is `convictionMax(w) = w · 1e18 / (1e18 − alpha)`, so setting `threshold = convictionMax(W_req) / 2` means a proposal holding sustained weight `W_req` passes after **exactly one half-life (7 days)** — more weight passes sooner, less never reaches. (A test verifies α^7d ≈ 0.5 through the contract's own fixed-point `_pow`.)
+| Function | Who | Effect |
+|---|---|---|
+| `propose(target, value, data, description, proposerTokenId)` | active-name holder | Opens a proposal to run `target.call{value}(data)`. Payable (see `proposalFee`). |
+| `support(id, tokenId)` | name owner | Back a proposal; its weight starts accruing conviction. |
+| `unsupport(id, tokenId)` | owner — or anyone if the name is expired | Withdraw support, or permissionlessly prune ineligible support. |
+| `execute(id)` | anyone | Runs the call once `convictionOf(id) ≥ threshold`. |
+| `cancel(id)` | guardian only | Vetoes a not-yet-executed proposal. |
 
-It's support-only (no "against"), weight is captured lazily at `support` time, and the fixed-point `α^Δ` isn't precision-audited — hence a prototype for comparison, not the shipped path.
+### Weight = expected contribution, ranked by length
 
----
+A name's weight is `NameNFT.getFee(byteLength(label))`: what a name of that length pays to register/renew under the live fee config (the same byte-length key NameNFT charges on). Shorter, pricier names rank higher; under the flat default config, one name = one vote. Only active top-level names (`parent == 0`, not expired) are eligible.
+
+### Calibration (7-day half-life)
+
+`alpha` is the per-second decay; half-life = `ln(2) / -ln(alpha/1e18)`. For a 7-day half-life, `alpha = 999998853923940000` (= `round(2^(-1/604800) · 1e18)`). Steady-state conviction of constant weight `w` is `convictionMax(w) = w · 1e18 / (1e18 − alpha)`, so `threshold = convictionMax(W_req) / 2` means a proposal holding sustained weight `W_req` passes after **exactly one half-life** — more weight passes sooner, less never reaches. (A test verifies α^7d ≈ 0.5 through the contract's own fixed-point `_pow`.)
+
+### The guardian
+
+Conviction's ramp is itself the timelock — a proposal is visible accruing for days before it can pass, so watchers have warning. An immutable `guardian` may *only* `cancel` a not-yet-executed proposal (never propose, support, execute, move funds, or change settings). Worst case it censors; it can **never steal**. Set `guardian = address(0)` to disable.
+
+### Governed parameters (self-call)
+
+Because WeiDAO has no owner, it tunes its own knobs via the `msg.sender == address(this)` pattern — a setter reachable only through a passed proposal targeting the DAO itself:
+
+| Parameter | Setter | Default | Effect |
+|---|---|---|---|
+| `proposalFee` | `setProposalFee(uint256)` | `0` | ETH required to `propose` (payable); paid into the treasury as anti-spam / interest alignment. |
+| `requirePrimaryName` | `setRequirePrimaryName(bool)` | `false` | When on, a proposer must have a WNS primary name (`reverseResolve`). |
+
+`propose` also emits the proposer's primary name in `ProposalCreated`, so feeds read as `alice.wei proposed …` for free.
+
+### Names as identity
+
+Because WeiDAO owns `NameNFT` admin and can custody names, gift it a parent name (e.g. `dao.wei`) and proposals can mint subdomains under it as **roles / credentials**: a passed proposal calling `registerSubdomainFor("contributor", daoTokenId, member)` issues `contributor.dao.wei`. Subdomain owners can mint their own sub-subdomains, so governance can delegate a whole subtree (`*.council.dao.wei`) to a committee with one grant, and `dao.wei` itself becomes the DAO's on-chain profile (`setText`).
+
+### Caveats
+
+Conviction voting is support-only (opposition = withhold/withdraw support + guardian). Weight is captured at `support` time; a transferred name stays valid, an expired one is permissionlessly prunable. The fixed-point `α^Δ` is conservative and tested (α^7d within 0.5%) but not formally precision-audited — the one thing to review before mainnet.
 
 ## Audits
 

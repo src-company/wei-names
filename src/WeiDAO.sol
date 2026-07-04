@@ -4,46 +4,46 @@ pragma solidity ^0.8.30;
 import {Receiver} from "solady/accounts/Receiver.sol";
 
 /// @title WeiDAO
-/// @notice Minimal seasoning-based DAO + treasury for the Wei Name Service.
-/// @dev In homage to Wei Dai, the cypherpunk whose b-money prefigured on-chain governance.
+/// @notice Conviction-voting DAO + treasury for the Wei Name Service.
+/// @dev In homage to Wei Dai. A treasury (holds ETH + NFTs via {Receiver}) that WNS holders
+///      steer by *conviction voting*: no enrollment, no maturity clock, no voting deadline or
+///      timelock — the accrual ramp is intrinsically flash-mint-resistant. See caveats below.
 ///
-/// The treasury *is* this contract. Point WNS at it once with
-/// `NameNFT.transferOwnership(weiDAO)`; thereafter it:
-///   • receives `withdraw()` fees and any ETH (via {Receiver}),
-///   • can custody ERC721/ERC1155 assets, including WNS names (via {Receiver} callbacks),
-///   • is the only account able to call NameNFT's `onlyOwner` admin setters — reachable
-///     solely through a passed proposal's arbitrary `execute` call.
+/// ── How conviction replaces seasoning ──────────────────────────────────────────────────
+/// You `support` a proposal with a name. While a name backs a proposal, the proposal's
+/// *conviction* accrues over time toward an asymptote and decays when support is withdrawn:
 ///
-/// ── One name, one vote ─────────────────────────────────────────────────────────────────
-/// WNS names are unique ERC721 IDs, so each name votes once per proposal (`tokenVoted`) and a
-/// transfer mid-vote can't double-count it. There is no Merkle snapshot and no proofs:
-/// eligibility, ownership, and weight are all read live on-chain at vote time.
+///     conviction' = conviction · α^Δ  +  supportWeight · (1 − α^Δ) / (1 − α)
 ///
-/// ── Seasoning (anti flash-mint) ────────────────────────────────────────────────────────
-/// Voting power is freely mintable (register a name, pay a fee) and, worse, that fee flows
-/// into the very treasury a drain would return — so power must not be acquirable on demand.
-/// A name may only vote a proposal if it was `enroll`ed and has matured for `MATURITY` *before
-/// that proposal was created*. A fresh registration cannot satisfy the delay, so you can't
-/// react to a proposal by minting weight; an attacker must register AND enroll a fake
-/// electorate `MATURITY` in advance — locking capital and leaving a public on-chain footprint
-/// the entire time. Enrollment is permissionless (a keeper can season the whole namespace, so
-/// holders needn't act), set-once per registration, and bound to the name's `epoch` — so a
-/// name that lapses and is re-registered loses its seasoning (a new owner cannot inherit it).
+/// where Δ is seconds elapsed and α ∈ (0,1) is the per-second decay. A proposal executes once
+/// conviction ≥ `threshold`. Because conviction starts at 0 and needs *sustained* support to
+/// build, freshly-minted weight has ~no immediate effect — flash-mint-and-execute is
+/// impossible with no enrollment, no maturity clock, and no voting deadline. Steady-state
+/// conviction from constant weight w is `w · SCALE / (SCALE − α)`, so `threshold` is expressed
+/// in weight-units: it is the sustained weight a proposal must hold to pass.
 ///
 /// ── Weight = expected contribution, ranked by length via the live config ───────────────
-/// A name's weight is `NameNFT.getFee(byteLength(label))`: exactly what a name of that length
-/// pays to register/renew per the *current* on-chain fee schedule (the same byte-length key
-/// NameNFT charges on). Shorter, pricier names rank higher precisely to the degree the live
-/// config prices them so; under the flat default config, one name = one vote. Only active
-/// top-level names (`parent == 0`, not expired) are eligible.
+/// A name's weight is `NameNFT.getFee(byteLength(label))` — what it pays to register/renew
+/// under the live config; active top-level names only (`parent == 0`, not expired).
 ///
-/// ── Absolute quorum + guardian + timelock ──────────────────────────────────────────────
-/// A proposal passes on a simple majority of cast weight AND `forVotes >= quorum`, an absolute
-/// floor. Because weight is denominated in fees, clearing quorum by minting costs at least
-/// `quorum` in fees paid into the treasury — so an attack must front roughly the treasury's
-/// scale in fresh, at-risk capital. Execution is timelocked after voting closes, and an
-/// immutable `guardian` may *only cancel* a not-yet-executed proposal (never propose, vote,
-/// execute, or steal — worst case it censors). Set `guardian = address(0)` to disable.
+/// ── Guardian ───────────────────────────────────────────────────────────────────────────
+/// Conviction's ramp *is* the timelock: a proposal is visible accruing for a long time before
+/// it can pass, so watchers have warning. An immutable `guardian` may still only `cancel` a
+/// not-yet-executed proposal (never propose, support, execute, or steal). `address(0)` disables.
+///
+/// ── Governed knobs, WNS-native ─────────────────────────────────────────────────────────
+/// Ownerless self-governance (setter callable only via a passed proposal targeting the DAO):
+/// `proposalFee` (payable propose, anti-spam into the treasury) and `requirePrimaryName`
+/// (proposer must have a WNS primary name). `propose` also emits the proposer's primary name.
+///
+/// ── Caveats ────────────────────────────────────────────────────────────────────────────
+/// • Conviction voting is support-only; opposition is expressed by withholding/withdrawing
+///   support (and, ultimately, the guardian veto). There is no "against".
+/// • Weight is captured at `support` time. A transferred name is still valid support (same
+///   weight, new controller); an *expired* one becomes ineligible and anyone may `unsupport`
+///   it (permissionless prune), so lazy staleness is bounded.
+/// • `α^Δ` uses fixed-point exponentiation; conservative and tested (α^7d within 0.5%), but
+///   not formally precision-audited — the one thing to review before mainnet.
 contract WeiDAO is Receiver {
     /*//////////////////////////////////////////////////////////////
                                  ERRORS
@@ -53,57 +53,46 @@ contract WeiDAO is Receiver {
     error Canceled();
     error Rejected();
     error NotHolder();
-    error VotingOpen();
+    error NoProposal();
     error NotEligible();
     error NotGuardian();
-    error AlreadyVoted();
-    error VotingClosed();
     error NoPrimaryName();
-    error AlreadyEnrolled();
+    error NotSupporting();
     error AlreadyExecuted();
     error ExecutionFailed();
-    error ExecutionLocked();
     error InsufficientFee();
+    error AlreadySupported();
 
     /*//////////////////////////////////////////////////////////////
                                  EVENTS
     //////////////////////////////////////////////////////////////*/
 
-    event Enrolled(uint256 indexed tokenId, address indexed by, uint64 since, uint64 epoch);
     event ProposalCreated(
         uint256 indexed id,
         address indexed proposer,
         address target,
         uint256 value,
         bytes data,
-        uint256 createdAt,
         string description,
         string proposerName
     );
-    event ProposalFeeSet(uint256 fee);
-    event RequirePrimaryNameSet(bool required);
-    event VoteCast(
-        uint256 indexed id,
-        uint256 indexed tokenId,
-        address indexed voter,
-        bool support,
-        uint256 weight
+    event Supported(
+        uint256 indexed id, uint256 indexed tokenId, address indexed supporter, uint256 weight
+    );
+    event Unsupported(
+        uint256 indexed id, uint256 indexed tokenId, address indexed supporter, uint256 weight
     );
     event ProposalExecuted(uint256 indexed id, bytes result);
     event ProposalCanceled(uint256 indexed id);
+    event ProposalFeeSet(uint256 fee);
+    event RequirePrimaryNameSet(bool required);
 
     /*//////////////////////////////////////////////////////////////
                                 CONSTANTS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice How long a name must be enrolled before a proposal to vote it (anti flash-mint).
-    uint256 public constant MATURITY = 30 days;
-
-    /// @notice How long voting stays open after a proposal is created.
-    uint256 public constant VOTING_PERIOD = 3 days;
-
-    /// @notice Delay after voting closes before a passed proposal may be executed (guardian window).
-    uint256 public constant EXECUTION_DELAY = 2 days;
+    /// @dev Fixed-point scale for `alpha`, conviction, and weights.
+    uint256 internal constant SCALE = 1e18;
 
     /// @notice WNS NameNFT.
     INameNFT public immutable nft;
@@ -111,71 +100,55 @@ contract WeiDAO is Receiver {
     /// @notice May cancel (only) any not-yet-executed proposal. `address(0)` disables the veto.
     address public immutable guardian;
 
-    /// @notice Absolute "for" weight a proposal must reach to pass (in `getFee` weight-units).
-    uint256 public immutable quorum;
+    /// @notice Per-second conviction decay α, scaled by 1e18 (0 < alpha < 1e18). Near 1e18 =
+    ///         slow decay / long memory. The half-life is `ln(2) / -ln(alpha/1e18)` seconds.
+    /// @dev Calibrated example — a **7-day half-life** is `alpha = 999998853923940000`
+    ///      (= round(2^(-1/604800) · 1e18)). Then `SCALE - alpha = 1146076060000`.
+    uint256 public immutable alpha;
+
+    /// @notice Conviction a proposal must reach to pass (weight-units).
+    /// @dev Calibrate against the half-life: set `threshold = convictionMax(W_req) / 2` so a
+    ///      proposal holding sustained weight `W_req` passes after exactly one half-life (with
+    ///      the 7-day alpha above, 7 days); more weight passes sooner, less never reaches.
+    uint256 public immutable threshold;
 
     /*//////////////////////////////////////////////////////////////
                                  STORAGE
     //////////////////////////////////////////////////////////////*/
 
-    struct Enrollment {
-        uint64 since; // When the name was enrolled (0 = never).
-        uint64 epoch; // NameNFT epoch at enrollment; invalidated if the name is re-registered.
-    }
-
     struct Proposal {
-        uint64 createdAt; // ┐ packed: proposal time (drives voting close + timelock + seasoning),
-        bool executed; //    │ execution flag,
-        bool canceled; //    │ guardian veto flag,
-        address target; // ┘ call target (e.g. NameNFT).
-        uint256 forVotes;
-        uint256 againstVotes;
+        uint64 lastUpdate; // ┐ packed: last conviction sync,
+        bool executed; //     │ execution flag,
+        bool canceled; //     │ guardian veto flag,
+        address target; //  ┘ call target (e.g. NameNFT).
+        uint256 conviction; // Accrued conviction as of `lastUpdate` (scaled).
+        uint256 supportWeight; // Total weight currently backing the proposal.
         uint256 value; // ETH to forward from the treasury.
         bytes data; // Calldata (e.g. abi.encodeWithSelector(NameNFT.withdraw.selector)).
     }
 
     uint256 public proposalCount;
-    /// @notice ETH required to open a proposal (anti-spam, paid to the treasury). Starts 0;
-    ///         tunable only by the DAO itself (`setProposalFee` via a passed proposal).
+    /// @notice ETH required to open a proposal (anti-spam, paid to the treasury). DAO-tunable.
     uint256 public proposalFee;
-    /// @notice If true, a proposer must have a WNS primary name. Starts false; DAO-tunable.
+    /// @notice If true, a proposer must have a WNS primary name. DAO-tunable.
     bool public requirePrimaryName;
 
-    mapping(uint256 => Enrollment) public enrollments; // tokenId => seasoning
     mapping(uint256 => Proposal) public proposals;
-    mapping(uint256 => mapping(uint256 => bool)) public tokenVoted; // id => tokenId => voted
+    mapping(uint256 => mapping(uint256 => uint256)) public supportOf; // id => tokenId => weight backing (0 = none)
 
-    constructor(address nameNFT, address guardian_, uint256 quorum_) payable {
+    constructor(address nameNFT, address guardian_, uint256 alpha_, uint256 threshold_) payable {
+        require(alpha_ != 0 && alpha_ < SCALE && threshold_ != 0);
         nft = INameNFT(nameNFT);
         guardian = guardian_;
-        quorum = quorum_;
-    }
-
-    /*//////////////////////////////////////////////////////////////
-                               ENROLLMENT
-    //////////////////////////////////////////////////////////////*/
-
-    /// @notice Start a name's seasoning clock; it matures in `MATURITY`.
-    /// @dev Permissionless — anyone may enroll any registered name (so a keeper can season the
-    ///      whole namespace; holders needn't act). The delay, not the caller, is what secures
-    ///      it: the clock can't start before the name exists, and enrolling only ever helps the
-    ///      name's owner. Set-once per registration — an enrollment can't be reset (anti-grief)
-    ///      until the name is re-registered, which bumps `epoch` and voids the old seasoning.
-    function enroll(uint256 tokenId) external {
-        (,,, uint64 epoch,) = nft.records(tokenId);
-        if (epoch == 0) revert NotEligible(); // name was never registered
-        Enrollment storage e = enrollments[tokenId];
-        if (e.since != 0 && e.epoch == epoch) revert AlreadyEnrolled();
-        e.since = uint64(block.timestamp);
-        e.epoch = epoch;
-        emit Enrolled(tokenId, msg.sender, uint64(block.timestamp), epoch);
+        alpha = alpha_;
+        threshold = threshold_;
     }
 
     /*//////////////////////////////////////////////////////////////
                               GOVERNANCE
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Create a proposal to run `target.call{value}(data)` if the vote passes.
+    /// @notice Create a proposal to run `target.call{value}(data)` once conviction passes.
     /// @dev Payable: `msg.value` must cover `proposalFee` and stays in the treasury.
     /// @param proposerTokenId Any active WNS name owned by the caller — sybil gate for proposing.
     function propose(
@@ -196,14 +169,12 @@ contract WeiDAO is Receiver {
             id = ++proposalCount;
         }
         Proposal storage p = proposals[id];
-        p.createdAt = uint64(block.timestamp);
+        p.lastUpdate = uint64(block.timestamp);
         p.target = target;
         p.value = value;
         p.data = data;
 
-        emit ProposalCreated(
-            id, msg.sender, target, value, data, block.timestamp, description, proposerName
-        );
+        emit ProposalCreated(id, msg.sender, target, value, data, description, proposerName);
     }
 
     /// @notice Set the proposal fee. Callable only by the DAO itself (via a passed proposal).
@@ -220,37 +191,39 @@ contract WeiDAO is Receiver {
         emit RequirePrimaryNameSet(required);
     }
 
-    /// @notice Vote a single name. Eligibility, ownership, and weight are all verified on-chain.
-    function vote(uint256 id, uint256 tokenId, bool support) external {
-        _vote(id, tokenId, support);
-    }
-
-    /// @notice Vote every name you hold in one call.
-    function voteBatch(uint256 id, uint256[] calldata tokenIds, bool support) external {
-        uint256 n = tokenIds.length;
-        for (uint256 i; i < n; ++i) {
-            _vote(id, tokenIds[i], support);
-        }
-    }
-
-    function _vote(uint256 id, uint256 tokenId, bool support) internal {
+    /// @notice Back a proposal with a name you own; its weight begins accruing conviction.
+    function support(uint256 id, uint256 tokenId) external {
+        if (id == 0 || id > proposalCount) revert NoProposal();
         Proposal storage p = proposals[id];
-        if (block.timestamp > p.createdAt + VOTING_PERIOD) revert VotingClosed();
-        if (tokenVoted[id][tokenId]) revert AlreadyVoted();
+        if (p.executed || p.canceled) revert Rejected();
+        if (supportOf[id][tokenId] != 0) revert AlreadySupported();
         if (nft.ownerOf(tokenId) != msg.sender) revert NotHolder();
 
-        // Weight is 0 unless the name is seasoned as of proposal creation and active now.
-        uint256 w = _weightFor(tokenId, p.createdAt);
+        uint256 w = weightOf(tokenId);
         if (w == 0) revert NotEligible();
 
-        tokenVoted[id][tokenId] = true;
-        if (support) {
-            p.forVotes += w;
-        } else {
-            p.againstVotes += w;
-        }
+        _sync(p);
+        p.supportWeight += w;
+        supportOf[id][tokenId] = w;
 
-        emit VoteCast(id, tokenId, msg.sender, support, w);
+        emit Supported(id, tokenId, msg.sender, w);
+    }
+
+    /// @notice Withdraw a name's support; conviction stops growing from it and decays.
+    /// @dev The owner may withdraw anytime. Anyone may *prune* support from a name that is no
+    ///      longer eligible (`weightOf == 0`, e.g. expired) — bounding lazy-capture staleness.
+    ///      Short-circuit ordering means an ineligible name never triggers the `ownerOf` call.
+    function unsupport(uint256 id, uint256 tokenId) external {
+        uint256 w = supportOf[id][tokenId];
+        if (w == 0) revert NotSupporting();
+        if (weightOf(tokenId) != 0 && nft.ownerOf(tokenId) != msg.sender) revert NotHolder();
+
+        Proposal storage p = proposals[id];
+        _sync(p);
+        p.supportWeight -= w;
+        supportOf[id][tokenId] = 0;
+
+        emit Unsupported(id, tokenId, msg.sender, w);
     }
 
     /// @notice Guardian-only: cancel a not-yet-executed proposal (the sole guardian power).
@@ -262,17 +235,14 @@ contract WeiDAO is Receiver {
         emit ProposalCanceled(id);
     }
 
-    /// @notice Execute a passed proposal once voting has closed and the timelock has elapsed.
-    /// @dev Passes on simple majority of cast weight plus the absolute `quorum` "for" floor.
+    /// @notice Execute a proposal once its accrued conviction reaches `threshold`.
     function execute(uint256 id) external returns (bytes memory result) {
         Proposal storage p = proposals[id];
         if (p.canceled) revert Canceled();
         if (p.executed) revert AlreadyExecuted();
-        if (block.timestamp <= p.createdAt + VOTING_PERIOD) revert VotingOpen();
-        if (block.timestamp <= p.createdAt + VOTING_PERIOD + EXECUTION_DELAY) {
-            revert ExecutionLocked();
-        }
-        if (p.forVotes <= p.againstVotes || p.forVotes < quorum) revert Rejected();
+
+        _sync(p);
+        if (p.conviction < threshold) revert Rejected();
 
         p.executed = true; // Effects before interaction (reentrancy-safe).
 
@@ -287,37 +257,60 @@ contract WeiDAO is Receiver {
                                  VIEWS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice A name's base weight: its expected contribution under the live fee config.
-    /// @dev Active top-level names only (`parent == 0`, `block.timestamp <= expiresAt`); 0 else.
-    ///      Weight is `NameNFT.getFee(byteLength(label))` — the same byte-length key NameNFT
-    ///      charges on — read live, so it reflects the config at call time. Voting additionally
-    ///      requires seasoning (see `voteWeight`).
+    /// @notice A name's weight: its expected contribution under the live fee config (0 if
+    ///         not an active top-level name).
     function weightOf(uint256 tokenId) public view returns (uint256) {
         (string memory label, uint256 parent, uint64 exp,,) = nft.records(tokenId);
         if (parent != 0 || bytes(label).length == 0 || block.timestamp > exp) return 0;
         return nft.getFee(bytes(label).length);
     }
 
-    /// @notice The weight `tokenId` would contribute to proposal `id` (0 if ineligible now).
-    function voteWeight(uint256 id, uint256 tokenId) external view returns (uint256) {
-        return _weightFor(tokenId, proposals[id].createdAt);
-    }
-
-    /// @notice Whether a proposal currently meets the pass conditions (majority + quorum).
-    function passed(uint256 id) external view returns (bool) {
+    /// @notice A proposal's conviction right now (accruing from its current support weight).
+    function convictionOf(uint256 id) public view returns (uint256) {
         Proposal storage p = proposals[id];
-        return p.forVotes > p.againstVotes && p.forVotes >= quorum;
+        return _accrue(p.conviction, p.supportWeight, block.timestamp - p.lastUpdate);
     }
 
-    /// @dev Eligible voting weight: base weight, but 0 unless the name was seasoned by `asOf`
-    ///      and its enrollment epoch still matches (i.e. it has not been re-registered since).
-    function _weightFor(uint256 tokenId, uint256 asOf) internal view returns (uint256) {
-        Enrollment storage e = enrollments[tokenId];
-        if (e.since == 0 || uint256(e.since) + MATURITY > asOf) return 0;
-        (string memory label, uint256 parent, uint64 exp, uint64 epoch,) = nft.records(tokenId);
-        if (parent != 0 || bytes(label).length == 0 || block.timestamp > exp) return 0;
-        if (e.epoch != epoch) return 0;
-        return nft.getFee(bytes(label).length);
+    /// @notice Steady-state conviction of a constant `weight`: `weight · SCALE / (SCALE − α)`.
+    /// @dev The asymptote support of `weight` accrues toward. `threshold` is set relative to
+    ///      this (e.g. `convictionMax(W_req) / 2` ⇒ `W_req` passes in one half-life).
+    function convictionMax(uint256 weight) public view returns (uint256) {
+        return weight * SCALE / (SCALE - alpha);
+    }
+
+    /// @notice Whether a proposal currently meets its conviction threshold.
+    function passed(uint256 id) external view returns (bool) {
+        return convictionOf(id) >= threshold;
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                               CONVICTION
+    //////////////////////////////////////////////////////////////*/
+
+    /// @dev Advance a proposal's stored conviction to the current time.
+    function _sync(Proposal storage p) internal {
+        uint256 dt = block.timestamp - p.lastUpdate;
+        if (dt != 0) {
+            p.conviction = _accrue(p.conviction, p.supportWeight, dt);
+            p.lastUpdate = uint64(block.timestamp);
+        }
+    }
+
+    /// @dev conviction' = c·α^dt + w·(1 − α^dt)/(1 − α).
+    function _accrue(uint256 c, uint256 w, uint256 dt) internal view returns (uint256) {
+        if (dt == 0) return c;
+        uint256 a = _pow(alpha, dt); // α^dt, scaled
+        return (c * a / SCALE) + (w * (SCALE - a) / (SCALE - alpha));
+    }
+
+    /// @dev Fixed-point exponentiation: (base/1e18)^exp · 1e18, by binary squaring.
+    function _pow(uint256 base, uint256 exp) internal pure returns (uint256 result) {
+        result = SCALE;
+        while (exp != 0) {
+            if (exp & 1 == 1) result = result * base / SCALE;
+            base = base * base / SCALE;
+            exp >>= 1;
+        }
     }
 }
 
