@@ -664,7 +664,9 @@ WNS names are unique ERC-721 IDs, so **the tokenId is its own vote key** — no 
 
 Voting power is freely mintable — register a name, pay a fee — and that fee flows into the very treasury a drain would return. So power must not be acquirable on demand. To vote a proposal, a name must have been **enrolled** (`enroll(tokenId)`) and matured for `MATURITY` (30 days) **before that proposal was created**. A fresh registration can't satisfy the delay, so you can't react to a proposal by minting weight; an attacker must register *and* enroll a fake electorate 30 days in advance — locking capital and leaving a public on-chain footprint the whole time. Enrollment records the name's `epoch`, so a name that lapses and is re-registered loses its seasoning (a new owner cannot inherit it).
 
-> Note: enrollment is a one-time, set-and-forget action per name. There is a one-time ~30-day bootstrap after deployment before any proposal can pass, while holders enroll and season.
+`enroll` is **permissionless, existence-gated, and set-once per registration**: anyone may enroll any registered name — a keeper can season the whole namespace in a batch, so holders needn't act — but the clock can't start before the name exists, and a live enrollment can't be reset (anti-grief) until the name is re-registered.
+
+> Note: enrollment is a one-time, set-and-forget action per name. There is a one-time ~30-day bootstrap after deployment before any proposal can pass, while names season.
 
 ### Weight = expected contribution, ranked by length
 
@@ -680,7 +682,7 @@ enroll ─(30d maturity)─► propose ─► vote (3d) ─► voting closes ─
 
 | Function | Who | Effect |
 |---|---|---|
-| `enroll(tokenId)` | name owner | Starts (or restarts) the name's 30-day seasoning clock; binds to its current epoch. |
+| `enroll(tokenId)` | anyone (permissionless) | Starts a registered name's 30-day seasoning clock; set-once per registration, binds to its current epoch. |
 | `propose(target, value, data, description, proposerTokenId)` | any active-name holder | Opens a proposal to run `target.call{value}(data)` (e.g. `NameNFT.withdraw()`, `setDefaultFee(...)`, or paying out treasury ETH). `proposerTokenId` is an anti-spam gate. |
 | `vote(id, tokenId, support)` / `voteBatch(id, tokenIds, support)` | seasoned name holders | Adds the name's live weight to for/against. |
 | `execute(id)` | anyone | After voting closes **and** the timelock elapses, runs the call if it passed: `forVotes > againstVotes` and `forVotes ≥ quorum`. |

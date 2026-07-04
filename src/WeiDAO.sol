@@ -26,8 +26,9 @@ import {Receiver} from "solady/accounts/Receiver.sol";
 /// that proposal was created*. A fresh registration cannot satisfy the delay, so you can't
 /// react to a proposal by minting weight; an attacker must register AND enroll a fake
 /// electorate `MATURITY` in advance — locking capital and leaving a public on-chain footprint
-/// the entire time. Enrollment is bound to the name's `epoch`, so a name that lapses and is
-/// re-registered loses its seasoning (a new owner cannot inherit it).
+/// the entire time. Enrollment is permissionless (a keeper can season the whole namespace, so
+/// holders needn't act), set-once per registration, and bound to the name's `epoch` — so a
+/// name that lapses and is re-registered loses its seasoning (a new owner cannot inherit it).
 ///
 /// ── Weight = expected contribution, ranked by length via the live config ───────────────
 /// A name's weight is `NameNFT.getFee(byteLength(label))`: exactly what a name of that length
@@ -56,6 +57,7 @@ contract WeiDAO is Receiver {
     error NotGuardian();
     error AlreadyVoted();
     error VotingClosed();
+    error AlreadyEnrolled();
     error AlreadyExecuted();
     error ExecutionFailed();
     error ExecutionLocked();
@@ -64,7 +66,7 @@ contract WeiDAO is Receiver {
                                  EVENTS
     //////////////////////////////////////////////////////////////*/
 
-    event Enrolled(uint256 indexed tokenId, address indexed owner, uint64 since, uint64 epoch);
+    event Enrolled(uint256 indexed tokenId, address indexed by, uint64 since, uint64 epoch);
     event ProposalCreated(
         uint256 indexed id,
         address indexed proposer,
@@ -141,12 +143,19 @@ contract WeiDAO is Receiver {
                                ENROLLMENT
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Start (or restart) a name's seasoning clock. Must own it; matures in `MATURITY`.
-    /// @dev Records the name's current `epoch`, so a later re-registration voids the enrollment.
+    /// @notice Start a name's seasoning clock; it matures in `MATURITY`.
+    /// @dev Permissionless — anyone may enroll any registered name (so a keeper can season the
+    ///      whole namespace; holders needn't act). The delay, not the caller, is what secures
+    ///      it: the clock can't start before the name exists, and enrolling only ever helps the
+    ///      name's owner. Set-once per registration — an enrollment can't be reset (anti-grief)
+    ///      until the name is re-registered, which bumps `epoch` and voids the old seasoning.
     function enroll(uint256 tokenId) external {
-        if (nft.ownerOf(tokenId) != msg.sender) revert NotHolder();
         (,,, uint64 epoch,) = nft.records(tokenId);
-        enrollments[tokenId] = Enrollment(uint64(block.timestamp), epoch);
+        if (epoch == 0) revert NotEligible(); // name was never registered
+        Enrollment storage e = enrollments[tokenId];
+        if (e.since != 0 && e.epoch == epoch) revert AlreadyEnrolled();
+        e.since = uint64(block.timestamp);
+        e.epoch = epoch;
         emit Enrolled(tokenId, msg.sender, uint64(block.timestamp), epoch);
     }
 

@@ -134,6 +134,30 @@ contract WeiDAOTest is Test {
         assertEq(dao.voteWeight(id, tNew), 0);
     }
 
+    function testAnyoneCanEnrollAndSeason() public {
+        uint256 tGift = _register("gift", bob); // len 4 -> 0.03 ether, unenrolled
+        vm.prank(address(0x5555)); // a stranger seasons bob's name for him
+        dao.enroll(tGift);
+        vm.warp(block.timestamp + dao.MATURITY() + 1);
+
+        uint256 id = _proposeWithdraw();
+        vm.prank(bob);
+        dao.vote(id, tGift, true);
+        (,,,, uint256 forVotes,,,) = dao.proposals(id);
+        assertEq(forVotes, W_DAVE); // getFee(4)
+    }
+
+    function testCannotResetEnrollment() public {
+        // tAlice is already enrolled in setUp; a reset (same epoch) must revert (anti-grief).
+        vm.expectRevert(WeiDAO.AlreadyEnrolled.selector);
+        dao.enroll(tAlice);
+    }
+
+    function testCannotEnrollNonexistentName() public {
+        vm.expectRevert(WeiDAO.NotEligible.selector);
+        dao.enroll(uint256(0xdeadbeef));
+    }
+
     function testUnenrolledNameCannotVote() public {
         // "zulu" is registered and seasoned by time, but never enrolled.
         uint256 tZulu = _register("zulu", alice);
