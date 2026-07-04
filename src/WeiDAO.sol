@@ -23,30 +23,32 @@ import {LibString} from "solady/utils/LibString.sol";
 /// conviction from constant weight w is `w · SCALE / (SCALE − α)`, so `threshold` is expressed
 /// in weight-units: it is the sustained weight a proposal must hold to pass.
 ///
-/// ── Weight = expected contribution, ranked by length via the live config ───────────────
-/// A name's weight is `NameNFT.getFee(byteLength(label))` — what it pays to register/renew
-/// under the live config; active top-level names only (`parent == 0`, not expired).
+/// ── Weight = ETH contributed to WNS ────────────────────────────────────────────────────
+/// A name's weight is `getFee(byteLength) · (expiresAt − now) / 365d`: the length fee tier ×
+/// how far it is paid ahead. So both scarcity (short = pricier) and renewal runway — the two
+/// things that cost ETH — earn power, renewing boosts weight, and subdomains (which cost no
+/// ETH) get 0, so they can't be spam-minted for votes. Active top-level names only.
 ///
-/// ── Guardian ───────────────────────────────────────────────────────────────────────────
-/// Conviction's ramp *is* the timelock: a proposal is visible accruing for a long time before
-/// it can pass, so watchers have warning. An immutable `guardian` may still only `cancel` a
-/// not-yet-executed proposal (never propose, support, execute, or steal). `address(0)` disables.
+/// ── Roles are WNS subdomains of dao.wei ────────────────────────────────────────────────
+/// Two roles are resolved live from names under the DAO's parent (`dao.wei`), so holding the
+/// name *is* holding the role, and handing it off is just a transfer:
+/// • `veto.dao.wei` — its holder may `cancel` any not-yet-executed proposal (negative power
+///   only; conviction's ramp is the warning window). Nothing minted = no veto.
+/// • `exec.dao.wei` — a god-mode operator: may `cancel`, force-`execute` a proposal *bypassing
+///   conviction*, and call the DAO's admin setters directly. Intended as a launch multisig
+///   that can rescue WNS (e.g. force-execute `transferOwnership`) if a bug appears, then be
+///   relinquished by transferring/burning the name to progressively decentralise.
 ///
-/// ── Fixtures + the one adjustable knob ─────────────────────────────────────────────────
-/// The DAO is a fixed WNS fixture: `alpha`, `proposalFee`, `requirePrimaryName`, and
-/// `proposalParent` are immutable (set at deploy, never governed). The sole governance-tunable
-/// knob is `threshold` (`setThreshold`, self-call) — it must track participation as the DAO
-/// grows, and the change is itself a conviction proposal (slow, visible, guardian-vetoable).
-/// The WNS features below are default behaviour, not toggles:
-/// • `proposalFee` — ETH to `propose` (payable), paid into the treasury as anti-spam.
-/// • `requirePrimaryName` — if set, a proposer must have a WNS primary name.
-/// • `proposalParent` — if set to a DAO-owned name (e.g. dao.wei), every proposal atomically
-///   mints `<id>.dao.wei` to the DAO and writes its description into that name's resolver, so
-///   governance is a browsable WNS namespace. `propose` also emits the proposer's primary name.
+/// ── Knobs ──────────────────────────────────────────────────────────────────────────────
+/// `nft` is immutable; the role/parent names and `requirePrimaryName` are hardcoded. `alpha`,
+/// `threshold`, and `proposalFee` are adjustable by governance (self-call) *or* the executor.
+/// Default WNS behaviours (not toggles): a proposer must hold a WNS primary name; and every
+/// proposal (while the DAO owns dao.wei) atomically mints `<id>.dao.wei` to the DAO and writes
+/// its description into that name's resolver, so governance is a browsable WNS namespace.
 ///
 /// ── Caveats ────────────────────────────────────────────────────────────────────────────
 /// • Conviction voting is support-only; opposition is expressed by withholding/withdrawing
-///   support (and, ultimately, the guardian veto). There is no "against".
+///   support (and, ultimately, the veto). There is no "against".
 /// • Weight is captured at `support` time. A transferred name is still valid support (same
 ///   weight, new controller); an *expired* one becomes ineligible and anyone may `unsupport`
 ///   it (permissionless prune), so lazy staleness is bounded.
@@ -57,13 +59,12 @@ contract WeiDAO is Receiver {
                                  ERRORS
     //////////////////////////////////////////////////////////////*/
 
-    error NotSelf();
-    error Canceled();
+    error Vetoed();
     error Rejected();
     error NotHolder();
     error NoProposal();
     error NotEligible();
-    error NotGuardian();
+    error Unauthorized();
     error NoPrimaryName();
     error NotSupporting();
     error AlreadyExecuted();
@@ -91,9 +92,11 @@ contract WeiDAO is Receiver {
         uint256 indexed id, uint256 indexed tokenId, address indexed supporter, uint256 weight
     );
     event ProposalExecuted(uint256 indexed id, bytes result);
-    event ProposalCanceled(uint256 indexed id);
+    event ProposalVetoed(uint256 indexed id);
     event ProposalNamed(uint256 indexed id, uint256 indexed subTokenId);
     event ThresholdSet(uint256 threshold);
+    event ProposalFeeSet(uint256 fee);
+    event AlphaSet(uint256 alpha);
 
     /*//////////////////////////////////////////////////////////////
                                 CONSTANTS
@@ -105,28 +108,21 @@ contract WeiDAO is Receiver {
     /// @dev One registration/renewal period in NameNFT (weight is measured in these units).
     uint256 internal constant REGISTRATION_PERIOD = 365 days;
 
+    /// @notice dao.wei — the DAO's parent name; proposals are named under it and roles are its
+    ///         subdomains. `= namehash("dao.wei")`.
+    uint256 public constant PROPOSAL_PARENT =
+        0x2a39629d0ee4dc68cfd48b5eefdd0362b034be5a595fec5dc802144293a8287c;
+
+    /// @notice veto.dao.wei — its holder may veto (cancel) any not-yet-executed proposal.
+    uint256 public constant VETO_ROLE =
+        0xa3cbec6f0a52ab020919800d82007684e63632feadb0f555ac3cf796ec121dc1;
+
+    /// @notice exec.dao.wei — god-mode operator: veto, force-execute (bypass conviction), admin.
+    uint256 public constant EXEC_ROLE =
+        0x990f75bf23721b810a24035c3d53688b7d5078ff2aa31c18219ee65ab75e5144;
+
     /// @notice WNS NameNFT.
     INameNFT public immutable nft;
-
-    /// @notice May cancel (only) any not-yet-executed proposal. `address(0)` disables the veto.
-    address public immutable guardian;
-
-    /// @notice Per-second conviction decay α, scaled by 1e18 (0 < alpha < 1e18). Near 1e18 =
-    ///         slow decay / long memory. The half-life is `ln(2) / -ln(alpha/1e18)` seconds.
-    /// @dev Calibrated example — a **7-day half-life** is `alpha = 999998853923940000`
-    ///      (= round(2^(-1/604800) · 1e18)). Then `SCALE - alpha = 1146076060000`.
-    uint256 public immutable alpha;
-
-    /// @notice ETH required to open a proposal (anti-spam, paid to the treasury). Fixed at deploy.
-    uint256 public immutable proposalFee;
-
-    /// @notice If true, a proposer must have a WNS primary name (`reverseResolve`). Fixed at deploy.
-    bool public immutable requirePrimaryName;
-
-    /// @notice If nonzero, every proposal atomically mints `<id>.<this name>` to the DAO and writes
-    ///         its description into that subdomain's resolver — governance as a browsable WNS
-    ///         namespace. Set to a DAO-owned parent (e.g. dao.wei, gifted + kept renewed). Fixed.
-    uint256 public immutable proposalParent;
 
     /*//////////////////////////////////////////////////////////////
                                  STORAGE
@@ -135,7 +131,7 @@ contract WeiDAO is Receiver {
     struct Proposal {
         uint64 lastUpdate; // ┐ packed: last conviction sync,
         bool executed; //     │ execution flag,
-        bool canceled; //     │ guardian veto flag,
+        bool vetoed; //       │ veto flag,
         address target; //  ┘ call target (e.g. NameNFT).
         uint256 conviction; // Accrued conviction as of `lastUpdate` (scaled).
         uint256 supportWeight; // Total weight currently backing the proposal.
@@ -143,34 +139,62 @@ contract WeiDAO is Receiver {
         bytes data; // Calldata (e.g. abi.encodeWithSelector(NameNFT.withdraw.selector)).
     }
 
-    /// @notice Conviction a proposal must reach to pass (weight-units). Set at deploy and
-    ///         governance-adjustable (`setThreshold`) to track participation as the DAO grows.
-    /// @dev Calibrate against the half-life: `threshold = convictionMax(W_req) / 2` ⇒ a proposal
-    ///      holding sustained weight `W_req` passes after one half-life (7 days with the 7-day
-    ///      alpha); more weight passes sooner, less never reaches.
+    /// @notice Per-second conviction decay α (0 < alpha < 1e18). Gov/exec-adjustable (`setAlpha`).
+    /// @dev 7-day half-life = 999998853923940000 (= round(2^(-1/604800)·1e18)).
+    uint256 public alpha;
+
+    /// @notice Conviction a proposal must reach to pass. Gov/exec-adjustable (`setThreshold`) to
+    ///         track participation as the DAO grows. `threshold = convictionMax(W_req)/2` ⇒ a
+    ///         proposal holding sustained weight `W_req` passes after one half-life.
     uint256 public threshold;
+
+    /// @notice ETH required to open a proposal (anti-spam, paid to treasury). Gov/exec-adjustable.
+    uint256 public proposalFee;
 
     uint256 public proposalCount;
     mapping(uint256 => Proposal) public proposals;
     mapping(uint256 => mapping(uint256 => uint256)) public supportOf; // id => tokenId => weight backing (0 = none)
 
-    constructor(
-        address nameNFT,
-        address guardian_,
-        uint256 alpha_,
-        uint256 threshold_,
-        uint256 proposalFee_,
-        bool requirePrimaryName_,
-        uint256 proposalParent_
-    ) payable {
+    constructor(address nameNFT, uint256 alpha_, uint256 threshold_, uint256 proposalFee_) payable {
         require(alpha_ != 0 && alpha_ < SCALE && threshold_ != 0);
         nft = INameNFT(nameNFT);
-        proposalFee = proposalFee_;
-        requirePrimaryName = requirePrimaryName_;
-        proposalParent = proposalParent_;
-        guardian = guardian_;
         alpha = alpha_;
         threshold = threshold_;
+        proposalFee = proposalFee_;
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                                  ROLES
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Current holder of `veto.dao.wei` (may veto proposals), or `address(0)` if unminted.
+    function vetoer() public view returns (address) {
+        return _holder(VETO_ROLE);
+    }
+
+    /// @notice Current holder of `exec.dao.wei` (god-mode operator), or `address(0)` if unminted.
+    function executor() public view returns (address) {
+        return _holder(EXEC_ROLE);
+    }
+
+    /// @dev Owner of an *active* name, or `address(0)` if unminted, expired, or (for a subdomain)
+    ///      stale. Roles are direct subdomains of dao.wei, so they lapse when dao.wei expires or
+    ///      is re-registered — a natural dead-man's-switch. Handles top-level and depth-1 names.
+    function _holder(uint256 id) internal view returns (address) {
+        (string memory label, uint256 parent, uint64 exp,, uint64 parentEpoch) = nft.records(id);
+        if (bytes(label).length == 0) return address(0); // never minted
+        if (parent == 0) {
+            if (block.timestamp > exp) return address(0); // top-level expired
+        } else {
+            (,, uint64 pExp, uint64 pEpoch,) = nft.records(parent);
+            if (parentEpoch != pEpoch || block.timestamp > pExp) return address(0); // stale/parent gone
+        }
+        return nft.ownerOf(id);
+    }
+
+    /// @dev Governance (a passed proposal calling in) or the executor.
+    function _authed() internal view returns (bool) {
+        return msg.sender == address(this) || msg.sender == executor();
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -192,7 +216,7 @@ contract WeiDAO is Receiver {
         if (msg.value < proposalFee) revert InsufficientFee();
 
         string memory proposerName = nft.reverseResolve(msg.sender);
-        if (requirePrimaryName && bytes(proposerName).length == 0) revert NoPrimaryName();
+        if (bytes(proposerName).length == 0) revert NoPrimaryName();
 
         unchecked {
             id = ++proposalCount;
@@ -205,29 +229,47 @@ contract WeiDAO is Receiver {
 
         emit ProposalCreated(id, msg.sender, target, value, data, description, proposerName);
 
-        // If configured, mint `<id>.<proposalParent>` to the DAO and record the proposal on it.
-        uint256 parent = proposalParent;
-        if (parent != 0) {
-            uint256 subId = nft.registerSubdomainFor(LibString.toString(id), parent, address(this));
+        // While the DAO holds dao.wei, mint `<id>.dao.wei` to itself and record the proposal on it.
+        if (_holder(PROPOSAL_PARENT) == address(this)) {
+            uint256 subId =
+                nft.registerSubdomainFor(LibString.toString(id), PROPOSAL_PARENT, address(this));
             nft.setText(subId, "description", description);
             emit ProposalNamed(id, subId);
         }
     }
 
-    /// @notice Set the passing threshold. Callable only by the DAO itself (via a passed proposal).
-    /// @dev The change is itself a proposal — it must accrue conviction and can be guardian-vetoed.
+    /*//////////////////////////////////////////////////////////////
+                           ADMIN (GOV OR EXEC)
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Set the passing threshold. Callable by governance (passed proposal) or the executor.
     function setThreshold(uint256 threshold_) external {
-        if (msg.sender != address(this)) revert NotSelf();
+        if (!_authed()) revert Unauthorized();
         require(threshold_ != 0);
         threshold = threshold_;
         emit ThresholdSet(threshold_);
+    }
+
+    /// @notice Set the proposal fee. Callable by governance or the executor.
+    function setProposalFee(uint256 fee) external {
+        if (!_authed()) revert Unauthorized();
+        proposalFee = fee;
+        emit ProposalFeeSet(fee);
+    }
+
+    /// @notice Set the conviction decay. Callable by governance or the executor.
+    function setAlpha(uint256 alpha_) external {
+        if (!_authed()) revert Unauthorized();
+        require(alpha_ != 0 && alpha_ < SCALE);
+        alpha = alpha_;
+        emit AlphaSet(alpha_);
     }
 
     /// @notice Back a proposal with a name you own; its weight begins accruing conviction.
     function support(uint256 id, uint256 tokenId) external {
         if (id == 0 || id > proposalCount) revert NoProposal();
         Proposal storage p = proposals[id];
-        if (p.executed || p.canceled) revert Rejected();
+        if (p.executed || p.vetoed) revert Rejected();
         if (supportOf[id][tokenId] != 0) revert AlreadySupported();
         if (nft.ownerOf(tokenId) != msg.sender) revert NotHolder();
 
@@ -258,23 +300,24 @@ contract WeiDAO is Receiver {
         emit Unsupported(id, tokenId, msg.sender, w);
     }
 
-    /// @notice Guardian-only: cancel a not-yet-executed proposal (the sole guardian power).
-    function cancel(uint256 id) external {
-        if (msg.sender != guardian) revert NotGuardian();
+    /// @notice Veto a not-yet-executed proposal. Callable by the `veto.dao.wei` holder or exec.
+    function veto(uint256 id) external {
+        if (msg.sender != vetoer() && msg.sender != executor()) revert Unauthorized();
         Proposal storage p = proposals[id];
         if (p.executed) revert AlreadyExecuted();
-        p.canceled = true;
-        emit ProposalCanceled(id);
+        p.vetoed = true;
+        emit ProposalVetoed(id);
     }
 
-    /// @notice Execute a proposal once its accrued conviction reaches `threshold`.
+    /// @notice Execute a proposal once its conviction reaches `threshold`. The executor may
+    ///         force-execute at any conviction (god-mode override).
     function execute(uint256 id) external returns (bytes memory result) {
         Proposal storage p = proposals[id];
-        if (p.canceled) revert Canceled();
+        if (p.vetoed) revert Vetoed();
         if (p.executed) revert AlreadyExecuted();
 
         _sync(p);
-        if (p.conviction < threshold) revert Rejected();
+        if (p.conviction < threshold && msg.sender != executor()) revert Rejected();
 
         p.executed = true; // Effects before interaction (reentrancy-safe).
 

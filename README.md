@@ -637,71 +637,65 @@ const results = await multicall.aggregate3([
 
 ## Governance (WeiDAO)
 
-`WeiDAO.sol` is an optional DAO that can own `NameNFT` — both the **treasury** (holds ETH + NFTs) and the **governor** (WNS holders steer funds and WNS admin). Named in homage to Wei Dai. Solady-only (`accounts/Receiver`); no Merkle tree, no off-chain indexer, no enrollment, no voting deadline — everything is verified live on-chain, using **conviction voting**.
-
-### Setup
-
-Deploy `WeiDAO(nameNFT, guardian, alpha, threshold, proposalFee, requirePrimaryName, proposalParent)`, then hand WNS to it once:
-
-```solidity
-NameNFT.transferOwnership(weiDAO);
-```
-
-From then on `WeiDAO` is the `owner` of `NameNFT`: it receives `withdraw()` fees and is the only account that can call NameNFT's `onlyOwner` setters — reachable *only* through a passed proposal. It has no admin key of its own.
+`WeiDAO.sol` is an optional conviction-voting DAO + treasury built entirely on WNS primitives. It owns `NameNFT`, so it holds the withdrawal fees and is the only account that can call NameNFT's `onlyOwner` setters — reachable only through governance. Named in homage to Wei Dai. Solady-only (`accounts/Receiver`, `utils/LibString`); no Merkle tree, no off-chain indexer — everything is verified live on-chain.
 
 ### Conviction voting
 
-You `support(id, tokenId)` a proposal with a name you own; the proposal's *conviction* accrues over time from the weight backing it, and decays when support is withdrawn:
+You `support(id, tokenId)` a proposal with a name you own; its *conviction* accrues over time from the weight backing it and decays when support is withdrawn:
 
 ```
 conviction' = conviction · α^Δ  +  supportWeight · (1 − α^Δ) / (1 − α)
 ```
 
-A proposal executes once `conviction ≥ threshold`. Because conviction starts at 0 and needs *sustained* support, freshly-minted weight has ~no immediate effect — **the ramp is the flash-mint defense and the guardian's warning window**. Unique ERC-721 tokenIds mean one support per name (transfer-safe): a name backs a proposal once, and a mid-flight transfer just hands control to the new owner.
+A proposal executes once `conviction ≥ threshold`. Because conviction starts at 0 and needs *sustained* support, freshly-minted weight has ~no effect — the ramp itself is the flash-mint defence and the warning window. One support per name (transfer-safe). Support-only: opposition is withholding/withdrawing support, or the veto.
 
-| Function | Who | Effect |
-|---|---|---|
-| `propose(target, value, data, description, proposerTokenId)` | active-name holder | Opens a proposal to run `target.call{value}(data)`. Payable (see `proposalFee`). |
-| `support(id, tokenId)` | name owner | Back a proposal; its weight starts accruing conviction. |
-| `unsupport(id, tokenId)` | owner — or anyone if the name is expired | Withdraw support, or permissionlessly prune ineligible support. |
-| `execute(id)` | anyone | Runs the call once `convictionOf(id) ≥ threshold`. |
-| `cancel(id)` | guardian only | Vetoes a not-yet-executed proposal. |
+**Calibration (7-day half-life):** `alpha = 999998853923940000` (= `round(2^(-1/604800)·1e18)`). With `threshold = convictionMax(W_req)/2` (where `convictionMax(w) = w·1e18/(1e18−alpha)`), a proposal holding sustained weight `W_req` passes in exactly one half-life.
 
-### Weight = expected contribution, ranked by length
+### Weight = ETH contributed to WNS
 
-A name's weight is `NameNFT.getFee(byteLength(label))`: what a name of that length pays to register/renew under the live fee config (the same byte-length key NameNFT charges on). Shorter, pricier names rank higher; under the flat default config, one name = one vote. Only active top-level names (`parent == 0`, not expired) are eligible.
+```
+weightOf(name) = getFee(byteLength(label)) × (expiresAt − now) / 365 days
+```
+Weight tracks the two things that cost ETH in WNS: the **length fee tier** (short = pricier = more weight) and the **paid-ahead runway** (renewing boosts weight; a near-expiry name is nudged to renew). Subdomains cost no ETH → 0 weight, so they can't be spam-minted for votes. Active top-level names only.
 
-### Calibration (7-day half-life)
+### Roles are WNS subdomains of `dao.wei`
 
-`alpha` is the per-second decay; half-life = `ln(2) / -ln(alpha/1e18)`. For a 7-day half-life, `alpha = 999998853923940000` (= `round(2^(-1/604800) · 1e18)`). Steady-state conviction of constant weight `w` is `convictionMax(w) = w · 1e18 / (1e18 − alpha)`, so `threshold = convictionMax(W_req) / 2` means a proposal holding sustained weight `W_req` passes after **exactly one half-life** — more weight passes sooner, less never reaches. (A test verifies α^7d ≈ 0.5 through the contract's own fixed-point `_pow`.)
+Two roles are resolved **live** from names under the DAO's parent `dao.wei`, so holding the name *is* holding the role and handing it off is just an NFT transfer:
 
-### The guardian
+| Role name | Power |
+|---|---|
+| `veto.dao.wei` | Its holder may `veto(id)` any not-yet-executed proposal (negative power only). |
+| `exec.dao.wei` | **God-mode operator**: veto, **force-`execute` bypassing conviction**, and call the DAO's admin setters directly. |
 
-Conviction's ramp is itself the timelock — a proposal is visible accruing for days before it can pass, so watchers have warning. An immutable `guardian` may *only* `cancel` a not-yet-executed proposal (never propose, support, execute, move funds, or change settings). Worst case it censors; it can **never steal**. Set `guardian = address(0)` to disable.
+The `exec` role is meant as a **launch multisig** that can rescue WNS if a bug appears — e.g. force-execute `NameNFT.transferOwnership(safe)` — then be relinquished by transferring/burning `exec.dao.wei` to progressively decentralise.
 
-### Fixtures + the one adjustable knob
+Because subdomains lapse when their parent expires or is re-registered, both roles **auto-lapse if `dao.wei` isn't maintained** — a dead-man's-switch (`vetoer()`/`executor()` return `address(0)`). Role resolution is activity-aware, so a stale/expired role never retains power.
 
-WeiDAO is a solid fixture on top of WNS. Most knobs are **immutable** (set at deploy, never governed); the WNS features are default behaviour, not toggles. The one exception is `threshold`, which must track participation as the DAO grows.
+### Setup
 
-| Knob | Mutability | Effect |
-|---|---|---|
-| `alpha` | immutable | Conviction decay / half-life — the DAO's "patience". |
-| `proposalFee` | immutable | ETH required to `propose` (payable); paid into the treasury as anti-spam. |
-| `requirePrimaryName` | immutable | If set, a proposer must have a WNS primary name (`reverseResolve`). |
-| `proposalParent` | immutable | If set to a DAO-owned name, proposals are auto-named under it (below). |
-| `threshold` | **governance-adjustable** (`setThreshold`, self-call) | The passing bar; raise it as the electorate grows. The change is itself a conviction proposal — slow, visible, guardian-vetoable. |
+Deploy `WeiDAO(nameNFT, alpha, threshold, proposalFee)`, then wire up WNS:
 
-`propose` also emits the proposer's primary name in `ProposalCreated`, so feeds read as `alice.wei proposed …` for free.
+```solidity
+NameNFT.transferOwnership(weiDAO);                 // DAO becomes WNS owner
+// from the dao.wei holder:
+NameNFT.registerSubdomainFor("veto", daoWei, vetoMultisig);
+NameNFT.registerSubdomainFor("exec", daoWei, execMultisig);   // (set text records too)
+NameNFT.transferFrom(holder, weiDAO, daoWei);     // gift dao.wei so the DAO can name proposals
+```
+
+The role/parent names are **hardcoded namehash constants** (`PROPOSAL_PARENT`, `VETO_ROLE`, `EXEC_ROLE` for `dao.wei` / `veto.dao.wei` / `exec.dao.wei`).
+
+### Adjustable knobs
+
+`nft` is immutable. `alpha`, `threshold`, and `proposalFee` are adjustable by **governance (a passed proposal) or the executor** (`setAlpha` / `setThreshold` / `setProposalFee`). `threshold` in particular should rise as participation grows.
 
 ### Names as identity — proposals *are* a namespace
 
-Set `proposalParent` to a DAO-owned name (gift it `dao.wei`) and **every proposal atomically mints `<id>.dao.wei` to the DAO and writes its description into that name's resolver** — governance becomes a browsable, resolvable WNS namespace (add a contenthash record and each proposal name can even serve a page via the wei.domains gateway: an on-chain dapp).
-
-The same ownership lets governance mint subdomains as **roles / credentials**: a passed proposal calling `registerSubdomainFor("contributor", daoTokenId, member)` issues `contributor.dao.wei`. Subdomain owners can mint their own sub-subdomains, so governance can delegate a whole subtree (`*.council.dao.wei`) to a committee with one grant, and `dao.wei` itself becomes the DAO's on-chain profile (`setText`).
+While the DAO holds `dao.wei`, **every proposal atomically mints `<id>.dao.wei` to the DAO and writes its description into that name's resolver** — governance becomes a browsable, resolvable WNS namespace (add a contenthash record and each proposal name can serve a page via the wei.domains gateway). A proposer must hold a WNS **primary name** (`reverseResolve`), and `propose` emits it, so feeds read as `alice.wei proposed …`.
 
 ### Caveats
 
-Conviction voting is support-only (opposition = withhold/withdraw support + guardian). Weight is captured at `support` time; a transferred name stays valid, an expired one is permissionlessly prunable. The fixed-point `α^Δ` is conservative and tested (α^7d within 0.5%) but not formally precision-audited — the one thing to review before mainnet.
+Support-only (no explicit "against"). Weight is captured at `support` time; a transferred name stays valid, an expired one is permissionlessly prunable. The fixed-point `α^Δ` is conservative and tested (α^7d within 0.5%) but not formally precision-audited — the one thing to review before mainnet. And the `exec` god-mode key is fully trusted until relinquished.
 
 ## Audits
 

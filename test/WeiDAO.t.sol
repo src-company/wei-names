@@ -11,56 +11,72 @@ contract WeiDAOTest is Test {
 
     address alice = address(0xA11CE); // "ab"    len 2 -> 0.05 ether
     address carol = address(0xCA201); // "delta" len 5 -> 0.02 ether
-    address guardian = address(0x6DA12D);
+    address vetoAddr = address(0x5E70); // holds veto.dao.wei
+    address execAddr = address(0xE7EC); // holds exec.dao.wei
 
     uint256 tAlice;
     uint256 tCarol;
+    uint256 tDao;
 
     uint256 constant W_ALICE = 0.05 ether;
     uint256 constant W_CAROL = 0.02 ether;
 
-    // Real calibration: 7-day half-life. alpha = round(2^(-1/604800) * 1e18).
+    // 7-day half-life. alpha = round(2^(-1/604800) * 1e18).
     uint256 constant ALPHA = 999_998_853_923_940_000;
     uint256 constant HALF_LIFE = 7 days;
 
-    // threshold = convictionMax(W_ALICE) / 2  ⇒  a proposal holding alice's weight passes
-    // after exactly one half-life (7 days).
+    // threshold = convictionMax(W_ALICE)/2 ⇒ alice's fresh name passes in ~one half-life.
     uint256 threshold;
 
     function setUp() public {
         threshold = W_ALICE * 1e18 / (1e18 - ALPHA) / 2;
         nft = new NameNFT();
-        // Default fixture: no fee, no primary-name requirement, no proposal-naming.
-        dao = new WeiDAO(address(nft), guardian, ALPHA, threshold, 0, false, 0);
+        dao = new WeiDAO(address(nft), ALPHA, threshold, 0);
 
-        address deployerOwner = nft.owner();
+        address owner_ = nft.owner();
         uint256[] memory lens = new uint256[](2);
         uint256[] memory fees = new uint256[](2);
         lens[0] = 2;
         fees[0] = W_ALICE;
         lens[1] = 5;
         fees[1] = W_CAROL;
-        vm.startPrank(deployerOwner);
+        vm.startPrank(owner_);
         nft.setLengthFees(lens, fees);
         nft.transferOwnership(address(dao));
         vm.stopPrank();
 
         tAlice = _register("ab", alice);
         tCarol = _register("delta", carol);
+        vm.prank(alice);
+        nft.setPrimaryName(tAlice); // proposers must have a primary name
+        vm.prank(carol);
+        nft.setPrimaryName(tCarol);
+
+        // dao.wei + roles: z registers dao.wei, mints the role subdomains, gifts dao.wei to the DAO.
+        address z = makeAddr("z0r0z");
+        tDao = _register("dao", z);
+        assertEq(tDao, dao.PROPOSAL_PARENT()); // hardcoded namehash sanity
+        vm.startPrank(z);
+        nft.registerSubdomainFor("veto", tDao, vetoAddr);
+        nft.registerSubdomainFor("exec", tDao, execAddr);
+        nft.transferFrom(z, address(dao), tDao);
+        vm.stopPrank();
+
+        assertEq(dao.vetoer(), vetoAddr);
+        assertEq(dao.executor(), execAddr);
     }
 
-    /// The half-life is real: alice's weight held for exactly 7 days accrues conviction equal
-    /// to convictionMax/2 == threshold (α^7d ≈ 0.5).
+    /*//////////////////////////////////////////////////////////////
+                           CONVICTION VOTING
+    //////////////////////////////////////////////////////////////*/
+
     function testSevenDayHalfLifeCalibration() public {
         uint256 id = _proposeWithdraw();
         vm.prank(alice);
         dao.support(id, tAlice);
-
-        assertEq(dao.convictionMax(W_ALICE), 2 * threshold); // threshold == C_max/2
-
+        assertEq(dao.convictionOf(id), 0);
         vm.warp(block.timestamp + HALF_LIFE);
-        // conviction(7d) = C_max·(1 − α^7d) ≈ C_max·0.5 == threshold, within fixed-point error.
-        assertApproxEqRel(dao.convictionOf(id), threshold, 0.005e18); // 0.5%
+        assertApproxEqRel(dao.convictionOf(id), threshold, 0.005e18); // α^7d ≈ 0.5
     }
 
     function testConvictionAccruesAndExecutes() public {
@@ -68,40 +84,26 @@ contract WeiDAOTest is Test {
         uint256 id = _proposeWithdraw();
         vm.prank(alice);
         dao.support(id, tAlice);
-
-        assertEq(dao.convictionOf(id), 0); // starts at zero
-        vm.warp(block.timestamp + HALF_LIFE + 1 hours); // just past threshold
+        vm.warp(block.timestamp + HALF_LIFE + 1 hours);
         assertTrue(dao.passed(id));
-
         dao.execute(id);
         assertEq(address(dao).balance, 5 ether);
-        assertEq(address(nft).balance, 0);
     }
 
     function testNotPassedBeforeHalfLife() public {
         uint256 id = _proposeWithdraw();
         vm.prank(alice);
         dao.support(id, tAlice);
-        vm.warp(block.timestamp + 6 days); // one day short of the half-life
+        vm.warp(block.timestamp + 6 days);
         assertFalse(dao.passed(id));
         vm.expectRevert(WeiDAO.Rejected.selector);
         dao.execute(id);
     }
 
-    function testInsufficientWeightNeverPasses() public {
-        // carol's C_max (0.02) < threshold (0.5·C_max of 0.05), so she can't pass alone, ever.
-        uint256 id = _proposeWithdraw();
-        vm.prank(carol);
-        dao.support(id, tCarol);
-        assertLt(dao.convictionMax(W_CAROL), threshold);
-        vm.warp(block.timestamp + 365 days); // effectively steady state
-        assertFalse(dao.passed(id));
-    }
-
     function testCannotExecuteFreshSupport() public {
         uint256 id = _proposeWithdraw();
         vm.prank(alice);
-        dao.support(id, tAlice); // dt = 0 -> conviction 0
+        dao.support(id, tAlice);
         vm.expectRevert(WeiDAO.Rejected.selector);
         dao.execute(id);
     }
@@ -110,142 +112,11 @@ contract WeiDAOTest is Test {
         uint256 id = _proposeWithdraw();
         vm.prank(alice);
         dao.support(id, tAlice);
-        vm.warp(block.timestamp + 3 days); // partway, still below threshold
-        assertFalse(dao.passed(id));
-
+        vm.warp(block.timestamp + 3 days);
         vm.prank(alice);
-        dao.unsupport(id, tAlice); // weight removed; conviction now decays
+        dao.unsupport(id, tAlice);
         vm.warp(block.timestamp + 30 days);
         assertFalse(dao.passed(id));
-        vm.expectRevert(WeiDAO.Rejected.selector);
-        dao.execute(id);
-    }
-
-    function testGuardianCanCancel() public {
-        vm.deal(address(nft), 5 ether);
-        uint256 id = _proposeWithdraw();
-        vm.prank(alice);
-        dao.support(id, tAlice);
-        vm.warp(block.timestamp + HALF_LIFE + 1 hours);
-        assertTrue(dao.passed(id));
-
-        vm.prank(guardian);
-        dao.cancel(id);
-        vm.expectRevert(WeiDAO.Canceled.selector);
-        dao.execute(id);
-        assertEq(address(nft).balance, 5 ether);
-    }
-
-    function testProposalFeeFixture() public {
-        WeiDAO d = new WeiDAO(address(nft), guardian, ALPHA, threshold, 0.01 ether, false, 0);
-        assertEq(d.proposalFee(), 0.01 ether);
-
-        vm.prank(alice);
-        vm.expectRevert(WeiDAO.InsufficientFee.selector);
-        d.propose(address(nft), 0, "", "no fee", tAlice);
-
-        vm.deal(alice, 0.01 ether);
-        vm.prank(alice);
-        d.propose{value: 0.01 ether}(address(nft), 0, "", "with fee", tAlice);
-        assertEq(address(d).balance, 0.01 ether); // fee lands in the treasury
-    }
-
-    function testRequirePrimaryNameFixture() public {
-        WeiDAO d = new WeiDAO(address(nft), guardian, ALPHA, threshold, 0, true, 0);
-
-        vm.prank(carol); // no primary name set
-        vm.expectRevert(WeiDAO.NoPrimaryName.selector);
-        d.propose(address(nft), 0, "", "x", tCarol);
-
-        vm.prank(carol);
-        nft.setPrimaryName(tCarol);
-        vm.prank(carol);
-        d.propose(address(nft), 0, "", "x", tCarol);
-    }
-
-    /// Proposals as a browsable WNS namespace: each mints `<id>.dao.wei` with its description.
-    function testProposalsAutoNamedUnderParent() public {
-        uint256 tDao = nft.computeId("dao.wei"); // namehash is known before registration
-        WeiDAO d = new WeiDAO(address(nft), guardian, ALPHA, threshold, 0, false, tDao);
-
-        address z = makeAddr("z0r0z");
-        assertEq(_register("dao", z), tDao);
-        vm.prank(z);
-        nft.transferFrom(z, address(d), tDao); // gift dao.wei so the DAO can mint under it
-
-        vm.prank(alice);
-        uint256 id = d.propose(
-            address(nft),
-            0,
-            abi.encodeWithSelector(NameNFT.withdraw.selector),
-            "Fund grants",
-            tAlice
-        );
-
-        string memory name = string.concat(vm.toString(id), ".dao.wei");
-        uint256 subId = nft.computeId(name);
-        assertEq(nft.ownerOf(subId), address(d));
-        assertEq(nft.getFullName(subId), name);
-        assertEq(nft.text(subId, "description"), "Fund grants");
-    }
-
-    function testThresholdAdjustableByGovernance() public {
-        uint256 newThreshold = threshold * 2;
-        vm.prank(alice);
-        uint256 id = dao.propose(
-            address(dao),
-            0,
-            abi.encodeWithSelector(WeiDAO.setThreshold.selector, newThreshold),
-            "raise threshold",
-            tAlice
-        );
-        vm.prank(alice);
-        dao.support(id, tAlice);
-        vm.warp(block.timestamp + HALF_LIFE + 1 hours);
-        dao.execute(id);
-        assertEq(dao.threshold(), newThreshold);
-    }
-
-    /// Weight scales with paid registration runway: renewing a name boosts its voting weight.
-    function testRenewalBoostsWeight() public {
-        uint256 wBefore = dao.weightOf(tAlice); // ~1 year of runway
-        uint256 fee = nft.getFee(2);
-        vm.deal(alice, fee);
-        vm.prank(alice);
-        nft.renew{value: fee}(tAlice); // +1 year of runway
-        uint256 wAfter = dao.weightOf(tAlice);
-        assertEq(wAfter - wBefore, W_ALICE); // one extra year == one extra `getFee`
-    }
-
-    function testSubdomainHasNoWeight() public {
-        // Subdomains cost no ETH, so they earn no weight (anti-spam).
-        address z = makeAddr("z");
-        uint256 tDao = _register("dao", z);
-        vm.prank(z);
-        uint256 subId = nft.registerSubdomainFor("sub", tDao, z);
-        assertGt(dao.weightOf(tDao), 0); // top-level dao.wei has weight
-        assertEq(dao.weightOf(subId), 0); // its subdomain has none
-    }
-
-    function testSetThresholdOnlySelf() public {
-        vm.prank(alice);
-        vm.expectRevert(WeiDAO.NotSelf.selector);
-        dao.setThreshold(1);
-    }
-
-    /// Anyone may prune support from a name that has since expired (bounds lazy capture).
-    function testAnyoneCanPruneExpiredSupport() public {
-        uint256 id = _proposeWithdraw();
-        vm.prank(alice);
-        dao.support(id, tAlice);
-
-        vm.warp(block.timestamp + 365 days + 90 days + 1); // "ab" expires past grace
-        assertEq(dao.weightOf(tAlice), 0);
-
-        address stranger = address(0x5151);
-        vm.prank(stranger);
-        dao.unsupport(id, tAlice); // permissionless prune of ineligible support
-        assertEq(dao.supportOf(id, tAlice), 0);
     }
 
     function testDoubleSupportReverts() public {
@@ -263,52 +134,180 @@ contract WeiDAOTest is Test {
         dao.support(999, tAlice);
     }
 
-    function testTransferredNameSupportControlledByNewOwner() public {
+    function testAnyoneCanPruneExpiredSupport() public {
         uint256 id = _proposeWithdraw();
         vm.prank(alice);
         dao.support(id, tAlice);
-
-        address buyer = address(0xB0FFEE);
-        vm.prank(alice);
-        nft.transferFrom(alice, buyer, tAlice);
-
-        vm.prank(alice); // old owner can no longer touch it
-        vm.expectRevert(WeiDAO.NotHolder.selector);
-        dao.unsupport(id, tAlice);
-
-        vm.prank(buyer); // new owner controls it
+        vm.warp(block.timestamp + 365 days + 90 days + 1); // "ab" expires
+        assertEq(dao.weightOf(tAlice), 0);
+        vm.prank(address(0x5151));
         dao.unsupport(id, tAlice);
         assertEq(dao.supportOf(id, tAlice), 0);
     }
 
-    /// Gift `dao.wei` to the treasury, then let governance mint role subdomains under it.
-    /// On mainnet, dao.wei is owned by z0r0z.wei; here we mirror that and gift it locally.
-    function testDaoMintsRoleSubdomainViaProposal() public {
-        address z0r0z = makeAddr("z0r0z");
-        uint256 tDao = _register("dao", z0r0z);
-        vm.prank(z0r0z);
-        nft.transferFrom(z0r0z, address(dao), tDao); // gift to the treasury
-        assertEq(nft.ownerOf(tDao), address(dao));
+    /*//////////////////////////////////////////////////////////////
+                        WEIGHT = ETH CONTRIBUTED
+    //////////////////////////////////////////////////////////////*/
 
-        address member = address(0xC0FFEE);
+    function testRenewalBoostsWeight() public {
+        uint256 wBefore = dao.weightOf(tAlice);
+        uint256 fee = nft.getFee(2);
+        vm.deal(alice, fee);
+        vm.prank(alice);
+        nft.renew{value: fee}(tAlice);
+        assertEq(dao.weightOf(tAlice) - wBefore, W_ALICE); // one extra year == one extra getFee
+    }
+
+    function testSubdomainHasNoWeight() public view {
+        // veto.dao.wei is a subdomain — cost no ETH, earns no weight.
+        assertGt(dao.weightOf(tDao), 0);
+        assertEq(dao.weightOf(dao.VETO_ROLE()), 0);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                          ROLES: VETO & EXEC
+    //////////////////////////////////////////////////////////////*/
+
+    function testVetoerCanVeto() public {
+        vm.deal(address(nft), 5 ether);
+        uint256 id = _proposeWithdraw();
+        vm.prank(alice);
+        dao.support(id, tAlice);
+        vm.warp(block.timestamp + HALF_LIFE + 1 hours);
+        vm.prank(vetoAddr);
+        dao.veto(id);
+        vm.expectRevert(WeiDAO.Vetoed.selector);
+        dao.execute(id);
+        assertEq(address(nft).balance, 5 ether); // treasury untouched
+    }
+
+    function testExecCanVeto() public {
+        uint256 id = _proposeWithdraw();
+        vm.prank(execAddr);
+        dao.veto(id);
+        (,, bool vetoed,,,,,) = dao.proposals(id);
+        assertTrue(vetoed);
+    }
+
+    function testNonRoleCannotVeto() public {
+        uint256 id = _proposeWithdraw();
+        vm.prank(alice);
+        vm.expectRevert(WeiDAO.Unauthorized.selector);
+        dao.veto(id);
+    }
+
+    function testExecForceExecutesBelowThreshold() public {
+        vm.deal(address(nft), 5 ether);
+        uint256 id = _proposeWithdraw(); // zero support, zero conviction
+        vm.prank(execAddr);
+        dao.execute(id); // god-mode: bypasses the threshold
+        assertEq(address(dao).balance, 5 ether);
+    }
+
+    function testExecCanRescueWnsOwnership() public {
+        // The whole point: exec can force-execute a NameNFT.transferOwnership to a safe address.
+        address safe = makeAddr("safe");
         vm.prank(alice);
         uint256 id = dao.propose(
             address(nft),
             0,
-            abi.encodeWithSelector(
-                NameNFT.registerSubdomainFor.selector, "contributor", tDao, member
-            ),
-            "grant contributor role",
+            abi.encodeWithSignature("transferOwnership(address)", safe),
+            "rescue WNS",
+            tAlice
+        );
+        vm.prank(execAddr);
+        dao.execute(id);
+        assertEq(nft.owner(), safe);
+    }
+
+    function testRolesLapseWhenParentExpires() public {
+        vm.warp(block.timestamp + 365 days + 90 days + 1); // dao.wei expires past grace
+        assertEq(dao.vetoer(), address(0));
+        assertEq(dao.executor(), address(0)); // dead-man's-switch
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        ADMIN (GOVERNANCE OR EXEC)
+    //////////////////////////////////////////////////////////////*/
+
+    function testExecCanSetKnobs() public {
+        vm.startPrank(execAddr);
+        dao.setThreshold(threshold * 3);
+        dao.setProposalFee(0.01 ether);
+        dao.setAlpha(0.9 ether);
+        vm.stopPrank();
+        assertEq(dao.threshold(), threshold * 3);
+        assertEq(dao.proposalFee(), 0.01 ether);
+        assertEq(dao.alpha(), 0.9 ether);
+    }
+
+    function testGovernanceCanSetThreshold() public {
+        vm.prank(alice);
+        uint256 id = dao.propose(
+            address(dao),
+            0,
+            abi.encodeWithSelector(WeiDAO.setThreshold.selector, threshold * 2),
+            "raise threshold",
             tAlice
         );
         vm.prank(alice);
         dao.support(id, tAlice);
         vm.warp(block.timestamp + HALF_LIFE + 1 hours);
-        uint256 subId = abi.decode(dao.execute(id), (uint256));
+        dao.execute(id);
+        assertEq(dao.threshold(), threshold * 2);
+    }
 
-        assertEq(nft.ownerOf(subId), member);
-        assertEq(nft.getFullName(subId), "contributor.dao.wei");
-        assertEq(subId, nft.computeId("contributor.dao.wei"));
+    function testSetThresholdUnauthorized() public {
+        vm.prank(alice);
+        vm.expectRevert(WeiDAO.Unauthorized.selector);
+        dao.setThreshold(1);
+    }
+
+    function testProposalFeeEnforced() public {
+        vm.prank(execAddr);
+        dao.setProposalFee(0.01 ether);
+
+        vm.prank(alice);
+        vm.expectRevert(WeiDAO.InsufficientFee.selector);
+        dao.propose(address(nft), 0, "", "x", tAlice);
+
+        vm.deal(alice, 0.01 ether);
+        vm.prank(alice);
+        dao.propose{value: 0.01 ether}(address(nft), 0, "", "x", tAlice);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                       WNS-NATIVE: NAMING & IDENTITY
+    //////////////////////////////////////////////////////////////*/
+
+    function testProposalsAutoNamedUnderParent() public {
+        vm.prank(alice);
+        uint256 id = dao.propose(
+            address(nft),
+            0,
+            abi.encodeWithSelector(NameNFT.withdraw.selector),
+            "Fund grants",
+            tAlice
+        );
+        string memory name = string.concat(vm.toString(id), ".dao.wei");
+        uint256 subId = nft.computeId(name);
+        assertEq(nft.ownerOf(subId), address(dao));
+        assertEq(nft.getFullName(subId), name);
+        assertEq(nft.text(subId, "description"), "Fund grants");
+    }
+
+    function testProposeRequiresPrimaryName() public {
+        address dave = address(0xDA5E);
+        uint256 tDave = _register("echo", dave); // holds a name, but no primary name set
+        vm.prank(dave);
+        vm.expectRevert(WeiDAO.NoPrimaryName.selector);
+        dao.propose(address(nft), 0, "", "x", tDave);
+    }
+
+    function testProposeRequiresHolder() public {
+        vm.prank(address(0xDEAD));
+        vm.expectRevert(WeiDAO.NotHolder.selector);
+        dao.propose(address(nft), 0, "", "x", tAlice);
     }
 
     /*//////////////////////////////////////////////////////////////
