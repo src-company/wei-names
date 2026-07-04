@@ -635,6 +635,75 @@ const results = await multicall.aggregate3([
 
 ---
 
+## Governance (WeiDAO)
+
+`WeiDAO.sol` is an optional, minimal Merkle-snapshot DAO that can own `NameNFT`. It is both the **treasury** (holds ETH + NFTs) and the **governor** (WNS holders vote to move funds and administer WNS). Named in homage to Wei Dai. Imports are Solady-only (`MerkleProofLib`, `accounts/Receiver`).
+
+### Setup
+
+Deploy `WeiDAO(nameNFT, guardian)`, then hand WNS to it once:
+
+```solidity
+NameNFT.transferOwnership(weiDAO);
+```
+
+From then on `WeiDAO` is the `owner` of `NameNFT`: it receives `withdraw()` fees and is the only account that can call NameNFT's `onlyOwner` setters — reachable *only* through a passed proposal. `WeiDAO` has no admin key of its own.
+
+### One name, one vote
+
+WNS names are unique ERC-721 IDs, so **the tokenId is its own snapshot key** — no ERC-20-style balance checkpoints. You vote a *name*, and the name is marked as having voted on that proposal, so transferring it mid-vote cannot double-count it.
+
+Each vote is fully verified on-chain:
+
+| Check | Enforced by |
+|---|---|
+| Name is in the proposal's snapshot | Merkle `root` (leaf = `keccak(bytes.concat(keccak(abi.encode(tokenId))))`) |
+| Caller currently holds the name | `NameNFT.ownerOf(tokenId)` |
+| Name hasn't already voted | `tokenVoted[id][tokenId]` |
+| Voting weight | recomputed here from `NameNFT.getFee(byteLength(label))` — proposer cannot forge it |
+
+### Weight = expected contribution, ranked by length
+
+A name's weight is `NameNFT.getFee(byteLength(label))`: exactly what a name of that length pays to register/renew under the **current on-chain fee config**. Shorter, pricier names rank higher precisely to the degree the live config prices them so; under the flat default config, one name = one vote. Only active top-level names (`parent == 0`, not expired) are eligible.
+
+### Lifecycle
+
+```
+propose ──► vote (3 days) ──► voting closes ──► timelock (2 days) ──► execute
+                                    │                                    ▲
+                                    └──────── guardian.cancel() ─────────┘
+```
+
+| Function | Who | Effect |
+|---|---|---|
+| `propose(target, value, data, root, totalWeight, snapshotBlock, description, proposerTokenId)` | any name holder | Opens a proposal to run `target.call{value}(data)` (e.g. `NameNFT.withdraw()`, `setDefaultFee(...)`, or paying out treasury ETH). `proposerTokenId` is an anti-spam gate. |
+| `vote(id, tokenId, support, proof)` / `voteBatch(...)` | name holders | Adds the name's on-chain weight to for/against. |
+| `execute(id)` | anyone | After voting closes **and** the timelock elapses, runs the call if it passed: `forVotes > againstVotes` and `forVotes ≥ QUORUM_BPS` (20%) of `totalWeight`. |
+| `cancel(id)` | guardian only | Vetoes a not-yet-executed proposal. |
+
+### The guardian
+
+The `root` is author-supplied and proposing is permissionless. Because a WNS tokenId (`keccak(WEI_NODE, keccak(label))`) is computable *before* a name exists, a malicious proposer could commit a root over names they then register and out-vote honest holders with freshly minted, fee-recoverable weight — draining the treasury. On this immutable, non-enumerable NFT, no on-chain check can prove a root reflects the true pre-proposal electorate, so safety is a break-glass rather than a mechanism:
+
+- **Timelock** (`EXECUTION_DELAY = 2 days`) — a window after voting closes for watchers to react.
+- **Guardian** — may *only* `cancel` a not-yet-executed proposal. It can never propose, vote, execute, move funds, or change settings. Worst case it censors; it can **never steal**. Set `guardian = address(0)` to disable and run fully permissionless (accepting the drain risk). In practice, a community multisig.
+
+So the chain enforces every *positive* action (weight, ownership, one-vote-per-name, majority, quorum, timelock); the guardian holds a single emergency stop that can only ever say "no."
+
+### Parameters
+
+| Constant | Value |
+|---|---|
+| `VOTING_PERIOD` | 3 days |
+| `EXECUTION_DELAY` | 2 days |
+| `QUORUM_BPS` | 2000 (20% of `totalWeight` must vote "for") |
+
+### Off-chain
+
+Because names aren't enumerable on-chain, an indexer builds the snapshot from public `NameRegistered`/`Transfer` logs: enumerate eligible tokenIds at `snapshotBlock`, build the Merkle tree (leaf = tokenId), and sum `getFee(length)` for `totalWeight`. Since leaves carry no proposer-chosen data, the root is deterministic — anyone can recompute it and verify a proposal's snapshot.
+
+---
+
 ## Audits
 
 AI-assisted audits performed on the codebase:
