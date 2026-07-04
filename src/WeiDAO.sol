@@ -102,6 +102,9 @@ contract WeiDAO is Receiver {
     /// @dev Fixed-point scale for `alpha`, conviction, and weights.
     uint256 internal constant SCALE = 1e18;
 
+    /// @dev One registration/renewal period in NameNFT (weight is measured in these units).
+    uint256 internal constant REGISTRATION_PERIOD = 365 days;
+
     /// @notice WNS NameNFT.
     INameNFT public immutable nft;
 
@@ -286,12 +289,16 @@ contract WeiDAO is Receiver {
                                  VIEWS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice A name's weight: its expected contribution under the live fee config (0 if
-    ///         not an active top-level name).
+    /// @notice A name's weight: its ETH contribution to WNS — fee-per-length × registration
+    ///         runway. `getFee(byteLength) · (expiresAt − now) / REGISTRATION_PERIOD`.
+    /// @dev Only active top-level names count (subdomains cost no ETH → 0 weight, so they can't
+    ///      be spam-minted for power). Weight scales with how far a name is paid ahead, so
+    ///      renewing *boosts* voting power and a near-expiry name is nudged to renew. Both the
+    ///      fee tier (short = pricier) and the paid duration are things that cost ETH in WNS.
     function weightOf(uint256 tokenId) public view returns (uint256) {
         (string memory label, uint256 parent, uint64 exp,,) = nft.records(tokenId);
-        if (parent != 0 || bytes(label).length == 0 || block.timestamp > exp) return 0;
-        return nft.getFee(bytes(label).length);
+        if (parent != 0 || bytes(label).length == 0 || block.timestamp >= exp) return 0;
+        return nft.getFee(bytes(label).length) * (exp - block.timestamp) / REGISTRATION_PERIOD;
     }
 
     /// @notice A proposal's conviction right now (accruing from its current support weight).

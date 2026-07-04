@@ -206,6 +206,27 @@ contract WeiDAOTest is Test {
         assertEq(dao.threshold(), newThreshold);
     }
 
+    /// Weight scales with paid registration runway: renewing a name boosts its voting weight.
+    function testRenewalBoostsWeight() public {
+        uint256 wBefore = dao.weightOf(tAlice); // ~1 year of runway
+        uint256 fee = nft.getFee(2);
+        vm.deal(alice, fee);
+        vm.prank(alice);
+        nft.renew{value: fee}(tAlice); // +1 year of runway
+        uint256 wAfter = dao.weightOf(tAlice);
+        assertEq(wAfter - wBefore, W_ALICE); // one extra year == one extra `getFee`
+    }
+
+    function testSubdomainHasNoWeight() public {
+        // Subdomains cost no ETH, so they earn no weight (anti-spam).
+        address z = makeAddr("z");
+        uint256 tDao = _register("dao", z);
+        vm.prank(z);
+        uint256 subId = nft.registerSubdomainFor("sub", tDao, z);
+        assertGt(dao.weightOf(tDao), 0); // top-level dao.wei has weight
+        assertEq(dao.weightOf(subId), 0); // its subdomain has none
+    }
+
     function testSetThresholdOnlySelf() public {
         vm.prank(alice);
         vm.expectRevert(WeiDAO.NotSelf.selector);
