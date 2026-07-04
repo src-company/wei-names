@@ -30,7 +30,8 @@ contract WeiDAOTest is Test {
     function setUp() public {
         threshold = W_ALICE * 1e18 / (1e18 - ALPHA) / 2;
         nft = new NameNFT();
-        dao = new WeiDAO(address(nft), guardian, ALPHA, threshold);
+        // Default fixture: no fee, no primary-name requirement, no proposal-naming.
+        dao = new WeiDAO(address(nft), guardian, ALPHA, threshold, 0, false, 0);
 
         address deployerOwner = nft.owner();
         uint256[] memory lens = new uint256[](2);
@@ -135,61 +136,57 @@ contract WeiDAOTest is Test {
         assertEq(address(nft).balance, 5 ether);
     }
 
-    function testProposalFeeGovernance() public {
-        vm.prank(alice);
-        uint256 id = dao.propose(
-            address(dao),
-            0,
-            abi.encodeWithSelector(WeiDAO.setProposalFee.selector, uint256(0.01 ether)),
-            "set fee",
-            tAlice
-        );
-        vm.prank(alice);
-        dao.support(id, tAlice);
-        vm.warp(block.timestamp + HALF_LIFE + 1 hours);
-        dao.execute(id);
-        assertEq(dao.proposalFee(), 0.01 ether);
+    function testProposalFeeFixture() public {
+        WeiDAO d = new WeiDAO(address(nft), guardian, ALPHA, threshold, 0.01 ether, false, 0);
+        assertEq(d.proposalFee(), 0.01 ether);
 
         vm.prank(alice);
         vm.expectRevert(WeiDAO.InsufficientFee.selector);
-        dao.propose(address(nft), 0, "", "no fee", tAlice);
+        d.propose(address(nft), 0, "", "no fee", tAlice);
 
-        uint256 bal = address(dao).balance;
         vm.deal(alice, 0.01 ether);
         vm.prank(alice);
-        dao.propose{value: 0.01 ether}(address(nft), 0, "", "with fee", tAlice);
-        assertEq(address(dao).balance, bal + 0.01 ether);
+        d.propose{value: 0.01 ether}(address(nft), 0, "", "with fee", tAlice);
+        assertEq(address(d).balance, 0.01 ether); // fee lands in the treasury
     }
 
-    function testSetProposalFeeOnlySelf() public {
-        vm.prank(alice);
-        vm.expectRevert(WeiDAO.NotSelf.selector);
-        dao.setProposalFee(1 ether);
-    }
+    function testRequirePrimaryNameFixture() public {
+        WeiDAO d = new WeiDAO(address(nft), guardian, ALPHA, threshold, 0, true, 0);
 
-    function testRequirePrimaryNameGovernance() public {
-        vm.prank(alice);
-        uint256 id = dao.propose(
-            address(dao),
-            0,
-            abi.encodeWithSelector(WeiDAO.setRequirePrimaryName.selector, true),
-            "require primary name",
-            tAlice
-        );
-        vm.prank(alice);
-        dao.support(id, tAlice);
-        vm.warp(block.timestamp + HALF_LIFE + 1 hours);
-        dao.execute(id);
-        assertTrue(dao.requirePrimaryName());
-
-        vm.prank(carol);
+        vm.prank(carol); // no primary name set
         vm.expectRevert(WeiDAO.NoPrimaryName.selector);
-        dao.propose(address(nft), 0, "", "x", tCarol);
+        d.propose(address(nft), 0, "", "x", tCarol);
 
         vm.prank(carol);
         nft.setPrimaryName(tCarol);
         vm.prank(carol);
-        dao.propose(address(nft), 0, "", "x", tCarol);
+        d.propose(address(nft), 0, "", "x", tCarol);
+    }
+
+    /// Proposals as a browsable WNS namespace: each mints `<id>.dao.wei` with its description.
+    function testProposalsAutoNamedUnderParent() public {
+        uint256 tDao = nft.computeId("dao.wei"); // namehash is known before registration
+        WeiDAO d = new WeiDAO(address(nft), guardian, ALPHA, threshold, 0, false, tDao);
+
+        address z = makeAddr("z0r0z");
+        assertEq(_register("dao", z), tDao);
+        vm.prank(z);
+        nft.transferFrom(z, address(d), tDao); // gift dao.wei so the DAO can mint under it
+
+        vm.prank(alice);
+        uint256 id = d.propose(
+            address(nft),
+            0,
+            abi.encodeWithSelector(NameNFT.withdraw.selector),
+            "Fund grants",
+            tAlice
+        );
+
+        string memory name = string.concat(vm.toString(id), ".dao.wei");
+        uint256 subId = nft.computeId(name);
+        assertEq(nft.ownerOf(subId), address(d));
+        assertEq(nft.getFullName(subId), name);
+        assertEq(nft.text(subId, "description"), "Fund grants");
     }
 
     /// Anyone may prune support from a name that has since expired (bounds lazy capture).

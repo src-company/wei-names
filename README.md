@@ -641,7 +641,7 @@ const results = await multicall.aggregate3([
 
 ### Setup
 
-Deploy `WeiDAO(nameNFT, guardian, alpha, threshold)`, then hand WNS to it once:
+Deploy `WeiDAO(nameNFT, guardian, alpha, threshold, proposalFee, requirePrimaryName, proposalParent)`, then hand WNS to it once:
 
 ```solidity
 NameNFT.transferOwnership(weiDAO);
@@ -679,20 +679,23 @@ A name's weight is `NameNFT.getFee(byteLength(label))`: what a name of that leng
 
 Conviction's ramp is itself the timelock — a proposal is visible accruing for days before it can pass, so watchers have warning. An immutable `guardian` may *only* `cancel` a not-yet-executed proposal (never propose, support, execute, move funds, or change settings). Worst case it censors; it can **never steal**. Set `guardian = address(0)` to disable.
 
-### Governed parameters (self-call)
+### Immutable fixtures
 
-Because WeiDAO has no owner, it tunes its own knobs via the `msg.sender == address(this)` pattern — a setter reachable only through a passed proposal targeting the DAO itself:
+WeiDAO is a solid fixture on top of WNS: its own knobs are **immutable**, set at deploy and never governed. Governance only ever acts *outward* (treasury + WNS admin) — there are no self-tuning setters.
 
-| Parameter | Setter | Default | Effect |
-|---|---|---|---|
-| `proposalFee` | `setProposalFee(uint256)` | `0` | ETH required to `propose` (payable); paid into the treasury as anti-spam / interest alignment. |
-| `requirePrimaryName` | `setRequirePrimaryName(bool)` | `false` | When on, a proposer must have a WNS primary name (`reverseResolve`). |
+| Fixture | Effect |
+|---|---|
+| `proposalFee` | ETH required to `propose` (payable); paid into the treasury as anti-spam. |
+| `requirePrimaryName` | If set, a proposer must have a WNS primary name (`reverseResolve`). |
+| `proposalParent` | If set to a DAO-owned name, proposals are auto-named under it (below). |
 
 `propose` also emits the proposer's primary name in `ProposalCreated`, so feeds read as `alice.wei proposed …` for free.
 
-### Names as identity
+### Names as identity — proposals *are* a namespace
 
-Because WeiDAO owns `NameNFT` admin and can custody names, gift it a parent name (e.g. `dao.wei`) and proposals can mint subdomains under it as **roles / credentials**: a passed proposal calling `registerSubdomainFor("contributor", daoTokenId, member)` issues `contributor.dao.wei`. Subdomain owners can mint their own sub-subdomains, so governance can delegate a whole subtree (`*.council.dao.wei`) to a committee with one grant, and `dao.wei` itself becomes the DAO's on-chain profile (`setText`).
+Set `proposalParent` to a DAO-owned name (gift it `dao.wei`) and **every proposal atomically mints `<id>.dao.wei` to the DAO and writes its description into that name's resolver** — governance becomes a browsable, resolvable WNS namespace (add a contenthash record and each proposal name can even serve a page via the wei.domains gateway: an on-chain dapp).
+
+The same ownership lets governance mint subdomains as **roles / credentials**: a passed proposal calling `registerSubdomainFor("contributor", daoTokenId, member)` issues `contributor.dao.wei`. Subdomain owners can mint their own sub-subdomains, so governance can delegate a whole subtree (`*.council.dao.wei`) to a committee with one grant, and `dao.wei` itself becomes the DAO's on-chain profile (`setText`).
 
 ### Caveats
 

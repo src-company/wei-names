@@ -2,6 +2,7 @@
 pragma solidity ^0.8.30;
 
 import {Receiver} from "solady/accounts/Receiver.sol";
+import {LibString} from "solady/utils/LibString.sol";
 
 /// @title WeiDAO
 /// @notice Conviction-voting DAO + treasury for the Wei Name Service.
@@ -31,10 +32,14 @@ import {Receiver} from "solady/accounts/Receiver.sol";
 /// it can pass, so watchers have warning. An immutable `guardian` may still only `cancel` a
 /// not-yet-executed proposal (never propose, support, execute, or steal). `address(0)` disables.
 ///
-/// ── Governed knobs, WNS-native ─────────────────────────────────────────────────────────
-/// Ownerless self-governance (setter callable only via a passed proposal targeting the DAO):
-/// `proposalFee` (payable propose, anti-spam into the treasury) and `requirePrimaryName`
-/// (proposer must have a WNS primary name). `propose` also emits the proposer's primary name.
+/// ── Immutable fixtures, WNS-native ─────────────────────────────────────────────────────
+/// The DAO is a fixed fixture: its own knobs are immutable (set at deploy, never governed).
+/// Governance only ever acts *outward* (treasury + WNS admin). Fixtures:
+/// • `proposalFee` — ETH to `propose` (payable), paid into the treasury as anti-spam.
+/// • `requirePrimaryName` — if set, a proposer must have a WNS primary name.
+/// • `proposalParent` — if set to a DAO-owned name (e.g. dao.wei), every proposal atomically
+///   mints `<id>.dao.wei` to the DAO and writes its description into that name's resolver, so
+///   governance is a browsable WNS namespace. `propose` also emits the proposer's primary name.
 ///
 /// ── Caveats ────────────────────────────────────────────────────────────────────────────
 /// • Conviction voting is support-only; opposition is expressed by withholding/withdrawing
@@ -49,7 +54,6 @@ contract WeiDAO is Receiver {
                                  ERRORS
     //////////////////////////////////////////////////////////////*/
 
-    error NotSelf();
     error Canceled();
     error Rejected();
     error NotHolder();
@@ -84,8 +88,7 @@ contract WeiDAO is Receiver {
     );
     event ProposalExecuted(uint256 indexed id, bytes result);
     event ProposalCanceled(uint256 indexed id);
-    event ProposalFeeSet(uint256 fee);
-    event RequirePrimaryNameSet(bool required);
+    event ProposalNamed(uint256 indexed id, uint256 indexed subTokenId);
 
     /*//////////////////////////////////////////////////////////////
                                 CONSTANTS
@@ -112,6 +115,17 @@ contract WeiDAO is Receiver {
     ///      the 7-day alpha above, 7 days); more weight passes sooner, less never reaches.
     uint256 public immutable threshold;
 
+    /// @notice ETH required to open a proposal (anti-spam, paid to the treasury). Fixed at deploy.
+    uint256 public immutable proposalFee;
+
+    /// @notice If true, a proposer must have a WNS primary name (`reverseResolve`). Fixed at deploy.
+    bool public immutable requirePrimaryName;
+
+    /// @notice If nonzero, every proposal atomically mints `<id>.<this name>` to the DAO and writes
+    ///         its description into that subdomain's resolver — governance as a browsable WNS
+    ///         namespace. Set to a DAO-owned parent (e.g. dao.wei, gifted + kept renewed). Fixed.
+    uint256 public immutable proposalParent;
+
     /*//////////////////////////////////////////////////////////////
                                  STORAGE
     //////////////////////////////////////////////////////////////*/
@@ -128,17 +142,23 @@ contract WeiDAO is Receiver {
     }
 
     uint256 public proposalCount;
-    /// @notice ETH required to open a proposal (anti-spam, paid to the treasury). DAO-tunable.
-    uint256 public proposalFee;
-    /// @notice If true, a proposer must have a WNS primary name. DAO-tunable.
-    bool public requirePrimaryName;
-
     mapping(uint256 => Proposal) public proposals;
     mapping(uint256 => mapping(uint256 => uint256)) public supportOf; // id => tokenId => weight backing (0 = none)
 
-    constructor(address nameNFT, address guardian_, uint256 alpha_, uint256 threshold_) payable {
+    constructor(
+        address nameNFT,
+        address guardian_,
+        uint256 alpha_,
+        uint256 threshold_,
+        uint256 proposalFee_,
+        bool requirePrimaryName_,
+        uint256 proposalParent_
+    ) payable {
         require(alpha_ != 0 && alpha_ < SCALE && threshold_ != 0);
         nft = INameNFT(nameNFT);
+        proposalFee = proposalFee_;
+        requirePrimaryName = requirePrimaryName_;
+        proposalParent = proposalParent_;
         guardian = guardian_;
         alpha = alpha_;
         threshold = threshold_;
@@ -175,20 +195,14 @@ contract WeiDAO is Receiver {
         p.data = data;
 
         emit ProposalCreated(id, msg.sender, target, value, data, description, proposerName);
-    }
 
-    /// @notice Set the proposal fee. Callable only by the DAO itself (via a passed proposal).
-    function setProposalFee(uint256 fee) external {
-        if (msg.sender != address(this)) revert NotSelf();
-        proposalFee = fee;
-        emit ProposalFeeSet(fee);
-    }
-
-    /// @notice Toggle the primary-name requirement. Callable only by the DAO itself.
-    function setRequirePrimaryName(bool required) external {
-        if (msg.sender != address(this)) revert NotSelf();
-        requirePrimaryName = required;
-        emit RequirePrimaryNameSet(required);
+        // If configured, mint `<id>.<proposalParent>` to the DAO and record the proposal on it.
+        uint256 parent = proposalParent;
+        if (parent != 0) {
+            uint256 subId = nft.registerSubdomainFor(LibString.toString(id), parent, address(this));
+            nft.setText(subId, "description", description);
+            emit ProposalNamed(id, subId);
+        }
     }
 
     /// @notice Back a proposal with a name you own; its weight begins accruing conviction.
@@ -318,6 +332,10 @@ interface INameNFT {
     function ownerOf(uint256 id) external view returns (address);
     function getFee(uint256 length) external view returns (uint256);
     function reverseResolve(address addr) external view returns (string memory);
+    function registerSubdomainFor(string calldata label, uint256 parentId, address to)
+        external
+        returns (uint256);
+    function setText(uint256 tokenId, string calldata key, string calldata value) external;
     function records(uint256 id)
         external
         view
