@@ -710,6 +710,16 @@ So the chain enforces every *positive* action (seasoning, weight, ownership, one
 | `EXECUTION_DELAY` | 2 days |
 | `quorum` | set at deploy (absolute "for" weight floor) |
 
+### Variant: conviction voting (`WeiDAOConviction.sol`, prototype)
+
+An alternative anti-flash-mint model that needs **no enrollment, no maturity clock, and no voting deadline**. Instead of discrete ballots, you `support(id, tokenId)` a proposal and its *conviction* accrues over time from the weight backing it, decaying when support is withdrawn:
+
+```
+conviction' = conviction · α^Δ  +  supportWeight · (1 − α^Δ) / (1 − α)
+```
+
+A proposal executes once conviction ≥ `threshold`. Because conviction starts at 0 and needs *sustained* support, freshly-minted weight has ~no immediate effect — the ramp itself is the flash-mint defense and the guardian's warning window. It's support-only (no "against"), weight is captured lazily at `support` time, and the fixed-point `α^Δ` isn't precision-audited — hence a prototype for comparison, not the shipped path.
+
 ---
 
 ## Audits
