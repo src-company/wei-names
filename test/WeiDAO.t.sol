@@ -196,28 +196,27 @@ contract WeiDAOTest is Test {
         dao.veto(id);
     }
 
-    function testExecForceExecutesBelowThreshold() public {
-        vm.deal(address(nft), 5 ether);
-        uint256 id = _proposeWithdraw(); // zero support, zero conviction
+    function testExecRescueSpendsTreasuryDirectly() public {
+        // God-mode is a one-shot: no proposal, no vote.
+        vm.deal(address(dao), 1 ether);
+        address safe = makeAddr("safe");
         vm.prank(execAddr);
-        dao.execute(id); // god-mode: bypasses the threshold
-        assertEq(address(dao).balance, 5 ether);
+        dao.rescue(safe, 1 ether, "");
+        assertEq(safe.balance, 1 ether);
     }
 
     function testExecCanRescueWnsOwnership() public {
-        // The whole point: exec can force-execute a NameNFT.transferOwnership to a safe address.
+        // The whole point: exec directly rescues WNS by calling NameNFT.transferOwnership.
         address safe = makeAddr("safe");
-        vm.prank(alice);
-        uint256 id = dao.propose(
-            address(nft),
-            0,
-            abi.encodeWithSignature("transferOwnership(address)", safe),
-            "rescue WNS",
-            tAlice
-        );
         vm.prank(execAddr);
-        dao.execute(id);
+        dao.rescue(address(nft), 0, abi.encodeWithSignature("transferOwnership(address)", safe));
         assertEq(nft.owner(), safe);
+    }
+
+    function testNonExecCannotRescue() public {
+        vm.prank(alice);
+        vm.expectRevert(WeiDAO.Unauthorized.selector);
+        dao.rescue(address(nft), 0, "");
     }
 
     function testRolesLapseWhenParentExpires() public {
@@ -247,8 +246,7 @@ contract WeiDAOTest is Test {
             address(dao),
             0,
             abi.encodeWithSelector(WeiDAO.setThreshold.selector, threshold * 2),
-            "raise threshold",
-            tAlice
+            "raise threshold"
         );
         vm.prank(alice);
         dao.support(id, tAlice);
@@ -269,11 +267,11 @@ contract WeiDAOTest is Test {
 
         vm.prank(alice);
         vm.expectRevert(WeiDAO.InsufficientFee.selector);
-        dao.propose(address(nft), 0, "", "x", tAlice);
+        dao.propose(address(nft), 0, "", "x");
 
         vm.deal(alice, 0.01 ether);
         vm.prank(alice);
-        dao.propose{value: 0.01 ether}(address(nft), 0, "", "x", tAlice);
+        dao.propose{value: 0.01 ether}(address(nft), 0, "", "x");
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -283,11 +281,7 @@ contract WeiDAOTest is Test {
     function testProposalsAutoNamedUnderParent() public {
         vm.prank(alice);
         uint256 id = dao.propose(
-            address(nft),
-            0,
-            abi.encodeWithSelector(NameNFT.withdraw.selector),
-            "Fund grants",
-            tAlice
+            address(nft), 0, abi.encodeWithSelector(NameNFT.withdraw.selector), "Fund grants"
         );
         string memory name = string.concat(vm.toString(id), ".dao.wei");
         uint256 subId = nft.computeId(name);
@@ -298,16 +292,22 @@ contract WeiDAOTest is Test {
 
     function testProposeRequiresPrimaryName() public {
         address dave = address(0xDA5E);
-        uint256 tDave = _register("echo", dave); // holds a name, but no primary name set
+        _register("echo", dave); // holds a name, but no primary name set
         vm.prank(dave);
         vm.expectRevert(WeiDAO.NoPrimaryName.selector);
-        dao.propose(address(nft), 0, "", "x", tDave);
+        dao.propose(address(nft), 0, "", "x");
     }
 
-    function testProposeRequiresHolder() public {
-        vm.prank(address(0xDEAD));
-        vm.expectRevert(WeiDAO.NotHolder.selector);
-        dao.propose(address(nft), 0, "", "x", tAlice);
+    function testSubdomainPrimaryCannotPropose() public {
+        // A proposer's primary name must be a weighted top-level name; a subdomain earns 0.
+        address bob = address(0xB0B);
+        vm.prank(carol);
+        uint256 subId = nft.registerSubdomainFor("bob", tCarol, bob);
+        vm.prank(bob);
+        nft.setPrimaryName(subId);
+        vm.prank(bob);
+        vm.expectRevert(WeiDAO.NotEligible.selector);
+        dao.propose(address(nft), 0, "", "x");
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -317,7 +317,7 @@ contract WeiDAOTest is Test {
     function _proposeWithdraw() internal returns (uint256 id) {
         vm.prank(alice);
         id = dao.propose(
-            address(nft), 0, abi.encodeWithSelector(NameNFT.withdraw.selector), "withdraw", tAlice
+            address(nft), 0, abi.encodeWithSelector(NameNFT.withdraw.selector), "withdraw"
         );
     }
 

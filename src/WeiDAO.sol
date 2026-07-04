@@ -7,10 +7,10 @@ import {LibString} from "solady/utils/LibString.sol";
 /// @title WeiDAO
 /// @notice Conviction-voting DAO + treasury for the Wei Name Service.
 /// @dev In homage to Wei Dai. A treasury (holds ETH + NFTs via {Receiver}) that WNS holders
-///      steer by *conviction voting*: no enrollment, no maturity clock, no voting deadline or
-///      timelock — the accrual ramp is intrinsically flash-mint-resistant. See caveats below.
+///      steer by *conviction voting*: no voting deadline, no timelock — the accrual ramp is
+///      intrinsically flash-mint-resistant. See caveats below.
 ///
-/// ── How conviction replaces seasoning ──────────────────────────────────────────────────
+/// ── Conviction voting ──────────────────────────────────────────────────────────────────
 /// You `support` a proposal with a name. While a name backs a proposal, the proposal's
 /// *conviction* accrues over time toward an asymptote and decays when support is withdrawn:
 ///
@@ -18,10 +18,9 @@ import {LibString} from "solady/utils/LibString.sol";
 ///
 /// where Δ is seconds elapsed and α ∈ (0,1) is the per-second decay. A proposal executes once
 /// conviction ≥ `threshold`. Because conviction starts at 0 and needs *sustained* support to
-/// build, freshly-minted weight has ~no immediate effect — flash-mint-and-execute is
-/// impossible with no enrollment, no maturity clock, and no voting deadline. Steady-state
-/// conviction from constant weight w is `w · SCALE / (SCALE − α)`, so `threshold` is expressed
-/// in weight-units: it is the sustained weight a proposal must hold to pass.
+/// build, freshly-minted weight has ~no immediate effect, so a flash-mint cannot execute.
+/// Steady-state conviction from constant weight w is `w · SCALE / (SCALE − α)`, so `threshold`
+/// is in weight-units: the sustained weight a proposal must hold to pass.
 ///
 /// ── Weight = ETH contributed to WNS ────────────────────────────────────────────────────
 /// A name's weight is `getFee(byteLength) · (expiresAt − now) / 365d`: the length fee tier ×
@@ -32,19 +31,20 @@ import {LibString} from "solady/utils/LibString.sol";
 /// ── Roles are WNS subdomains of dao.wei ────────────────────────────────────────────────
 /// Two roles are resolved live from names under the DAO's parent (`dao.wei`), so holding the
 /// name *is* holding the role, and handing it off is just a transfer:
-/// • `veto.dao.wei` — its holder may `cancel` any not-yet-executed proposal (negative power
+/// • `veto.dao.wei` — its holder may `veto` any not-yet-executed proposal (negative power
 ///   only; conviction's ramp is the warning window). Nothing minted = no veto.
-/// • `exec.dao.wei` — a god-mode operator: may `cancel`, force-`execute` a proposal *bypassing
-///   conviction*, and call the DAO's admin setters directly. Intended as a launch multisig
-///   that can rescue WNS (e.g. force-execute `transferOwnership`) if a bug appears, then be
-///   relinquished by transferring/burning the name to progressively decentralise.
+/// • `exec.dao.wei` — a god-mode operator: may `veto`, `rescue` (run any call directly, no
+///   proposal and no vote), and call the DAO's admin setters directly. Intended as a launch
+///   multisig that can rescue WNS (e.g. `rescue(nft, 0, transferOwnership(safe))`) if a bug
+///   appears, then be relinquished by transferring/burning the name to progressively decentralise.
 ///
 /// ── Knobs ──────────────────────────────────────────────────────────────────────────────
-/// `nft` is immutable; the role/parent names and `requirePrimaryName` are hardcoded. `alpha`,
-/// `threshold`, and `proposalFee` are adjustable by governance (self-call) *or* the executor.
-/// Default WNS behaviours (not toggles): a proposer must hold a WNS primary name; and every
-/// proposal (while the DAO owns dao.wei) atomically mints `<id>.dao.wei` to the DAO and writes
-/// its description into that name's resolver, so governance is a browsable WNS namespace.
+/// `nft` and the role/parent namehashes are fixed. `alpha`, `threshold`, and `proposalFee` are
+/// adjustable by governance (a passed proposal calling in) or the executor. Two WNS behaviours
+/// are always on: a proposer is identified by their WNS primary name (which must be an active
+/// top-level name they own); and while the DAO holds dao.wei, every proposal atomically mints
+/// `<id>.dao.wei` to the DAO and writes its description into that name's resolver, making
+/// governance a browsable WNS namespace.
 ///
 /// ── Caveats ────────────────────────────────────────────────────────────────────────────
 /// • Conviction voting is support-only; opposition is expressed by withholding/withdrawing
@@ -54,6 +54,8 @@ import {LibString} from "solady/utils/LibString.sol";
 ///   it (permissionless prune), so lazy staleness is bounded.
 /// • `α^Δ` uses fixed-point exponentiation; conservative and tested (α^7d within 0.5%), but
 ///   not formally precision-audited — the one thing to review before mainnet.
+/// • The `exec.dao.wei` holder is fully trusted until the role is relinquished: it can drain
+///   the treasury or seize WNS at will. That is the intended launch-multisig design.
 contract WeiDAO is Receiver {
     /*//////////////////////////////////////////////////////////////
                                  ERRORS
@@ -93,6 +95,7 @@ contract WeiDAO is Receiver {
     );
     event ProposalExecuted(uint256 indexed id, bytes result);
     event ProposalVetoed(uint256 indexed id);
+    event Rescued(address indexed target, uint256 value, bytes data);
     event ProposalNamed(uint256 indexed id, uint256 indexed subTokenId);
     event ThresholdSet(uint256 threshold);
     event ProposalFeeSet(uint256 fee);
@@ -117,7 +120,7 @@ contract WeiDAO is Receiver {
     uint256 public constant VETO_ROLE =
         0xa3cbec6f0a52ab020919800d82007684e63632feadb0f555ac3cf796ec121dc1;
 
-    /// @notice exec.dao.wei — god-mode operator: veto, force-execute (bypass conviction), admin.
+    /// @notice exec.dao.wei — god-mode operator: veto, `rescue` (direct call), and admin setters.
     uint256 public constant EXEC_ROLE =
         0x990f75bf23721b810a24035c3d53688b7d5078ff2aa31c18219ee65ab75e5144;
 
@@ -202,21 +205,22 @@ contract WeiDAO is Receiver {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Create a proposal to run `target.call{value}(data)` once conviction passes.
-    /// @dev Payable: `msg.value` must cover `proposalFee` and stays in the treasury.
-    /// @param proposerTokenId Any active WNS name owned by the caller — sybil gate for proposing.
+    /// @dev Payable: `msg.value` must cover `proposalFee` and stays in the treasury. The proposer
+    ///      is identified by their WNS primary name (looked up from `msg.sender`), which must be
+    ///      an active top-level name they own — one lookup for identity, stake, and event label.
     function propose(
         address target,
         uint256 value,
         bytes calldata data,
-        string calldata description,
-        uint256 proposerTokenId
+        string calldata description
     ) external payable returns (uint256 id) {
+        uint256 proposerTokenId = nft.primaryName(msg.sender);
+        if (proposerTokenId == 0) revert NoPrimaryName();
         if (nft.ownerOf(proposerTokenId) != msg.sender) revert NotHolder();
         if (weightOf(proposerTokenId) == 0) revert NotEligible();
         if (msg.value < proposalFee) revert InsufficientFee();
 
-        string memory proposerName = nft.reverseResolve(msg.sender);
-        if (bytes(proposerName).length == 0) revert NoPrimaryName();
+        string memory proposerName = nft.getFullName(proposerTokenId);
 
         unchecked {
             id = ++proposalCount;
@@ -236,33 +240,6 @@ contract WeiDAO is Receiver {
             nft.setText(subId, "description", description);
             emit ProposalNamed(id, subId);
         }
-    }
-
-    /*//////////////////////////////////////////////////////////////
-                           ADMIN (GOV OR EXEC)
-    //////////////////////////////////////////////////////////////*/
-
-    /// @notice Set the passing threshold. Callable by governance (passed proposal) or the executor.
-    function setThreshold(uint256 threshold_) external {
-        if (!_authed()) revert Unauthorized();
-        require(threshold_ != 0);
-        threshold = threshold_;
-        emit ThresholdSet(threshold_);
-    }
-
-    /// @notice Set the proposal fee. Callable by governance or the executor.
-    function setProposalFee(uint256 fee) external {
-        if (!_authed()) revert Unauthorized();
-        proposalFee = fee;
-        emit ProposalFeeSet(fee);
-    }
-
-    /// @notice Set the conviction decay. Callable by governance or the executor.
-    function setAlpha(uint256 alpha_) external {
-        if (!_authed()) revert Unauthorized();
-        require(alpha_ != 0 && alpha_ < SCALE);
-        alpha = alpha_;
-        emit AlphaSet(alpha_);
     }
 
     /// @notice Back a proposal with a name you own; its weight begins accruing conviction.
@@ -309,15 +286,14 @@ contract WeiDAO is Receiver {
         emit ProposalVetoed(id);
     }
 
-    /// @notice Execute a proposal once its conviction reaches `threshold`. The executor may
-    ///         force-execute at any conviction (god-mode override).
+    /// @notice Execute a proposal once its conviction reaches `threshold` (anyone; democratic).
     function execute(uint256 id) external returns (bytes memory result) {
         Proposal storage p = proposals[id];
         if (p.vetoed) revert Vetoed();
         if (p.executed) revert AlreadyExecuted();
 
         _sync(p);
-        if (p.conviction < threshold && msg.sender != executor()) revert Rejected();
+        if (p.conviction < threshold) revert Rejected();
 
         p.executed = true; // Effects before interaction (reentrancy-safe).
 
@@ -326,6 +302,47 @@ contract WeiDAO is Receiver {
         if (!ok) revert ExecutionFailed();
 
         emit ProposalExecuted(id, result);
+    }
+
+    /// @notice Executor god-mode: run an arbitrary call directly, no proposal and no vote — for
+    ///         the `exec.dao.wei` holder only (e.g. rescue WNS via `transferOwnership(safe)`).
+    /// @dev The single positive override. Fully trusted until the exec role is relinquished.
+    function rescue(address target, uint256 value, bytes calldata data)
+        external
+        returns (bytes memory result)
+    {
+        if (msg.sender != executor()) revert Unauthorized();
+        bool ok;
+        (ok, result) = target.call{value: value}(data);
+        if (!ok) revert ExecutionFailed();
+        emit Rescued(target, value, data);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                           ADMIN (GOV OR EXEC)
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Set the passing threshold. Callable by governance (a passed proposal) or the executor.
+    function setThreshold(uint256 threshold_) external {
+        if (!_authed()) revert Unauthorized();
+        require(threshold_ != 0);
+        threshold = threshold_;
+        emit ThresholdSet(threshold_);
+    }
+
+    /// @notice Set the proposal fee. Callable by governance or the executor.
+    function setProposalFee(uint256 fee) external {
+        if (!_authed()) revert Unauthorized();
+        proposalFee = fee;
+        emit ProposalFeeSet(fee);
+    }
+
+    /// @notice Set the conviction decay. Callable by governance or the executor.
+    function setAlpha(uint256 alpha_) external {
+        if (!_authed()) revert Unauthorized();
+        require(alpha_ != 0 && alpha_ < SCALE);
+        alpha = alpha_;
+        emit AlphaSet(alpha_);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -396,7 +413,8 @@ contract WeiDAO is Receiver {
 interface INameNFT {
     function ownerOf(uint256 id) external view returns (address);
     function getFee(uint256 length) external view returns (uint256);
-    function reverseResolve(address addr) external view returns (string memory);
+    function primaryName(address addr) external view returns (uint256);
+    function getFullName(uint256 tokenId) external view returns (string memory);
     function registerSubdomainFor(string calldata label, uint256 parentId, address to)
         external
         returns (uint256);
