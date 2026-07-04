@@ -710,6 +710,17 @@ So the chain enforces every *positive* action (seasoning, weight, ownership, one
 | `EXECUTION_DELAY` | 2 days |
 | `quorum` | set at deploy (absolute "for" weight floor) |
 
+### Governed parameters (self-call)
+
+Because WeiDAO has no owner, it tunes its own knobs through the `msg.sender == address(this)` pattern — a setter reachable only via an executed proposal targeting the DAO itself:
+
+| Parameter | Setter | Default | Effect |
+|---|---|---|---|
+| `proposalFee` | `setProposalFee(uint256)` | `0` | ETH required to `propose` (payable); paid into the treasury as anti-spam / interest alignment. |
+| `requirePrimaryName` | `setRequirePrimaryName(bool)` | `false` | When on, a proposer must have a WNS primary name (`reverseResolve`), making proposals identity-bound. |
+
+`propose` also emits the proposer's primary name in `ProposalCreated`, so feeds read as `alice.wei proposed …` for free.
+
 ### Variant: conviction voting (`WeiDAOConviction.sol`, prototype)
 
 An alternative anti-flash-mint model that needs **no enrollment, no maturity clock, and no voting deadline**. Instead of discrete ballots, you `support(id, tokenId)` a proposal and its *conviction* accrues over time from the weight backing it, decaying when support is withdrawn:

@@ -326,6 +326,73 @@ contract WeiDAOTest is Test {
     }
 
     /*//////////////////////////////////////////////////////////////
+                        GOVERNED PARAMS (SELF-CALL)
+    //////////////////////////////////////////////////////////////*/
+
+    function testProposalFeeGovernance() public {
+        // Governance sets a 0.01 ETH proposal fee (target = the DAO itself).
+        vm.prank(alice);
+        uint256 id = dao.propose(
+            address(dao),
+            0,
+            abi.encodeWithSelector(WeiDAO.setProposalFee.selector, uint256(0.01 ether)),
+            "set fee",
+            tAlice
+        );
+        _passAndWarp(id);
+        dao.execute(id);
+        assertEq(dao.proposalFee(), 0.01 ether);
+
+        // Proposing now requires the fee, which lands in the treasury.
+        vm.prank(alice);
+        vm.expectRevert(WeiDAO.InsufficientFee.selector);
+        dao.propose(address(nft), 0, "", "no fee", tAlice);
+
+        uint256 before = address(dao).balance;
+        vm.deal(alice, 0.01 ether);
+        vm.prank(alice);
+        dao.propose{value: 0.01 ether}(address(nft), 0, "", "with fee", tAlice);
+        assertEq(address(dao).balance, before + 0.01 ether);
+    }
+
+    function testSetProposalFeeOnlySelf() public {
+        vm.prank(alice);
+        vm.expectRevert(WeiDAO.NotSelf.selector);
+        dao.setProposalFee(1 ether);
+    }
+
+    function testRequirePrimaryNameGovernance() public {
+        vm.prank(alice);
+        uint256 id = dao.propose(
+            address(dao),
+            0,
+            abi.encodeWithSelector(WeiDAO.setRequirePrimaryName.selector, true),
+            "require primary name",
+            tAlice
+        );
+        _passAndWarp(id);
+        dao.execute(id);
+        assertTrue(dao.requirePrimaryName());
+
+        // bob has no primary name -> cannot propose.
+        vm.prank(bob);
+        vm.expectRevert(WeiDAO.NoPrimaryName.selector);
+        dao.propose(address(nft), 0, "", "x", tBob);
+
+        // After setting one, bob can propose.
+        vm.prank(bob);
+        nft.setPrimaryName(tBob);
+        vm.prank(bob);
+        dao.propose(address(nft), 0, "", "x", tBob);
+    }
+
+    function testSetRequirePrimaryNameOnlySelf() public {
+        vm.prank(alice);
+        vm.expectRevert(WeiDAO.NotSelf.selector);
+        dao.setRequirePrimaryName(true);
+    }
+
+    /*//////////////////////////////////////////////////////////////
                              GUARDIAN VETO
     //////////////////////////////////////////////////////////////*/
 

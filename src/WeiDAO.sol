@@ -49,6 +49,7 @@ contract WeiDAO is Receiver {
                                  ERRORS
     //////////////////////////////////////////////////////////////*/
 
+    error NotSelf();
     error Canceled();
     error Rejected();
     error NotHolder();
@@ -57,10 +58,12 @@ contract WeiDAO is Receiver {
     error NotGuardian();
     error AlreadyVoted();
     error VotingClosed();
+    error NoPrimaryName();
     error AlreadyEnrolled();
     error AlreadyExecuted();
     error ExecutionFailed();
     error ExecutionLocked();
+    error InsufficientFee();
 
     /*//////////////////////////////////////////////////////////////
                                  EVENTS
@@ -74,8 +77,11 @@ contract WeiDAO is Receiver {
         uint256 value,
         bytes data,
         uint256 createdAt,
-        string description
+        string description,
+        string proposerName
     );
+    event ProposalFeeSet(uint256 fee);
+    event RequirePrimaryNameSet(bool required);
     event VoteCast(
         uint256 indexed id,
         uint256 indexed tokenId,
@@ -129,6 +135,12 @@ contract WeiDAO is Receiver {
     }
 
     uint256 public proposalCount;
+    /// @notice ETH required to open a proposal (anti-spam, paid to the treasury). Starts 0;
+    ///         tunable only by the DAO itself (`setProposalFee` via a passed proposal).
+    uint256 public proposalFee;
+    /// @notice If true, a proposer must have a WNS primary name. Starts false; DAO-tunable.
+    bool public requirePrimaryName;
+
     mapping(uint256 => Enrollment) public enrollments; // tokenId => seasoning
     mapping(uint256 => Proposal) public proposals;
     mapping(uint256 => mapping(uint256 => bool)) public tokenVoted; // id => tokenId => voted
@@ -164,6 +176,7 @@ contract WeiDAO is Receiver {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Create a proposal to run `target.call{value}(data)` if the vote passes.
+    /// @dev Payable: `msg.value` must cover `proposalFee` and stays in the treasury.
     /// @param proposerTokenId Any active WNS name owned by the caller — sybil gate for proposing.
     function propose(
         address target,
@@ -171,9 +184,13 @@ contract WeiDAO is Receiver {
         bytes calldata data,
         string calldata description,
         uint256 proposerTokenId
-    ) external returns (uint256 id) {
+    ) external payable returns (uint256 id) {
         if (nft.ownerOf(proposerTokenId) != msg.sender) revert NotHolder();
         if (weightOf(proposerTokenId) == 0) revert NotEligible();
+        if (msg.value < proposalFee) revert InsufficientFee();
+
+        string memory proposerName = nft.reverseResolve(msg.sender);
+        if (requirePrimaryName && bytes(proposerName).length == 0) revert NoPrimaryName();
 
         unchecked {
             id = ++proposalCount;
@@ -184,7 +201,23 @@ contract WeiDAO is Receiver {
         p.value = value;
         p.data = data;
 
-        emit ProposalCreated(id, msg.sender, target, value, data, block.timestamp, description);
+        emit ProposalCreated(
+            id, msg.sender, target, value, data, block.timestamp, description, proposerName
+        );
+    }
+
+    /// @notice Set the proposal fee. Callable only by the DAO itself (via a passed proposal).
+    function setProposalFee(uint256 fee) external {
+        if (msg.sender != address(this)) revert NotSelf();
+        proposalFee = fee;
+        emit ProposalFeeSet(fee);
+    }
+
+    /// @notice Toggle the primary-name requirement. Callable only by the DAO itself.
+    function setRequirePrimaryName(bool required) external {
+        if (msg.sender != address(this)) revert NotSelf();
+        requirePrimaryName = required;
+        emit RequirePrimaryNameSet(required);
     }
 
     /// @notice Vote a single name. Eligibility, ownership, and weight are all verified on-chain.
@@ -291,6 +324,7 @@ contract WeiDAO is Receiver {
 interface INameNFT {
     function ownerOf(uint256 id) external view returns (address);
     function getFee(uint256 length) external view returns (uint256);
+    function reverseResolve(address addr) external view returns (string memory);
     function records(uint256 id)
         external
         view
