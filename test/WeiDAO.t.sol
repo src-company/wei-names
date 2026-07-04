@@ -189,6 +189,29 @@ contract WeiDAOTest is Test {
         assertEq(nft.text(subId, "description"), "Fund grants");
     }
 
+    function testThresholdAdjustableByGovernance() public {
+        uint256 newThreshold = threshold * 2;
+        vm.prank(alice);
+        uint256 id = dao.propose(
+            address(dao),
+            0,
+            abi.encodeWithSelector(WeiDAO.setThreshold.selector, newThreshold),
+            "raise threshold",
+            tAlice
+        );
+        vm.prank(alice);
+        dao.support(id, tAlice);
+        vm.warp(block.timestamp + HALF_LIFE + 1 hours);
+        dao.execute(id);
+        assertEq(dao.threshold(), newThreshold);
+    }
+
+    function testSetThresholdOnlySelf() public {
+        vm.prank(alice);
+        vm.expectRevert(WeiDAO.NotSelf.selector);
+        dao.setThreshold(1);
+    }
+
     /// Anyone may prune support from a name that has since expired (bounds lazy capture).
     function testAnyoneCanPruneExpiredSupport() public {
         uint256 id = _proposeWithdraw();

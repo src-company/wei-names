@@ -679,15 +679,17 @@ A name's weight is `NameNFT.getFee(byteLength(label))`: what a name of that leng
 
 Conviction's ramp is itself the timelock — a proposal is visible accruing for days before it can pass, so watchers have warning. An immutable `guardian` may *only* `cancel` a not-yet-executed proposal (never propose, support, execute, move funds, or change settings). Worst case it censors; it can **never steal**. Set `guardian = address(0)` to disable.
 
-### Immutable fixtures
+### Fixtures + the one adjustable knob
 
-WeiDAO is a solid fixture on top of WNS: its own knobs are **immutable**, set at deploy and never governed. Governance only ever acts *outward* (treasury + WNS admin) — there are no self-tuning setters.
+WeiDAO is a solid fixture on top of WNS. Most knobs are **immutable** (set at deploy, never governed); the WNS features are default behaviour, not toggles. The one exception is `threshold`, which must track participation as the DAO grows.
 
-| Fixture | Effect |
-|---|---|
-| `proposalFee` | ETH required to `propose` (payable); paid into the treasury as anti-spam. |
-| `requirePrimaryName` | If set, a proposer must have a WNS primary name (`reverseResolve`). |
-| `proposalParent` | If set to a DAO-owned name, proposals are auto-named under it (below). |
+| Knob | Mutability | Effect |
+|---|---|---|
+| `alpha` | immutable | Conviction decay / half-life — the DAO's "patience". |
+| `proposalFee` | immutable | ETH required to `propose` (payable); paid into the treasury as anti-spam. |
+| `requirePrimaryName` | immutable | If set, a proposer must have a WNS primary name (`reverseResolve`). |
+| `proposalParent` | immutable | If set to a DAO-owned name, proposals are auto-named under it (below). |
+| `threshold` | **governance-adjustable** (`setThreshold`, self-call) | The passing bar; raise it as the electorate grows. The change is itself a conviction proposal — slow, visible, guardian-vetoable. |
 
 `propose` also emits the proposer's primary name in `ProposalCreated`, so feeds read as `alice.wei proposed …` for free.
 

@@ -32,9 +32,12 @@ import {LibString} from "solady/utils/LibString.sol";
 /// it can pass, so watchers have warning. An immutable `guardian` may still only `cancel` a
 /// not-yet-executed proposal (never propose, support, execute, or steal). `address(0)` disables.
 ///
-/// ── Immutable fixtures, WNS-native ─────────────────────────────────────────────────────
-/// The DAO is a fixed fixture: its own knobs are immutable (set at deploy, never governed).
-/// Governance only ever acts *outward* (treasury + WNS admin). Fixtures:
+/// ── Fixtures + the one adjustable knob ─────────────────────────────────────────────────
+/// The DAO is a fixed WNS fixture: `alpha`, `proposalFee`, `requirePrimaryName`, and
+/// `proposalParent` are immutable (set at deploy, never governed). The sole governance-tunable
+/// knob is `threshold` (`setThreshold`, self-call) — it must track participation as the DAO
+/// grows, and the change is itself a conviction proposal (slow, visible, guardian-vetoable).
+/// The WNS features below are default behaviour, not toggles:
 /// • `proposalFee` — ETH to `propose` (payable), paid into the treasury as anti-spam.
 /// • `requirePrimaryName` — if set, a proposer must have a WNS primary name.
 /// • `proposalParent` — if set to a DAO-owned name (e.g. dao.wei), every proposal atomically
@@ -54,6 +57,7 @@ contract WeiDAO is Receiver {
                                  ERRORS
     //////////////////////////////////////////////////////////////*/
 
+    error NotSelf();
     error Canceled();
     error Rejected();
     error NotHolder();
@@ -89,6 +93,7 @@ contract WeiDAO is Receiver {
     event ProposalExecuted(uint256 indexed id, bytes result);
     event ProposalCanceled(uint256 indexed id);
     event ProposalNamed(uint256 indexed id, uint256 indexed subTokenId);
+    event ThresholdSet(uint256 threshold);
 
     /*//////////////////////////////////////////////////////////////
                                 CONSTANTS
@@ -108,12 +113,6 @@ contract WeiDAO is Receiver {
     /// @dev Calibrated example — a **7-day half-life** is `alpha = 999998853923940000`
     ///      (= round(2^(-1/604800) · 1e18)). Then `SCALE - alpha = 1146076060000`.
     uint256 public immutable alpha;
-
-    /// @notice Conviction a proposal must reach to pass (weight-units).
-    /// @dev Calibrate against the half-life: set `threshold = convictionMax(W_req) / 2` so a
-    ///      proposal holding sustained weight `W_req` passes after exactly one half-life (with
-    ///      the 7-day alpha above, 7 days); more weight passes sooner, less never reaches.
-    uint256 public immutable threshold;
 
     /// @notice ETH required to open a proposal (anti-spam, paid to the treasury). Fixed at deploy.
     uint256 public immutable proposalFee;
@@ -140,6 +139,13 @@ contract WeiDAO is Receiver {
         uint256 value; // ETH to forward from the treasury.
         bytes data; // Calldata (e.g. abi.encodeWithSelector(NameNFT.withdraw.selector)).
     }
+
+    /// @notice Conviction a proposal must reach to pass (weight-units). Set at deploy and
+    ///         governance-adjustable (`setThreshold`) to track participation as the DAO grows.
+    /// @dev Calibrate against the half-life: `threshold = convictionMax(W_req) / 2` ⇒ a proposal
+    ///      holding sustained weight `W_req` passes after one half-life (7 days with the 7-day
+    ///      alpha); more weight passes sooner, less never reaches.
+    uint256 public threshold;
 
     uint256 public proposalCount;
     mapping(uint256 => Proposal) public proposals;
@@ -203,6 +209,15 @@ contract WeiDAO is Receiver {
             nft.setText(subId, "description", description);
             emit ProposalNamed(id, subId);
         }
+    }
+
+    /// @notice Set the passing threshold. Callable only by the DAO itself (via a passed proposal).
+    /// @dev The change is itself a proposal — it must accrue conviction and can be guardian-vetoed.
+    function setThreshold(uint256 threshold_) external {
+        if (msg.sender != address(this)) revert NotSelf();
+        require(threshold_ != 0);
+        threshold = threshold_;
+        emit ThresholdSet(threshold_);
     }
 
     /// @notice Back a proposal with a name you own; its weight begins accruing conviction.
