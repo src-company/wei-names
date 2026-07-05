@@ -1,2 +1,10 @@
-out
-cache
+# foundry
+/out/
+/cache/
+/broadcast/
+
+# ops transient / generated deploy artifacts
+ops/__pycache__/
+ops/*.out
+ops/deploy_*.hex
+ops/demo_*.html

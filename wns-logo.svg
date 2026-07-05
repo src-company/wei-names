@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+<rect width="64" height="64" fill="#0A0A0A"/>
+<defs>
+<path id="pt" d="M4,4 H60" fill="none"/>
+<path id="pr" d="M60,4 V60" fill="none"/>
+<path id="pb" d="M60,60 H4" fill="none"/>
+<path id="pl" d="M4,60 V4" fill="none"/>
+</defs>
+<text font-family="'Courier New',monospace" font-size="4.2" fill="#2D5FE8" fill-opacity="0.6" letter-spacing="-0.3">
+<textPath href="#pt">//////////////////////////////</textPath>
+</text>
+<text font-family="'Courier New',monospace" font-size="4.2" fill="#2D5FE8" fill-opacity="0.6" letter-spacing="-0.3">
+<textPath href="#pr">//////////////////////////////</textPath>
+</text>
+<text font-family="'Courier New',monospace" font-size="4.2" fill="#2D5FE8" fill-opacity="0.6" letter-spacing="-0.3">
+<textPath href="#pb">//////////////////////////////</textPath>
+</text>
+<text font-family="'Courier New',monospace" font-size="4.2" fill="#2D5FE8" fill-opacity="0.6" letter-spacing="-0.3">
+<textPath href="#pl">//////////////////////////////</textPath>
+</text>
+<path d="M16,16 V48 H22 L32,32 L42,48 H48 V16 H42 V38 L32,22 L22,38 V16 Z" fill="#2D5FE8"/>
+</svg>

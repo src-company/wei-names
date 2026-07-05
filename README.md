@@ -637,7 +637,21 @@ const results = await multicall.aggregate3([
 
 ## Governance (WeiDAO)
 
-`WeiDAO.sol` is an optional conviction-voting DAO + treasury built entirely on WNS primitives. It owns `NameNFT`, so it holds the withdrawal fees and is the only account that can call NameNFT's `onlyOwner` setters — reachable only through governance. Named in homage to Wei Dai. Solady-only (`accounts/Receiver`, `utils/LibString`); no Merkle tree, no off-chain indexer — everything is verified live on-chain.
+`WeiDAO.sol` is a conviction-voting DAO + treasury built entirely on WNS primitives, deployed to Ethereum mainnet. Named in homage to Wei Dai. Solady-only (`accounts/Receiver`, `utils/Multicallable`, `utils/LibString`, `utils/SSTORE2`); no Merkle tree, no off-chain indexer, no server — treasury, proposals, roles, and even the frontend are read and rendered live on-chain. It is designed to own `NameNFT`, so the withdrawal fees and every `onlyOwner` setter become governable.
+
+### Deployment (Ethereum Mainnet)
+
+| | |
+|---|---|
+| **WeiDAO** | [`0x00000007988A79d16cf76B5dc4cF54dc3Af24936`](https://etherscan.io/address/0x00000007988a79d16cf76b5dc4cf54dc3af24936#code) (verified) |
+| Parent name | `dao.wei` — owned by the DAO, reverse-resolves to it |
+| `veto.dao.wei` / `exec.dao.wei` | [`0x006CD14F36F65eCbB29b2519cCBe63A0DC8549F2`](https://etherscan.io/address/0x006CD14F36F65eCbB29b2519cCBe63A0DC8549F2) — timelocked multisig |
+| `alpha` | `999998853923940000` — 7-day conviction half-life |
+| `threshold` | `159446457364257519435776` — ≈10% of live WNS weight sustained one half-life passes |
+| `proposalFee` | `0.002 ETH` |
+| `executionDelay` | `3 days` — the veto-window floor |
+
+The DAO pulls `dao.wei` in and mints both role subdomains to the multisig **atomically in the constructor** on deploy (via a pre-approval + CreateX CREATE3 — see [ops/DEPLOY.md](ops/DEPLOY.md)).
 
 ### Conviction voting
 
@@ -671,23 +685,19 @@ The `exec` role is meant as a **launch multisig** that can rescue WNS if a bug a
 
 Because subdomains lapse when their parent expires or is re-registered, both roles **auto-lapse if `dao.wei` isn't maintained** — a dead-man's-switch (`vetoer()`/`executor()` return `address(0)`). Role resolution is activity-aware, so a stale/expired role never retains power.
 
+### On-chain dapp (ERC-8244)
+
+`html()` returns the DAO's entire frontend as a self-contained HTML page, rendered live from chain state — treasury, knobs, roles, and recent proposals with their conviction and descriptions — with an inlined vanilla-JS wallet bridge for connect / support / unsupport / execute / propose. Because the DAO owns `dao.wei`, the name resolves to the contract, so an ERC-8244 / ERC-4804 (`resolveMode` + `request`) gateway renders the dapp at `dao.wei` with no server. The page is a governable shell (`setHtml`), and the large CSS/JS blobs live in SSTORE2 data contracts to keep runtime under EIP-170.
+
 ### Setup
 
-Deploy `WeiDAO(nameNFT, alpha, threshold, proposalFee)`, then wire up WNS:
+Constructor: `WeiDAO(nameNFT, alpha, threshold, proposalFee, executionDelay, roleHolder)`. The intended deploy uses CreateX CREATE3 for a deterministic vanity address, pre-approved for `dao.wei`, so the constructor **pulls `dao.wei` in, sets the DAO's primary name, and mints `veto.dao.wei` / `exec.dao.wei` to `roleHolder` — all in one transaction** (the role mints are mandatory once the pull succeeds, so a deploy can't launch without its backstop). Runbook, calibration, and a mainnet-fork rehearsal are in [`ops/`](ops/): [DEPLOY.md](ops/DEPLOY.md), [LAUNCH.md](ops/LAUNCH.md).
 
-```solidity
-NameNFT.transferOwnership(weiDAO);                 // DAO becomes WNS owner
-// from the dao.wei holder:
-NameNFT.registerSubdomainFor("veto", daoWei, vetoMultisig);
-NameNFT.registerSubdomainFor("exec", daoWei, execMultisig);   // (set text records too)
-NameNFT.transferFrom(holder, weiDAO, daoWei);     // gift dao.wei so the DAO can name proposals
-```
-
-The role/parent names are **hardcoded namehash constants** (`PROPOSAL_PARENT`, `VETO_ROLE`, `EXEC_ROLE` for `dao.wei` / `veto.dao.wei` / `exec.dao.wei`).
+The final step hands WNS to governance: `NameNFT.transferOwnership(weiDAO)` from the current owner. After that, WNS admin (fee schedule, `withdraw`, ownership) runs through a passed proposal or `exec.rescue` — and exec can always reclaim ownership while the role is held. The role/parent names are **hardcoded namehash constants** (`PROPOSAL_PARENT`, `VETO_ROLE`, `EXEC_ROLE` for `dao.wei` / `veto.dao.wei` / `exec.dao.wei`).
 
 ### Adjustable knobs
 
-`nft` is immutable. `alpha`, `threshold`, and `proposalFee` are adjustable by **governance (a passed proposal) or the executor** (`setAlpha` / `setThreshold` / `setProposalFee`). `threshold` in particular should rise as participation grows.
+`nft` and the role/parent namehashes are immutable. `alpha`, `threshold`, `proposalFee`, and `executionDelay` (the timelock floor, capped at 30 days) are adjustable by **governance (a passed proposal) or the executor**. `threshold` in particular should rise as participation grows — re-run [`ops/weight_scan.py`](ops/weight_scan.py) to recalibrate against the live book.
 
 ### Names as identity — proposals *are* a namespace
 
@@ -695,7 +705,7 @@ While the DAO holds `dao.wei`, **every proposal atomically mints `<id>.dao.wei` 
 
 ### Caveats
 
-Support-only (no explicit "against"). Weight is captured at `support` time; a transferred name stays valid, an expired one is permissionlessly prunable. The fixed-point `α^Δ` is conservative and tested (α^7d within 0.5%) but not formally precision-audited — the one thing to review before mainnet. And the `exec` god-mode key is fully trusted until relinquished.
+Support-only (no explicit "against"). Weight is captured at `support` time along with the name's epoch and expiry; a transferred name stays valid, but once its supported runway elapses or the name is re-registered, anyone may prune it. Roles are recognised only while the DAO owns the active `dao.wei`, so a lapse-and-re-register can't hand them to a new parent owner. The fixed-point `α^Δ` is differential-tested against an independent exp/ln to ~1 ppm and analysed in [ops/MATH_REVIEW.md](ops/MATH_REVIEW.md). The `exec` god-mode key is fully trusted until relinquished.
 
 ## Audits
 
@@ -712,6 +722,8 @@ AI-assisted audits performed on the codebase:
 **Cantina Apex** found three valid dapp/integration issues: XSS via unescaped name in `innerHTML`, router commit-reveal frontrunning, and refund misdirection through router. All were patched in the dapp and zRouter. NameNFT contract was not affected. (SubdomainRegistrar not included.)
 
 **Zellic V12** reported two findings on SubdomainRegistrar, both self-invalidated: flash mode `transferFrom` does not trigger `onERC721Received` (incorrect premise), and `tx.origin` in constructor is intentional for CREATE2/CREATE3 deployment.
+
+**WeiDAO** was hardened across several independent AI-assisted review passes (one recorded in [ops/AUDIT.md](ops/AUDIT.md)) plus a fixed-point precision analysis ([ops/MATH_REVIEW.md](ops/MATH_REVIEW.md)) and a mainnet-fork deploy rehearsal ([test/ForkDeploySim.t.sol](test/ForkDeploySim.t.sol)). The one serious finding — role seizure via a re-registered `dao.wei` — was fixed and regression-tested; a machine-checked pass on `_pow`/`_accrue` is still recommended before large treasury value.
 
 ---
 
