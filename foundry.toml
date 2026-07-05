@@ -1,5 +1,5 @@
 [profile.default]
-solc_version = "0.8.33"
+solc_version = "0.8.34"
 evm_version = "prague"
 
 optimizer = true
@@ -7,7 +7,7 @@ optimizer_runs = 20
 
 via_ir = true
 
-fs_permissions = [{ access = "read", path = "./" }]
+fs_permissions = [{ access = "read", path = "./" }, { access = "write", path = "./ops" }]
 
 remappings = [
   "@solady=lib/solady/",
