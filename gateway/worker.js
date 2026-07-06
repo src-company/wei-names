@@ -1,7 +1,7 @@
-// Cloudflare Worker entrypoint for the wei.is wildcard gateway.
+// Cloudflare Worker entrypoint for the wei.limo wildcard gateway.
 //
 // Deploy:  cd gateway && wrangler deploy
-// Requires wei.is to be a Cloudflare zone with a `*.wei.is` worker route
+// Requires wei.limo to be a Cloudflare zone with a `*.wei.limo` worker route
 // (see wrangler.toml). Env vars are set as Worker vars/secrets.
 
 import { handleRequest } from './handler.js'

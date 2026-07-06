@@ -24,17 +24,17 @@ services:
         source: /*
         destination: /index.html
 
-  # 2) WNS wildcard gateway — serves every `<name>.wei.is` from the IPFS
+  # 2) WNS wildcard gateway — serves every `<name>.wei.limo` from the IPFS
   #    contenthash of `<name>.wei`, read live from the WNS contract on each
-  #    request. No per-name DNS records: the `*.wei.is` domain below points all
+  #    request. No per-name DNS records: the `*.wei.limo` domain below points all
   #    undefined subdomains here (see gateway/README.md). Zero-dep plain ESM.
   #
-  #    Note: the dapp is on wei.domains; individual .wei names resolve on wei.is.
+  #    Note: the dapp is on wei.domains; individual .wei names resolve on wei.limo.
   #    The gateway's apex/site links already point to https://wei.domains.
   #
   #    SECURITY: keep GATEWAY_MODE=redirect. In redirect mode this service only
   #    emits a 302, so untrusted `.wei` content executes on the IPFS gateway
-  #    origin — never on a *.wei.is origin. App subdomains are reserved in
+  #    origin — never on a *.wei.limo origin. App subdomains are reserved in
   #    handler.js (RESERVED_LABELS) and also win by DNS specificity.
   - type: web
     name: wns-gateway
@@ -47,10 +47,10 @@ services:
     startCommand: node server.js
     healthCheckPath: /healthz
     domains:
-      # Wildcard: catches every subdomain of wei.is that lacks a more specific
+      # Wildcard: catches every subdomain of wei.limo that lacks a more specific
       # record. Render issues the wildcard TLS cert (needs a DNS validation
-      # record at your DNS provider, alongside the *.wei.is CNAME/ALIAS).
-      - "*.wei.is"
+      # record at your DNS provider, alongside the *.wei.limo CNAME/ALIAS).
+      - "*.wei.limo"
     envVars:
       # 'redirect' (302, bandwidth-light) or 'proxy' (streams through this
       # service). Keep 'redirect'.

@@ -1,11 +1,11 @@
-# wei.is wildcard gateway
+# wei.limo wildcard gateway
 
-Serve every `.wei` name at `<name>.wei.is`, driven entirely by an on-chain
+Serve every `.wei` name at `<name>.wei.limo`, driven entirely by an on-chain
 lookup against the WNS contract. **No per-name DNS records** — one wildcard
-`*.wei.is` record points here and the gateway resolves each request live.
+`*.wei.limo` record points here and the gateway resolves each request live.
 
 ```
-GET alice.wei.is
+GET alice.wei.limo
   ├─ eth_call WNS.computeId("alice.wei")      -> tokenId
   ├─ eth_call WNS.contenthash(tokenId)        -> 0xe301…  (EIP-1577)
   ├─ decode contenthash                        -> bafy… (IPFS CIDv1)
@@ -23,8 +23,8 @@ indexer, provider API keys, and constant reconciliation. A wildcard + a
 request-time `eth_call` makes the chain the single source of truth and can't
 drift. It's the same model eth.limo uses for ENS.
 
-Explicit records still win by DNS specificity, so `zfi.wei.is`,
-`api.zfi.wei.is`, `multisig.wei.is` etc. are **never shadowed** by the wildcard.
+Explicit records still win by DNS specificity, so `zfi.wei.limo`,
+`api.zfi.wei.limo`, `multisig.wei.limo` etc. are **never shadowed** by the wildcard.
 The gateway also keeps a `RESERVED_LABELS` guard as defense-in-depth.
 
 ## Files
@@ -36,19 +36,19 @@ The gateway also keeps a `RESERVED_LABELS` guard as defense-in-depth.
 | `handler.js` | Core `handleRequest(request, env)` — runtime-agnostic Web Fetch |
 | `worker.js` | Cloudflare Worker entrypoint |
 | `server.js` | Node / Railway / Render entrypoint |
-| `wrangler.toml` | Worker config + `*.wei.is` route |
+| `wrangler.toml` | Worker config + `*.wei.limo` route |
 
 ## Config (env vars)
 
 | Var | Default | Notes |
 |-----|---------|-------|
-| `GATEWAY_MODE` | `redirect` | `redirect` (302 to a subdomain IPFS gateway, bandwidth-light) or `proxy` (stream through the gateway, keeps `<name>.wei.is` in the URL bar) |
+| `GATEWAY_MODE` | `redirect` | `redirect` (302 to a subdomain IPFS gateway, bandwidth-light) or `proxy` (stream through the gateway, keeps `<name>.wei.limo` in the URL bar) |
 | `IPFS_SUBDOMAIN_GATEWAY` | `dweb.link` | Used in redirect mode → `https://<cid>.ipfs.<gw>` |
 | `IPFS_PATH_GATEWAY` | `https://ipfs.io` | Used in proxy mode → `<gw>/ipfs/<cid>` |
 | `RPC_URLS` | built-in list | Comma-separated mainnet RPCs with fallback |
 | `WNS_CONTRACT` | mainnet WNS | Override the registry address |
 | `RESERVED_LABELS` | — | Extra labels to never treat as `.wei` names (added to the built-in set) |
-| `ZONE` | `wei.is` | The apex zone this gateway serves |
+| `ZONE` | `wei.limo` | The apex zone this gateway serves |
 | `PORT` | `8080` | Node server only |
 
 ## Deploy
@@ -65,10 +65,10 @@ npm start        # node server.js, listens on $PORT
 DNS: add a wildcard pointing at the service, e.g.
 
 ```
-*.wei.is   CNAME   <your-service>.up.railway.app.
+*.wei.limo   CNAME   <your-service>.up.railway.app.
 ```
 
-(or an `A`/`ALIAS` record to the host's IP). This works with wei.is on its
+(or an `A`/`ALIAS` record to the host's IP). This works with wei.limo on its
 current Namecheap zone — no migration needed. Existing app subdomains keep
 their explicit records and are unaffected.
 
@@ -76,7 +76,7 @@ Render blueprint block (drop into `render.yaml` if you deploy there):
 
 ```yaml
   - type: web
-    name: weiis-gateway
+    name: weilimo-gateway
     runtime: node
     rootDir: gateway
     plan: starter            # always-on; avoids cold starts
@@ -84,13 +84,13 @@ Render blueprint block (drop into `render.yaml` if you deploy there):
     startCommand: node server.js
     healthCheckPath: /healthz
     domains:
-      - "*.wei.is"
+      - "*.wei.limo"
 ```
 
 ### B) Cloudflare Worker
 
-Requires wei.is to be a Cloudflare zone. The `*.wei.is/*` route in
-`wrangler.toml` handles the wildcard; explicit routes like `api.zfi.wei.is/*`
+Requires wei.limo to be a Cloudflare zone. The `*.wei.limo/*` route in
+`wrangler.toml` handles the wildcard; explicit routes like `api.zfi.wei.limo/*`
 (zFi's existing worker) still win by specificity.
 
 ```bash

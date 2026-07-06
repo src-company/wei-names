@@ -1,7 +1,7 @@
-// Core wildcard gateway: <label>.wei.is  ->  IPFS content of <label>.wei.
+// Core wildcard gateway: <label>.wei.limo  ->  IPFS content of <label>.wei.
 //
 // This is the whole automation. There is NO per-name DNS provisioning: a single
-// `*.wei.is` wildcard record points every undefined subdomain here, and this
+// `*.wei.limo` wildcard record points every undefined subdomain here, and this
 // handler does the on-chain lookup at request time. A newly registered `.wei`
 // name works instantly with zero DNS writes; expired/unregistered names 404.
 //
@@ -11,16 +11,16 @@
 import { resolveContenthash } from './wns.js'
 import { contenthashToCid } from './contenthash.js'
 
-const ZONE = 'wei.is'
+const ZONE = 'wei.limo'
 
 // Labels that must never be treated as `.wei` names.
 //
-// SECURITY: with a `*.wei.is` wildcard in place, a *missing* explicit record no
+// SECURITY: with a `*.wei.limo` wildcard in place, a *missing* explicit record no
 // longer fails safe (NXDOMAIN) — it fails OPEN to whatever this gateway
 // resolves. So every real app subdomain MUST be listed here: if e.g. the
-// `srcco.wei.is` record is ever dropped again, this list stops an attacker who
+// `srcco.wei.limo` record is ever dropped again, this list stops an attacker who
 // registered `srcco.wei` from silently taking over that hostname. Keep it in
-// sync with the app subdomains on wei.is (also settable via RESERVED_LABELS).
+// sync with the app subdomains on wei.limo (also settable via RESERVED_LABELS).
 const DEFAULT_RESERVED = new Set([
   'www', 'api', 'mail', 'ns1', 'ns2', '_dmarc', '_domainkey',
   'zfi', 'multisig', 'srcco', // <-- app subdomains; extend as you add apps
@@ -28,7 +28,7 @@ const DEFAULT_RESERVED = new Set([
 
 // Short in-memory cache of label -> { cid, at } to spare RPCs from repeat hits.
 // Best-effort (per worker isolate / per Node process); not a correctness path.
-// SECURITY: bounded so a flood of random `*.wei.is` labels can't grow the map
+// SECURITY: bounded so a flood of random `*.wei.limo` labels can't grow the map
 // unbounded and OOM the instance. Oldest entries are evicted first.
 const CACHE_TTL_MS = 60_000
 const CACHE_MAX = 5_000
@@ -48,16 +48,16 @@ function readEnv(env, key, fallback) {
   return v === undefined || v === null || v === '' ? fallback : v
 }
 
-// Pull the WNS subdomain out of a Host header. `alice.wei.is` -> `alice.wei`,
-// `docs.alice.wei.is` -> `docs.alice.wei`. Returns null for the apex or a
-// non-wei.is host.
+// Pull the WNS subdomain out of a Host header. `alice.wei.limo` -> `alice.wei`,
+// `docs.alice.wei.limo` -> `docs.alice.wei`. Returns null for the apex or a
+// non-wei.limo host.
 function labelFromHost(host, zone) {
   if (!host) return null
   const h = host.toLowerCase().split(':')[0] // strip port
   const suffix = '.' + zone
   if (!h.endsWith(suffix)) return null
   const sub = h.slice(0, -suffix.length)
-  if (!sub) return null // apex `wei.is`
+  if (!sub) return null // apex `wei.limo`
   return sub
 }
 
@@ -128,7 +128,7 @@ export async function handleRequest(request, env) {
   const pathAndQuery = url.pathname + url.search
 
   if (mode === 'proxy') {
-    // Stream the content through the gateway, keeping <label>.wei.is in the bar.
+    // Stream the content through the gateway, keeping <label>.wei.limo in the bar.
     // Heavier: the gateway carries the bandwidth. Prefer `redirect` at scale.
     const pathGw = readEnv(env, 'IPFS_PATH_GATEWAY', 'https://ipfs.io')
     const target = `${pathGw}/ipfs/${cid}${pathAndQuery}`
@@ -137,7 +137,7 @@ export async function handleRequest(request, env) {
       headers: { accept: request.headers.get('accept') || '*/*' },
     })
     // Forward only a safe subset. Never propagate Set-Cookie: upstream content
-    // is untrusted and must not be able to set cookies on a *.wei.is origin.
+    // is untrusted and must not be able to set cookies on a *.wei.limo origin.
     const PASS = ['content-type', 'content-length', 'etag', 'last-modified']
     const headers = new Headers()
     for (const h of PASS) {
@@ -154,7 +154,7 @@ export async function handleRequest(request, env) {
 
   // Default: 302 to a subdomain IPFS gateway. Bandwidth-light (the gateway is
   // never in the data path) and per-name origin isolation comes for free from
-  // the CID subdomain. Each <label>.wei.is is already its own origin too.
+  // the CID subdomain. Each <label>.wei.limo is already its own origin too.
   const subGw = readEnv(env, 'IPFS_SUBDOMAIN_GATEWAY', 'dweb.link')
   const target = `https://${cid}.ipfs.${subGw}${pathAndQuery}`
   return new Response(null, {
