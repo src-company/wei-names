@@ -751,13 +751,32 @@ const RPC_ENDPOINTS = [
 let rpcProvider = null;
 let readContract = null;
 
+// Optional user-supplied RPC so power users can bypass the shared public
+// endpoints (which can rate-limit / silently fail) without forking the dapp:
+//   ?rpc=https://my-node        (URL param, comma-separated for multiple)
+//   localStorage.setItem('wns_rpc', 'https://my-node')
+// When set, these REPLACE the public list (used exclusively), so behaviour is
+// deterministic and a healthy private node isn't undercut by a flaky public one.
+function customRpcs() {
+  const out = [];
+  try {
+    const q = new URLSearchParams(location.search).get('rpc');
+    if (q) out.push(...q.split(','));
+    const ls = localStorage.getItem('wns_rpc');
+    if (ls) out.push(...ls.split(','));
+  } catch (e) {}
+  return out.map(s => s.trim()).filter(u => /^https?:\/\//i.test(u));
+}
+
 async function getRpc() {
   if (rpcProvider) return rpcProvider;
 
   const MAINNET = ethers.Network.from(1);
+  const overrides = customRpcs();
+  const endpoints = overrides.length ? overrides : RPC_ENDPOINTS;
 
-  // Race all RPCs - first to respond wins
-  const racePromises = RPC_ENDPOINTS.map(async (rpc) => {
+  // Race the endpoints - first to respond wins
+  const racePromises = endpoints.map(async (rpc) => {
     const p = new ethers.JsonRpcProvider(rpc, MAINNET, { staticNetwork: true });
     await Promise.race([
       p.getBlockNumber(),
@@ -1683,15 +1702,35 @@ async function updateTimer(timerId) {
     // If we have a txHash and have been waiting >15s, poll for receipt
     if (pending.txHash && elapsed > 15) {
       pending._pollAttempts++;
+
+      // Show an actionable fallback (Etherscan link + retry) instead of
+      // spinning "Waiting for confirmation..." forever.
+      const showVerifyFallback = (lead) => {
+        const esLink = `https://etherscan.io/tx/${pending.txHash}`;
+        timerEl.innerHTML = escapeHtml(lead) + ' <a href="' + esLink +
+          '" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;">Check Etherscan</a>';
+        if (!$('manualCheckBtn')) {
+          const btn = document.createElement('button');
+          btn.id = 'manualCheckBtn';
+          btn.textContent = 'Retry Check';
+          btn.className = 'secondary';
+          btn.style.marginTop = '8px';
+          btn.onclick = () => { pending._pollAttempts = 0; pending._pollErrors = 0; updateTimer(timerId); };
+          timerEl.parentNode.insertBefore(btn, timerEl.nextSibling);
+        }
+      };
+
       try {
         const p = rpcProvider || await getRpc();
         const receipt = await p.getTransactionReceipt(pending.txHash);
+        pending._pollErrors = 0; // RPC answered — reset the error streak
         if (receipt) {
           if (receipt.status === 1) {
             // TX confirmed! Update pending
             pending.confirmed = true;
             pending.timestamp = Math.floor(Date.now() / 1000);
             delete pending._pollAttempts;
+            delete pending._pollErrors;
             savePending(pending);
             showStatus('Commitment confirmed! Wait 60 seconds then reveal.', 'success', pending.txHash);
           } else {
@@ -1701,23 +1740,23 @@ async function updateTimer(timerId) {
             return;
           }
         } else if (pending._pollAttempts >= 30) {
-          // After ~30 failed polls, show manual check option
-          const esLink = `https://etherscan.io/tx/${pending.txHash}`;
-          timerEl.innerHTML = 'Could not verify tx. <a href="' + esLink + '" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;">Check Etherscan</a>';
-          // Add manual check button if not already present
-          if (!$('manualCheckBtn')) {
-            const btn = document.createElement('button');
-            btn.id = 'manualCheckBtn';
-            btn.textContent = 'Retry Check';
-            btn.className = 'secondary';
-            btn.style.marginTop = '8px';
-            btn.onclick = () => { pending._pollAttempts = 0; updateTimer(timerId); };
-            timerEl.parentNode.insertBefore(btn, timerEl.nextSibling);
-          }
+          // Mined txs index within seconds; this long with no receipt means
+          // the RPC is behind or the tx never landed.
+          showVerifyFallback('Could not verify tx.');
           return; // Stop polling
         }
       } catch (e) {
-        // Ignore polling errors, will retry next tick
+        // Don't swallow: a failing free RPC used to spin "Waiting for
+        // confirmation..." forever with no signal (reported in the wild).
+        // Surface it after a short streak so the user can verify on Etherscan
+        // — or point the dapp at their own RPC — instead of being left guessing.
+        pending._pollErrors = (pending._pollErrors || 0) + 1;
+        console.error('Commit confirmation poll failed:', e);
+        if (pending._pollErrors >= 5) {
+          showStatus('Can\'t reach an RPC to confirm your commitment. It may have succeeded anyway — verify on Etherscan.', 'error', pending.txHash);
+          showVerifyFallback('RPC unreachable.');
+          return; // Stop the silent spin
+        }
       }
     }
   } else if (remaining > 0) {
