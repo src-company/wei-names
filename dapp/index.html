@@ -506,11 +506,56 @@ body.modal-open { overflow: hidden; }
   border-color: var(--btn-bg);
 }
 
+  /* Custom RPC settings */
+  .rpc-gear {
+    position: fixed;
+    bottom: max(20px, env(safe-area-inset-bottom, 0px));
+    right: calc(max(20px, env(safe-area-inset-right, 0px)) + 48px);
+    z-index: 100; background: none; border: none; padding: 8px; margin: 0;
+    color: var(--fg); opacity: 0.4; cursor: pointer; line-height: 0;
+    transition: opacity 0.2s;
+  }
+  .rpc-gear:hover { opacity: 1; background: none; }
+  .rpc-label { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; opacity: 0.7; margin-bottom: 8px; }
+  .rpc-input {
+    font-size: 15px; padding: 10px 12px; width: 100%;
+    border: 1px solid var(--border); background: var(--bg); color: var(--fg);
+  }
+  .rpc-input:focus { border-color: var(--fg); border-bottom-width: 1px; margin-bottom: 0; }
+  .rpc-hint { font-size: 12px; opacity: 0.6; margin: 8px 0 0; line-height: 1.5; }
+  .rpc-test { font-size: 12.5px; margin-top: 10px; min-height: 1.2em; }
+  .rpc-test.success { color: var(--status-success); }
+  .rpc-test.error { color: var(--status-error); }
+  .rpc-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+  .rpc-actions button { margin: 0; }
 </style>
 </head>
 <body>
 
 <div id="z-nav"></div>
+
+<button id="rpcGear" class="rpc-gear" onclick="openRpcSettings()" title="Network / RPC settings" aria-label="Network settings">
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+</button>
+
+<div id="rpcModalOverlay" class="wallet-modal-overlay" onclick="if(event.target===this)closeRpcSettings()">
+  <div class="wallet-modal" role="dialog" aria-modal="true" aria-label="Network settings">
+    <div class="wallet-modal-header">
+      <span class="wallet-modal-title">Network</span>
+      <button class="wallet-modal-close" onclick="closeRpcSettings()" aria-label="Close">&times;</button>
+    </div>
+    <div class="wallet-modal-body">
+      <label class="rpc-label" for="rpcInput">Custom RPC endpoint (optional)</label>
+      <input id="rpcInput" class="rpc-input" type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://your-node.example/rpc">
+      <p class="rpc-hint">Leave blank to use the built-in public RPCs. A private or paid node avoids rate limits and the "stuck waiting for confirmation" issue.</p>
+      <div id="rpcTestMsg" class="rpc-test" aria-live="polite"></div>
+      <div class="rpc-actions">
+        <button class="secondary" onclick="resetRpcSettings()">Reset</button>
+        <button onclick="saveRpcSettings()">Save &amp; test</button>
+      </div>
+    </div>
+  </div>
+</div>
 
 <div class="scroll-names">
   <div class="scroll-names-inner">
@@ -796,6 +841,74 @@ async function getRpc() {
 
 // Initialize RPC on load
 getRpc().catch(() => {});
+
+// --- Custom RPC settings UI ---
+function openRpcSettings() {
+  const url = new URLSearchParams(location.search).get('rpc');
+  let ls = ''; try { ls = localStorage.getItem('wns_rpc') || ''; } catch (e) {}
+  $('rpcInput').value = ls || url || '';
+  const msg = $('rpcTestMsg');
+  msg.className = 'rpc-test';
+  msg.textContent = url && !ls ? 'Currently set via ?rpc= in the URL.' : '';
+  $('rpcModalOverlay').classList.add('active');
+  document.body.classList.add('modal-open');
+}
+
+function closeRpcSettings() {
+  $('rpcModalOverlay').classList.remove('active');
+  document.body.classList.remove('modal-open');
+}
+
+// Probe an endpoint the same way getRpc() does, with a timeout.
+async function testRpcUrl(url) {
+  const p = new ethers.JsonRpcProvider(url, ethers.Network.from(1), { staticNetwork: true });
+  return Promise.race([
+    p.getBlockNumber(),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 6000))
+  ]);
+}
+
+async function saveRpcSettings() {
+  const raw = $('rpcInput').value.trim();
+  const msg = $('rpcTestMsg');
+  if (!raw) { resetRpcSettings(); return; }
+  if (!/^https?:\/\//i.test(raw)) {
+    msg.textContent = 'Enter a full https:// URL.';
+    msg.className = 'rpc-test error';
+    return;
+  }
+  msg.textContent = 'Testing…';
+  msg.className = 'rpc-test';
+  try {
+    const bn = await testRpcUrl(raw);
+    try { localStorage.setItem('wns_rpc', raw); } catch (e) {}
+    rpcProvider = null; readContract = null; // force re-init on the new endpoint
+    await getRpc();
+    msg.textContent = 'Connected ✓  (block ' + bn + ')';
+    msg.className = 'rpc-test success';
+    setTimeout(closeRpcSettings, 1000);
+  } catch (e) {
+    msg.textContent = 'Couldn\'t reach that RPC. Check the URL and try again.';
+    msg.className = 'rpc-test error';
+  }
+}
+
+function resetRpcSettings() {
+  try { localStorage.removeItem('wns_rpc'); } catch (e) {}
+  rpcProvider = null; readContract = null;
+  $('rpcInput').value = '';
+  const msg = $('rpcTestMsg');
+  msg.textContent = 'Back to the built-in public RPCs.';
+  msg.className = 'rpc-test';
+  getRpc().catch(() => {});
+}
+
+// Close the settings sheet on Escape.
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && $('rpcModalOverlay') && $('rpcModalOverlay').classList.contains('active')) {
+    closeRpcSettings();
+  }
+});
 
 // Wallet-agnostic tx.wait() - handles wallets that return bad data or hang
 async function waitForTx(tx, timeoutMs = 90000) {
