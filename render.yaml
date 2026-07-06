@@ -1,0 +1,25 @@
+# Render Blueprint — WNS (wei name service) dapp.
+#
+# Serves the static dapp in dapp/ (index.html + committed vendor/ bundles).
+# No build step; the app is client-side only (hash routing, public Ethereum
+# RPCs, and the *.wei.domains gateway) — no backend.
+#
+# The dapp also stays canonical on IPFS; this is the always-on access path.
+services:
+  - type: web
+    name: wns
+    runtime: static
+    staticPublishPath: dapp
+    buildCommand: echo "no build — static assets are committed"
+    domains:
+      - wei.domains
+    headers:
+      # Permissive CORS so an IPFS/mirror copy can pull assets if needed.
+      - path: /*
+        name: Access-Control-Allow-Origin
+        value: "*"
+    routes:
+      # SPA-style fallback for stray deep links (WNS uses #hash routing).
+      - type: rewrite
+        source: /*
+        destination: /index.html
