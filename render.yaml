@@ -7,7 +7,7 @@
 # The dapp also stays canonical on IPFS; this is the always-on access path.
 services:
   - type: web
-    name: wns
+    name: wei-dapp
     runtime: static
     staticPublishPath: dapp
     buildCommand: echo "no build — static assets are committed"
