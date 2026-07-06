@@ -23,3 +23,49 @@ services:
       - type: rewrite
         source: /*
         destination: /index.html
+
+  # 2) WNS wildcard gateway — serves every `<name>.wei.is` from the IPFS
+  #    contenthash of `<name>.wei`, read live from the WNS contract on each
+  #    request. No per-name DNS records: the `*.wei.is` domain below points all
+  #    undefined subdomains here (see gateway/README.md). Zero-dep plain ESM.
+  #
+  #    Note: the dapp is on wei.domains; individual .wei names resolve on wei.is.
+  #    The gateway's apex/site links already point to https://wei.domains.
+  #
+  #    SECURITY: keep GATEWAY_MODE=redirect. In redirect mode this service only
+  #    emits a 302, so untrusted `.wei` content executes on the IPFS gateway
+  #    origin — never on a *.wei.is origin. App subdomains are reserved in
+  #    handler.js (RESERVED_LABELS) and also win by DNS specificity.
+  - type: web
+    name: wns-gateway
+    runtime: node
+    rootDir: gateway
+    # Always-on so a freshly registered .wei name resolves instantly with no
+    # cold start. Switch to "free" to drop the ~$7/mo (spins down after 15 min).
+    plan: starter
+    buildCommand: echo "no build — plain ESM, zero deps"
+    startCommand: node server.js
+    healthCheckPath: /healthz
+    domains:
+      # Wildcard: catches every subdomain of wei.is that lacks a more specific
+      # record. Render issues the wildcard TLS cert (needs a DNS validation
+      # record at your DNS provider, alongside the *.wei.is CNAME/ALIAS).
+      - "*.wei.is"
+    envVars:
+      # 'redirect' (302, bandwidth-light) or 'proxy' (streams through this
+      # service). Keep 'redirect'.
+      - key: GATEWAY_MODE
+        value: redirect
+      - key: IPFS_SUBDOMAIN_GATEWAY
+        value: dweb.link
+      - key: IPFS_PATH_GATEWAY
+        value: https://ipfs.io
+      # Set to a trusted/authenticated mainnet RPC (comma-separated) so a
+      # malicious public RPC can't forge a contenthash. Falls back to a built-in
+      # public list if unset.
+      - key: RPC_URLS
+        sync: false
+      # Extra reserved labels to never treat as .wei names (added to the
+      # built-in www/api/zfi/multisig/srcco set). Comma-separated.
+      - key: RESERVED_LABELS
+        sync: false

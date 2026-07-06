@@ -1,0 +1,16 @@
+{
+  "name": "weiis-gateway",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Wildcard gateway: <name>.wei.is serves the IPFS contenthash of <name>.wei, read live from the WNS contract.",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "deploy:worker": "wrangler deploy"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

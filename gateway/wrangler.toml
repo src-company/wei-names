@@ -1,0 +1,22 @@
+name = "weiis-gateway"
+main = "worker.js"
+compatibility_date = "2024-01-01"
+
+# Wildcard route: every subdomain of wei.is that lacks a more specific record
+# hits this Worker. Explicit routes (e.g. api.zfi.wei.is/*) and explicit DNS
+# records still win by specificity, so app subdomains are never shadowed.
+# Requires wei.is to be a Cloudflare zone.
+routes = [
+  { pattern = "*.wei.is/*", zone_name = "wei.is" }
+]
+
+[vars]
+# 'redirect' (default, bandwidth-light) or 'proxy' (keeps <name>.wei.is in the
+# URL bar but streams content through the Worker).
+GATEWAY_MODE = "redirect"
+IPFS_SUBDOMAIN_GATEWAY = "dweb.link"
+IPFS_PATH_GATEWAY = "https://ipfs.io"
+# Comma-separated. Leave unset to use the built-in public RPC fallback list.
+# RPC_URLS = "https://eth.llamarpc.com,https://ethereum.publicnode.com"
+# Extra reserved labels beyond the built-in set (www,api,zfi,multisig,...).
+# RESERVED_LABELS = "srcco,docs"
