@@ -17,21 +17,20 @@ const ZONE = 'wei.limo,wei.is'
 
 // Labels that must never be treated as `.wei` names.
 //
-// SECURITY: with a `*.<zone>` wildcard in place, a *missing* explicit record no
-// longer fails safe (NXDOMAIN) — it fails OPEN to whatever this gateway
-// resolves. So real app subdomains must be reserved: if e.g. the `zfi.wei.is`
-// record is ever dropped, this stops whoever registered `zfi.wei` from silently
-// taking over that hostname.
+// Currently EMPTY: every subdomain resolves as a `.wei` name on every zone.
+// Real app subdomains (zfi.wei.is, multisig.wei.is, …) are protected solely by
+// their explicit DNS records, which win over the `*` wildcard by specificity —
+// so the gateway never even sees those hostnames.
 //
-// Infra labels are reserved on EVERY served zone. App subdomains are reserved
-// only on the zone where the app actually lives — otherwise they'd needlessly
-// block a legitimate `.wei` name on the other zones (e.g. `srcco.wei.limo`,
-// which should resolve since there's no srcco app on wei.limo).
+// Trade-off: no defense-in-depth backstop. If such an explicit record is ever
+// dropped, whoever owns the matching `.wei` name could serve content at that
+// hostname. Re-add labels below (or via the RESERVED_LABELS env var) to restore
+// it. RESERVED_ALL applies to every zone; RESERVED_BY_ZONE only to the named one.
 const RESERVED_ALL = new Set([
-  'www', 'api', 'mail', 'ns1', 'ns2', '_dmarc', '_domainkey',
+  // e.g. 'www' — reserve a label on every served zone
 ])
 const RESERVED_BY_ZONE = {
-  'wei.is': ['zfi', 'multisig', 'srcco'], // app subdomains that live on wei.is
+  // e.g. 'wei.is': ['zfi', 'multisig'] — reserve labels only on that zone
 }
 
 // Short in-memory cache of label -> { cid, at } to spare RPCs from repeat hits.
