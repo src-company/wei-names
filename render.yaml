@@ -47,10 +47,12 @@ services:
     startCommand: node server.js
     healthCheckPath: /healthz
     domains:
-      # Wildcard: catches every subdomain of wei.limo that lacks a more specific
-      # record. Render issues the wildcard TLS cert (needs a DNS validation
-      # record at your DNS provider, alongside the *.wei.limo CNAME/ALIAS).
+      # Wildcards: catch every subdomain of wei.limo / wei.is that lacks a more
+      # specific record. Render issues a wildcard TLS cert per domain (each needs
+      # a DNS validation record + the *.<zone> CNAME/ALIAS at your DNS provider).
+      # The gateway serves both zones (ZONE=wei.limo,wei.is in handler.js).
       - "*.wei.limo"
+      - "*.wei.is"
     envVars:
       # 'redirect' (302, bandwidth-light) or 'proxy' (streams through this
       # service). Keep 'redirect'.

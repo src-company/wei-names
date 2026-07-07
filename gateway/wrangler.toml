@@ -2,16 +2,19 @@ name = "weilimo-gateway"
 main = "worker.js"
 compatibility_date = "2024-01-01"
 
-# Wildcard route: every subdomain of wei.limo that lacks a more specific record
-# hits this Worker. Explicit routes (e.g. api.zfi.wei.limo/*) and explicit DNS
-# records still win by specificity, so app subdomains are never shadowed.
-# Requires wei.limo to be a Cloudflare zone.
+# Wildcard routes: every subdomain of these zones that lacks a more specific
+# record hits this Worker. Explicit routes (e.g. api.zfi.wei.is/*) and explicit
+# DNS records still win by specificity, so app subdomains are never shadowed.
+# Each zone listed here must be a Cloudflare zone for the Worker path.
 routes = [
-  { pattern = "*.wei.limo/*", zone_name = "wei.limo" }
+  { pattern = "*.wei.limo/*", zone_name = "wei.limo" },
+  { pattern = "*.wei.is/*", zone_name = "wei.is" }
 ]
 
 [vars]
-# 'redirect' (default, bandwidth-light) or 'proxy' (keeps <name>.wei.limo in the
+# Zones served (comma-separated). Matches the default in handler.js.
+ZONE = "wei.limo,wei.is"
+# 'redirect' (default, bandwidth-light) or 'proxy' (keeps <name>.<zone> in the
 # URL bar but streams content through the Worker).
 GATEWAY_MODE = "redirect"
 IPFS_SUBDOMAIN_GATEWAY = "dweb.link"

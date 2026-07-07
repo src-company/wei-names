@@ -1,4 +1,4 @@
-// Core wildcard gateway: <label>.wei.limo  ->  IPFS content of <label>.wei.
+// Core wildcard gateway: <label>.wei.limo / <label>.wei.is  ->  IPFS of <label>.wei.
 //
 // This is the whole automation. There is NO per-name DNS provisioning: a single
 // `*.wei.limo` wildcard record points every undefined subdomain here, and this
@@ -11,7 +11,9 @@
 import { resolveContenthash } from './wns.js'
 import { contenthashToCid } from './contenthash.js'
 
-const ZONE = 'wei.limo'
+// Zones this gateway serves. Comma-separated; a request to <label>.<zone>
+// resolves the IPFS content of <label>.wei for ANY listed zone.
+const ZONE = 'wei.limo,wei.is'
 
 // Labels that must never be treated as `.wei` names.
 //
@@ -48,22 +50,24 @@ function readEnv(env, key, fallback) {
   return v === undefined || v === null || v === '' ? fallback : v
 }
 
-// Pull the WNS subdomain out of a Host header. `alice.wei.limo` -> `alice.wei`,
-// `docs.alice.wei.limo` -> `docs.alice.wei`. Returns null for the apex or a
-// non-wei.limo host.
-function labelFromHost(host, zone) {
+// Pull the WNS subdomain out of a Host header, for any served zone.
+// `alice.wei.limo` -> `alice.wei`, `docs.alice.wei.is` -> `docs.alice.wei`.
+// Returns null for a zone apex, or a host in none of the served zones.
+function labelFromHost(host, zones) {
   if (!host) return null
   const h = host.toLowerCase().split(':')[0] // strip port
-  const suffix = '.' + zone
-  if (!h.endsWith(suffix)) return null
-  const sub = h.slice(0, -suffix.length)
-  if (!sub) return null // apex `wei.limo`
-  return sub
+  for (const zone of zones) {
+    const suffix = '.' + zone
+    if (!h.endsWith(suffix)) continue
+    const sub = h.slice(0, -suffix.length)
+    return sub || null // null for the zone apex (e.g. `wei.limo`)
+  }
+  return null
 }
 
 export async function handleRequest(request, env) {
   const url = new URL(request.url)
-  const zone = readEnv(env, 'ZONE', ZONE)
+  const zones = String(readEnv(env, 'ZONE', ZONE)).split(',').map((s) => s.trim()).filter(Boolean)
 
   if (request.method !== 'GET' && request.method !== 'HEAD') {
     return new Response('Method Not Allowed', { status: 405 })
@@ -76,7 +80,7 @@ export async function handleRequest(request, env) {
 
   const host =
     request.headers.get('x-forwarded-host') || request.headers.get('host') || url.hostname
-  const sub = labelFromHost(host, zone)
+  const sub = labelFromHost(host, zones)
   if (!sub) {
     // Apex or unexpected host — send people to the WNS site.
     return Response.redirect('https://wei.domains', 302)
