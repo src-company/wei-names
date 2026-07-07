@@ -32,10 +32,11 @@ services:
   #    Note: the dapp is on wei.domains; individual .wei names resolve on wei.limo.
   #    The gateway's apex/site links already point to https://wei.domains.
   #
-  #    SECURITY: keep GATEWAY_MODE=redirect. In redirect mode this service only
-  #    emits a 302, so untrusted `.wei` content executes on the IPFS gateway
-  #    origin — never on a *.wei.limo origin. App subdomains are reserved in
-  #    handler.js (RESERVED_LABELS) and also win by DNS specificity.
+  #    GATEWAY_MODE=proxy: the service streams IPFS content back so <name>.<zone>
+  #    stays in the URL bar (no redirect). TRADE-OFF: untrusted `.wei` content
+  #    then runs on a *.<zone> origin, same-site with any real apps on that zone
+  #    (e.g. multisig.wei.is). Set-Cookie is stripped and nosniff is sent, but
+  #    for per-CID origin isolation switch back to 'redirect'.
   - type: web
     name: wns-gateway
     runtime: node
@@ -54,10 +55,10 @@ services:
       - "*.wei.limo"
       - "*.wei.is"
     envVars:
-      # 'redirect' (302, bandwidth-light) or 'proxy' (streams through this
-      # service). Keep 'redirect'.
+      # 'proxy' (streams through this service; keeps <name>.<zone> in the URL
+      # bar) or 'redirect' (302, bandwidth-light, per-CID origin isolation).
       - key: GATEWAY_MODE
-        value: redirect
+        value: proxy
       - key: IPFS_SUBDOMAIN_GATEWAY
         value: dweb.link
       - key: IPFS_PATH_GATEWAY
