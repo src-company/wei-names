@@ -17,16 +17,22 @@ const ZONE = 'wei.limo,wei.is'
 
 // Labels that must never be treated as `.wei` names.
 //
-// SECURITY: with a `*.wei.limo` wildcard in place, a *missing* explicit record no
+// SECURITY: with a `*.<zone>` wildcard in place, a *missing* explicit record no
 // longer fails safe (NXDOMAIN) — it fails OPEN to whatever this gateway
-// resolves. So every real app subdomain MUST be listed here: if e.g. the
-// `srcco.wei.limo` record is ever dropped again, this list stops an attacker who
-// registered `srcco.wei` from silently taking over that hostname. Keep it in
-// sync with the app subdomains on wei.limo (also settable via RESERVED_LABELS).
-const DEFAULT_RESERVED = new Set([
+// resolves. So real app subdomains must be reserved: if e.g. the `zfi.wei.is`
+// record is ever dropped, this stops whoever registered `zfi.wei` from silently
+// taking over that hostname.
+//
+// Infra labels are reserved on EVERY served zone. App subdomains are reserved
+// only on the zone where the app actually lives — otherwise they'd needlessly
+// block a legitimate `.wei` name on the other zones (e.g. `srcco.wei.limo`,
+// which should resolve since there's no srcco app on wei.limo).
+const RESERVED_ALL = new Set([
   'www', 'api', 'mail', 'ns1', 'ns2', '_dmarc', '_domainkey',
-  'zfi', 'multisig', 'srcco', // <-- app subdomains; extend as you add apps
 ])
+const RESERVED_BY_ZONE = {
+  'wei.is': ['zfi', 'multisig', 'srcco'], // app subdomains that live on wei.is
+}
 
 // Short in-memory cache of label -> { cid, at } to spare RPCs from repeat hits.
 // Best-effort (per worker isolate / per Node process); not a correctness path.
@@ -51,7 +57,7 @@ function readEnv(env, key, fallback) {
 }
 
 // Pull the WNS subdomain out of a Host header, for any served zone.
-// `alice.wei.limo` -> `alice.wei`, `docs.alice.wei.is` -> `docs.alice.wei`.
+// `alice.wei.limo` -> { sub: 'alice.wei', zone: 'wei.limo' }.
 // Returns null for a zone apex, or a host in none of the served zones.
 function labelFromHost(host, zones) {
   if (!host) return null
@@ -60,7 +66,8 @@ function labelFromHost(host, zones) {
     const suffix = '.' + zone
     if (!h.endsWith(suffix)) continue
     const sub = h.slice(0, -suffix.length)
-    return sub || null // null for the zone apex (e.g. `wei.limo`)
+    if (!sub) return null // zone apex (e.g. `wei.limo`)
+    return { sub, zone }
   }
   return null
 }
@@ -80,15 +87,17 @@ export async function handleRequest(request, env) {
 
   const host =
     request.headers.get('x-forwarded-host') || request.headers.get('host') || url.hostname
-  const sub = labelFromHost(host, zones)
-  if (!sub) {
+  const match = labelFromHost(host, zones)
+  if (!match) {
     // Apex or unexpected host — send people to the WNS site.
     return Response.redirect('https://wei.domains', 302)
   }
+  const { sub, zone } = match
 
   const firstLabel = sub.split('.')[0]
   const reserved = new Set([
-    ...DEFAULT_RESERVED,
+    ...RESERVED_ALL,
+    ...(RESERVED_BY_ZONE[zone] || []),
     ...String(readEnv(env, 'RESERVED_LABELS', '')).split(',').map((s) => s.trim()).filter(Boolean),
   ])
   if (reserved.has(firstLabel)) {
