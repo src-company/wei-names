@@ -7,13 +7,20 @@
   z-index:100;
 }
 .wallet button {
-  margin:0; padding:0; border:none; text-transform:lowercase;
-  background:none; color:var(--fg); opacity:0.5;
+  margin:0; padding:6px 12px; text-transform:lowercase;
+  color:var(--fg); opacity:0.7;
   font-size:11px; font-weight:400; letter-spacing:0.05em;
-  text-decoration:underline; text-underline-offset:3px;
+  text-decoration:none;
+  /* Subtle backdrop pill so it stays legible over page content when scrolling.
+     Solid var(--bg) fallback for browsers without color-mix/backdrop-filter. */
+  background:var(--bg);
+  background:color-mix(in srgb, var(--bg) 82%, transparent);
+  -webkit-backdrop-filter:blur(6px); backdrop-filter:blur(6px);
+  border:1px solid var(--border-muted); border-radius:999px;
+  transition:opacity 0.15s, border-color 0.15s, background 0.15s;
 }
-.wallet button:hover { background:none; opacity:1; }
-.wallet button.connected { opacity:0.7; font-weight:600; text-transform:none; text-decoration:none; }
+.wallet button:hover { opacity:1; border-color:var(--border); background:var(--surface); }
+.wallet button.connected { opacity:0.9; font-weight:600; text-transform:none; }
 
 /* Wallet modal */
 .wallet-modal-overlay {
@@ -54,8 +61,8 @@ body.modal-open { overflow:hidden; }
 
 /* Mobile */
 @media (max-width: 600px) {
-  .wallet { top:12px; right:16px; }
-  .wallet button { font-size:12px; padding:12px 0; }
+  .wallet { top:max(12px, env(safe-area-inset-top, 0px)); right:16px; }
+  .wallet button { font-size:12px; padding:8px 14px; }
   .wallet-modal-overlay { padding:0; padding-top:0; align-items:flex-end; }
   .wallet-modal { max-width:100%; margin:0; border-left:none; border-right:none; border-bottom:none; max-height:85vh; max-height:85dvh; padding:16px; padding-bottom:max(16px, env(safe-area-inset-bottom)); }
   .wallet-option { padding:14px 16px; }

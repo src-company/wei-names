@@ -149,6 +149,9 @@ function readWalletConnectRedirect(metadata) {
 // --- Connect ---
 async function connectWithWallet(walletKey, options = {}) {
   if (_isConnecting) return;
+  // A silent auto-connect must never override a wallet the user connected
+  // manually while we were waiting for the saved provider to announce.
+  if (options.silent && _connectedAddress) return;
   _isConnecting = true;
   const silent = !!options.silent;
   try {
@@ -161,6 +164,14 @@ async function connectWithWallet(walletKey, options = {}) {
       if (_walletConnectProvider) { try { await _walletConnectProvider.disconnect?.(); } catch (e) {} _walletConnectProvider = null; }
       _walletConnectProvider = await WCProvider.init({ projectId: WC_PROJECT_ID, chains: [1], showQrModal: !silent, rpcMap: { 1: 'https://1rpc.io/eth' }, metadata: { name: _appName, description: _appName, url: window.location.origin, icons: [] } });
       if (!silent) _walletConnectProvider.on('display_uri', () => { _wcDeepLink = readWalletConnectRedirect(_walletConnectProvider.session?.peer?.metadata); });
+      // WalletConnect v2 emits 'disconnect'/'session_delete' when the session is
+      // ended from the wallet side or expires — it does NOT emit accountsChanged:[]
+      // then, so without this the dapp lingers in a ghost-connected state. The
+      // guard makes it a no-op after a manual disconnect (which already cleared
+      // _isWalletConnect), so _onDisconnectCallbacks never double-fire.
+      const _wcEnd = () => { if (_isWalletConnect && _connectedAddress) { try { window.disconnectWallet(); } catch (e) {} } };
+      _walletConnectProvider.on('disconnect', _wcEnd);
+      _walletConnectProvider.on('session_delete', _wcEnd);
       await _walletConnectProvider.enable();
       walletProvider = _walletConnectProvider;
       _isWalletConnect = true;
@@ -183,6 +194,16 @@ async function connectWithWallet(walletKey, options = {}) {
         }
       }
       _isWalletConnect = false; _wcDeepLink = null;
+    } else if (walletKey.startsWith('provider_')) {
+      // Legacy window.ethereum.providers[] entry. Resolve by saved name first
+      // (index can shift between loads); fall back to index, then window.ethereum.
+      const list = (window.ethereum && window.ethereum.providers) || [];
+      const nameOf = (p) => p.isMetaMask ? 'metamask' : p.isCoinbaseWallet ? 'coinbase' : p.isRabby ? 'rabby' : p.isRainbow ? 'rainbow' : null;
+      const savedName = (localStorage.getItem('zfi_wallet_name') || '').toLowerCase();
+      if (savedName) walletProvider = list.find(p => nameOf(p) === savedName);
+      if (!walletProvider) walletProvider = list[parseInt(walletKey.slice(9), 10)];
+      walletProvider = walletProvider || window.ethereum;
+      _isWalletConnect = false; _wcDeepLink = null;
     } else {
       walletProvider = WALLET_CONFIG[walletKey]?.getProvider() || window.ethereum;
       _isWalletConnect = false; _wcDeepLink = null;
@@ -203,7 +224,7 @@ async function connectWithWallet(walletKey, options = {}) {
     const chainId = await walletProvider.request({ method: 'eth_chainId' });
     if (BigInt(chainId) !== 1n) {
       try { await walletProvider.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: '0x1' }] }); const nc = await walletProvider.request({ method: 'eth_chainId' }); if (BigInt(nc) !== 1n) throw new Error('Chain switch failed'); }
-      catch (switchErr) { if (!silent) console.error('Chain switch failed:', switchErr); document.getElementById('walletBtn').textContent = 'connect'; if (!silent && typeof showStatus === 'function') showStatus('Please switch to Ethereum mainnet in your wallet.', 'error'); if (walletKey === 'walletconnect') { try { _walletConnectProvider?.disconnect(); } catch (e) {} _walletConnectProvider = null; } _isWalletConnect = false; _wcDeepLink = null; return; }
+      catch (switchErr) { if (!silent) console.error('Chain switch failed:', switchErr); document.getElementById('walletBtn').textContent = 'connect'; if (!silent && typeof showStatus === 'function') showStatus('Please switch to Ethereum mainnet in your wallet.', 'error'); if (walletKey === 'walletconnect') { try { Promise.resolve(_walletConnectProvider?.disconnect()).catch(() => {}); } catch (e) {} _walletConnectProvider = null; } _isWalletConnect = false; _wcDeepLink = null; return; }
     }
     _walletProvider = new ethers.BrowserProvider(walletProvider);
     _signer = await _walletProvider.getSigner();
@@ -270,6 +291,11 @@ async function connectWithWallet(walletKey, options = {}) {
         const name = eip6963Providers.get(uuid)?.info?.name;
         if (name) localStorage.setItem('zfi_wallet_name', name);
         else localStorage.removeItem('zfi_wallet_name');
+      } else if (walletKey.startsWith('provider_')) {
+        const p = ((window.ethereum && window.ethereum.providers) || [])[parseInt(walletKey.slice(9), 10)];
+        const name = p && (p.isMetaMask ? 'MetaMask' : p.isCoinbaseWallet ? 'Coinbase' : p.isRabby ? 'Rabby' : p.isRainbow ? 'Rainbow' : null);
+        if (name) localStorage.setItem('zfi_wallet_name', name);
+        else localStorage.removeItem('zfi_wallet_name');
       } else {
         localStorage.removeItem('zfi_wallet_name');
       }
@@ -281,7 +307,7 @@ async function connectWithWallet(walletKey, options = {}) {
     document.getElementById('walletBtn').textContent = 'connect';
     if (silent) {
       // Auto-connect failed silently — clean up WC provider if applicable
-      if (_walletConnectProvider) { try { _walletConnectProvider.disconnect(); } catch (_) {} _walletConnectProvider = null; }
+      if (_walletConnectProvider) { try { Promise.resolve(_walletConnectProvider.disconnect()).catch(() => {}); } catch (_) {} _walletConnectProvider = null; }
       // Only clear saved wallet for permanent failures (wallet not found),
       // not transient ones (provider not ready, RPC timeout)
       const errMsg = error?.message || '';
@@ -302,7 +328,7 @@ async function connectWithWallet(walletKey, options = {}) {
 window.disconnectWallet = function() {
   if (_connectedWalletProvider && _walletEventHandlers) { try { _connectedWalletProvider.removeListener('accountsChanged', _walletEventHandlers.accountsChanged); _connectedWalletProvider.removeListener('chainChanged', _walletEventHandlers.chainChanged); } catch (e) {} }
   _walletEventHandlers = null;
-  if (_walletConnectProvider) { try { _walletConnectProvider.disconnect(); } catch (e) {} _walletConnectProvider = null; }
+  if (_walletConnectProvider) { try { Promise.resolve(_walletConnectProvider.disconnect()).catch(() => {}); } catch (e) {} _walletConnectProvider = null; }
   _walletProvider = null; _signer = null; _connectedAddress = null; _connectedWalletProvider = null; _isWalletConnect = false; _wcDeepLink = null; _walletSendCalls = false;
   document.getElementById('walletBtn').textContent = 'connect';
   document.getElementById('walletBtn').classList.remove('connected');
@@ -320,7 +346,36 @@ window.connectWallet = async function() {
 
 let _rpcProvider = null;
 function getRpcProvider() {
-  if (!_rpcProvider) _rpcProvider = new ethers.JsonRpcProvider(RPCS[0], 1, { staticNetwork: true });
+  if (_rpcProvider) return _rpcProvider;
+  // Honor the same custom-RPC override the main app supports (?rpc= / wns_rpc) and
+  // fail over across the public endpoints, so a single throttled node (publicnode is
+  // the most rate-limited) can't silently break reverse resolution of the display name.
+  let urls = RPCS;
+  try {
+    const custom = [];
+    const q = new URLSearchParams(location.search).get('rpc');
+    if (q) custom.push(...q.split(','));
+    const ls = localStorage.getItem('wns_rpc');
+    if (ls) custom.push(...ls.split(','));
+    const cleaned = custom.map(s => s.trim()).filter(u => /^https?:\/\//i.test(u));
+    if (cleaned.length) urls = cleaned;
+  } catch (e) {}
+  try {
+    if (urls.length === 1) {
+      _rpcProvider = new ethers.JsonRpcProvider(urls[0], 1, { staticNetwork: true });
+    } else {
+      // quorum:1 is load-bearing: one healthy endpoint is enough (the default
+      // quorum of 2 would stall when only a single node is reachable).
+      _rpcProvider = new ethers.FallbackProvider(
+        urls.map(u => ({ provider: new ethers.JsonRpcProvider(u, 1, { staticNetwork: true }), stallTimeout: 2000, weight: 1 })),
+        1,
+        { quorum: 1 }
+      );
+    }
+  } catch (e) {
+    // Fall back to the first endpoint if FallbackProvider isn't available.
+    _rpcProvider = new ethers.JsonRpcProvider(urls[0], 1, { staticNetwork: true });
+  }
   return _rpcProvider;
 }
 

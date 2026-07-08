@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>WNS</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 400 400' width='400' height='400'%3E%3Crect width='400' height='400' fill='%23000'/%3E%3CclipPath id='frame'%3E%3Crect width='400' height='400'/%3E%3C/clipPath%3E%3Cg clip-path='url(%23frame)'%3E%3Cpath d='M-60-20L460-20L460 90L80 310L460 310L460 420L-60 420L-60 310L320 90L-60 90Z' fill='white'/%3E%3C/g%3E%3C/svg%3E" type="image/svg+xml">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2064%2064%22%3E%3Crect%20width%3D%2264%22%20height%3D%2264%22%20fill%3D%22%230A0A0A%22%2F%3E%3Cpath%20d%3D%22M16%2C16%20V48%20H22%20L32%2C32%20L42%2C48%20H48%20V16%20H42%20V38%20L32%2C22%20L22%2C38%20V16%20Z%22%20fill%3D%22%232D5FE8%22%2F%3E%3C%2Fsvg%3E">
 <link rel="stylesheet" href="theme.css">
 <link rel="stylesheet" href="wallet.css">
 <link rel="modulepreload" href="vendor/ens-normalize.min.js">
@@ -268,60 +268,8 @@ button.secondary:hover { background: var(--surface-hover); }
   position: relative;
 }
 
-/* Modal */
-.modal-overlay {
-  display: none;
-  position: fixed;
-  top: 0; left: 0; right: 0; bottom: 0;
-  background: var(--modal-overlay);
-  backdrop-filter: blur(4px);
-  z-index: 2000;
-  justify-content: center;
-  align-items: flex-start;
-  padding: 20px;
-  padding-top: max(60px, env(safe-area-inset-top, 60px));
-  overflow-y: auto;
-}
-.modal-overlay.active { display: flex; }
+/* Modal open state (modal styles live in wallet.css as .wallet-modal*) */
 body.modal-open { overflow: hidden; }
-.modal {
-  background: var(--modal-bg);
-  border: 1px solid var(--modal-border);
-  padding: 20px;
-  width: 100%;
-  max-width: 360px;
-  max-height: calc(100vh - 80px);
-  max-height: calc(100dvh - 80px);
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-.modal-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 16px;
-  flex-shrink: 0;
-}
-.modal-title {
-  font-size: 14px;
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
-}
-.modal-close {
-  background: none;
-  border: none;
-  color: var(--fg);
-  font-size: 24px;
-  cursor: pointer;
-  line-height: 1;
-  padding: 8px;
-  margin: -8px;
-  opacity: 0.4;
-  transition: opacity 0.15s;
-}
-.modal-close:hover { opacity: 1; }
-.modal-body { overflow-y: auto; -webkit-overflow-scrolling: touch; }
 
 /* Manage section */
 .manage {
@@ -424,6 +372,16 @@ body.modal-open { overflow: hidden; }
   0% { transform: translateY(0); }
   100% { transform: translateY(-50%); }
 }
+/* Honor reduced-motion: stop the infinite name ticker and near-instant transitions */
+@media (prefers-reduced-motion: reduce) {
+  .scroll-names-inner { animation: none; }
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
 @media (max-width: 700px) {
   .scroll-names { display: none; }
   body { padding: 80px 16px 100px; }
@@ -436,8 +394,6 @@ body.modal-open { overflow: hidden; }
   .pay-method { flex-wrap: wrap; }
   .pending .actions { flex-direction: row; gap: 8px; }
   .pending .actions button { flex: 1; }
-  .modal-overlay { padding: 0; padding-top: 0; align-items: flex-end; }
-  .modal { max-width: 100%; margin: 0; border-left: none; border-right: none; border-bottom: none; max-height: 85vh; max-height: 85dvh; padding: 16px; padding-bottom: max(16px, env(safe-area-inset-bottom)); }
   .send-form { padding: 14px; }
   .send-form button { width: auto; display: inline-block; }
   .manage-form button { width: auto; display: inline-block; }
@@ -507,15 +463,22 @@ body.modal-open { overflow: hidden; }
 }
 
   /* Custom RPC settings */
+  /* Sits left of the dark-mode toggle; offsets mirror .dark-toggle's box
+     model so both icons share the same visual centre on every screen size. */
   .rpc-gear {
     position: fixed;
-    bottom: max(20px, env(safe-area-inset-bottom, 0px));
-    right: calc(max(20px, env(safe-area-inset-right, 0px)) + 48px);
-    z-index: 100; background: none; border: none; padding: 8px; margin: 0;
-    color: var(--fg); opacity: 0.4; cursor: pointer; line-height: 0;
-    transition: opacity 0.2s;
+    bottom: calc(max(20px, env(safe-area-inset-bottom, 0px)) - 13px);
+    right: calc(max(20px, env(safe-area-inset-right, 0px)) + 27px);
+    z-index: 100;
+    width: 40px; height: 40px;
+    display: flex; align-items: center; justify-content: center;
+    background: none; border: none; padding: 0; margin: 0;
+    color: var(--fg); opacity: 0.5; cursor: pointer;
+    border-radius: 50%;
+    transition: opacity 0.2s, background 0.15s;
   }
-  .rpc-gear:hover { opacity: 1; background: none; }
+  .rpc-gear svg { width: 18px; height: 18px; }
+  .rpc-gear:hover, .rpc-gear:focus-visible { opacity: 1; background: var(--surface-hover); outline: none; }
   .rpc-label { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; opacity: 0.7; margin-bottom: 8px; }
   .rpc-input {
     font-size: 15px; padding: 10px 12px; width: 100%;
@@ -524,10 +487,91 @@ body.modal-open { overflow: hidden; }
   .rpc-input:focus { border-color: var(--fg); border-bottom-width: 1px; margin-bottom: 0; }
   .rpc-hint { font-size: 12px; opacity: 0.6; margin: 8px 0 0; line-height: 1.5; }
   .rpc-test { font-size: 12.5px; margin-top: 10px; min-height: 1.2em; }
-  .rpc-test.success { color: var(--status-success); }
-  .rpc-test.error { color: var(--status-error); }
+  .rpc-test.success { color: #1a7f37; }
+  .rpc-test.error { color: #cf222e; }
+  :root.dark .rpc-test.success { color: #3fb950; }
+  :root.dark .rpc-test.error { color: #f85149; }
   .rpc-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
   .rpc-actions button { margin: 0; }
+
+  /* "featured on" press card */
+  .featured { margin-top: 64px; text-align: center; }
+  .featured-label {
+    display: block; font-size: 10px; text-transform: uppercase;
+    letter-spacing: 0.12em; opacity: 0.4; margin-bottom: 14px;
+  }
+  .featured-card {
+    display: flex; align-items: stretch; text-align: left;
+    max-width: 380px; margin: 0 auto;
+    border: 1px solid var(--border-muted); text-decoration: none;
+    color: var(--fg); overflow: hidden;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .featured-card:hover { border-color: var(--border); background: var(--surface); }
+  .featured-thumb { width: 120px; object-fit: cover; flex-shrink: 0; display: block; }
+  .featured-text { display: flex; flex-direction: column; justify-content: center; gap: 3px; padding: 10px 14px; min-width: 0; }
+  .featured-site { font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; opacity: 0.5; }
+  .featured-title { font-size: 13px; font-weight: 600; line-height: 1.25; }
+  .featured-desc { font-size: 11px; opacity: 0.6; line-height: 1.35; }
+
+  /* "use your .wei on" integrations row */
+  .integrations { margin-top: 44px; text-align: center; }
+  .integrations-label {
+    display: block; font-size: 10px; text-transform: uppercase;
+    letter-spacing: 0.12em; opacity: 0.4; margin-bottom: 16px;
+  }
+  .integrations-row {
+    display: flex; flex-wrap: wrap; justify-content: center;
+    align-items: center; gap: 12px 22px;
+  }
+  .integration {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-size: 12px; color: var(--fg); text-decoration: none;
+    opacity: 0.55; transition: opacity 0.15s;
+  }
+  .integration:hover { opacity: 1; }
+  .integration img { width: 22px; height: 22px; border-radius: 5px; object-fit: contain; display: block; }
+  .integrations-more { font-size: 12px; font-style: italic; opacity: 0.35; color: var(--fg); text-decoration: none; transition: opacity 0.15s; }
+  .integrations-more:hover { opacity: 0.7; }
+
+  /* DAO launch announcement banner */
+  .dao-banner {
+    display: flex; align-items: stretch;
+    margin: 0 0 32px; border-radius: 5px;
+    background: rgba(45,95,232,0.055);
+    border: 1px solid rgba(45,95,232,0.22);
+  }
+  :root.dark .dao-banner { background: rgba(45,95,232,0.13); border-color: rgba(45,95,232,0.32); }
+  .dao-banner-link {
+    display: flex; align-items: center; gap: 11px; flex: 1; min-width: 0;
+    padding: 11px 14px; text-decoration: none; color: var(--fg);
+  }
+  .dao-banner-dot {
+    flex-shrink: 0; width: 7px; height: 7px; border-radius: 50%;
+    background: #2D5FE8; box-shadow: 0 0 0 3px rgba(45,95,232,0.15);
+  }
+  .dao-banner-text { font-size: 12.5px; line-height: 1.4; }
+  .dao-banner-em { color: #2D5FE8; font-weight: 600; }
+  :root.dark .dao-banner-em { color: #6b8ff2; }
+  .dao-banner-arrow { flex-shrink: 0; margin-left: auto; opacity: 0.4; transition: transform 0.15s, opacity 0.15s; }
+  .dao-banner-link:hover .dao-banner-arrow { transform: translateX(3px); opacity: 0.9; }
+  .dao-banner-close {
+    flex-shrink: 0; width: auto; /* override global mobile `button { width:100% }` */
+    background: none; border: none; color: var(--fg);
+    font-size: 20px; line-height: 1; padding: 0 12px; margin: 0; cursor: pointer;
+    opacity: 0.3; transition: opacity 0.15s;
+  }
+  .dao-banner-close:hover { opacity: 0.9; background: none; }
+  @media (max-width: 600px) {
+    /* Text wraps to 2-3 lines on phones; top-align the dot and close so they
+       sit on the first line instead of floating in the vertical middle. */
+    .dao-banner { margin-bottom: 24px; align-items: flex-start; }
+    .dao-banner-link { padding: 12px; gap: 10px; align-items: flex-start; }
+    .dao-banner-dot { margin-top: 5px; }
+    .dao-banner-text { font-size: 12px; line-height: 1.45; }
+    .dao-banner-arrow { display: none; }
+    .dao-banner-close { padding: 11px 13px; font-size: 22px; align-self: flex-start; }
+  }
 </style>
 </head>
 <body>
@@ -620,6 +664,19 @@ body.modal-open { overflow: hidden; }
   </div>
 </div>
 
+<div id="daoBanner" class="dao-banner">
+  <a class="dao-banner-link" href="https://dao.wei.limo" target="_blank" rel="noopener">
+    <span class="dao-banner-dot" aria-hidden="true"></span>
+    <span class="dao-banner-text">WNS is 100% owned by .wei domain holders — name-weighted conviction voting <span class="dao-banner-em">now live</span></span>
+    <span class="dao-banner-arrow" aria-hidden="true">→</span>
+  </a>
+  <button class="dao-banner-close" type="button" aria-label="Dismiss announcement" onclick="dismissDaoBanner()">&times;</button>
+</div>
+<script>
+function dismissDaoBanner(){var b=document.getElementById('daoBanner');if(b)b.style.display='none';try{localStorage.setItem('wns_dao_banner','1')}catch(_){}}
+try{if(localStorage.getItem('wns_dao_banner')==='1'){var _db=document.getElementById('daoBanner');if(_db)_db.style.display='none';}}catch(_){}
+</script>
+
 <h1>wei name service</h1>
 
 <div class="section">
@@ -709,12 +766,44 @@ body.modal-open { overflow: hidden; }
 
 <div id="status" class="status"></div>
 
+<div class="featured">
+  <span class="featured-label">featured on</span>
+  <a href="https://www.bankless.com/read/getting-started-with-the-wei-name-service" target="_blank" rel="noopener" class="featured-card">
+    <img class="featured-thumb" src="assets/bankless-article.jpg" alt="" width="120" height="63" loading="lazy">
+    <span class="featured-text">
+      <span class="featured-site">Bankless</span>
+      <span class="featured-title">Getting Started with the Wei Name Service</span>
+      <span class="featured-desc">A lean Ethereum naming experiment for affordable onchain domains.</span>
+    </span>
+  </a>
+</div>
+
+<div class="integrations">
+  <span class="integrations-label">use your .wei on</span>
+  <div class="integrations-row">
+    <a href="https://github.com/solardev-xyz/freedom-browser" target="_blank" rel="noopener" class="integration" title="Freedom Browser">
+      <img src="assets/freedom-browser.png" alt="" width="22" height="22" loading="lazy"><span>Freedom Browser</span>
+    </a>
+    <a href="https://walletchan.com/" target="_blank" rel="noopener" class="integration" title="WalletChan">
+      <img src="assets/walletchan.png" alt="" width="22" height="22" loading="lazy"><span>WalletChan</span>
+    </a>
+    <a href="https://poidh.xyz/" target="_blank" rel="noopener" class="integration" title="poidh">
+      <img src="assets/poidh.svg" alt="" width="22" height="22" loading="lazy"><span>poidh</span>
+    </a>
+    <a href="https://x.com/search?q=%22.wei%22&amp;src=typed_query" target="_blank" rel="noopener" class="integrations-more" title="Explore .wei names on X">and more</a>
+  </div>
+</div>
+
 <footer style="margin-top:60px;padding:24px 0 12px;text-align:center;font-size:11px;opacity:0.5;border-top:1px solid var(--manage-border);">
-  <a href="https://opensea.io/collection/wei-name-service" target="_blank" rel="noopener">WNS on OpenSea</a>
+  <a href="https://opensea.io/collection/wei-name-service" target="_blank" rel="noopener"><svg fill="currentColor" width="13" height="13" viewBox="0 0 360 360" xmlns="http://www.w3.org/2000/svg" style="vertical-align:middle;margin-right:4px"><path d="M181.566 1.00604e-05C80.91 -0.82799 -0.82799 80.91 1.00604e-05 181.566C0.84601 279.306 80.694 359.172 178.416 359.982C279.072 360.846 360.846 279.072 359.982 178.416C359.172 80.712 279.306 0.84601 181.566 1.00604e-05ZM127.746 89.586C139.266 104.22 146.16 122.742 146.16 142.83C146.16 160.236 140.994 176.436 132.12 189.954H69.714L127.728 89.568L127.746 89.586ZM318.006 199.242V212.202C318.006 213.048 317.556 213.768 316.782 214.092C312.552 215.892 298.602 222.372 292.788 230.436C277.812 251.28 266.382 284.04 240.822 284.04H134.172C96.408 284.04 64.818 254.07 64.836 214.146C64.836 213.156 65.682 212.346 66.672 212.346H117.216C118.962 212.346 120.33 213.75 120.33 215.46V225.216C120.33 230.4 124.524 234.612 129.726 234.612H168.066V212.292H141.876C156.942 193.212 165.906 169.128 165.906 142.902C165.906 113.652 154.692 86.976 136.332 67.032C147.438 68.328 158.058 70.542 168.066 73.476V67.266C168.066 60.822 173.286 55.602 179.73 55.602C186.174 55.602 191.394 60.822 191.394 67.266V82.242C227.178 98.946 250.614 126.666 250.614 158.022C250.614 176.418 242.568 193.536 228.69 207.936C226.026 210.69 222.336 212.256 218.466 212.256H191.412V234.54H225.378C232.704 234.54 245.844 220.644 252.072 212.274C252.072 212.274 252.342 211.86 253.062 211.644C253.782 211.428 315.432 197.28 315.432 197.28C316.728 196.92 318.006 197.91 318.006 199.224V199.242Z"/></svg>WNS on OpenSea</a>
   ·
   <a href="https://www.npmjs.com/package/wns-utils" target="_blank" rel="noopener"><svg fill="currentColor" width="14" height="14" viewBox="-2 -8 24 24" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMinYMin" style="vertical-align:middle;margin-right:4px"><path d="M0 0h20v6.857H10V8H5.556V6.857H0V0zm1.111 5.714h2.222V2.286h1.111v3.428h1.112V1.143H1.11v4.571zm5.556-4.571v5.714h2.222V5.714h2.222V1.143H6.667zm5.555 0v4.571h2.222V2.286h1.112v3.428h1.11V2.286h1.112v3.428h1.11V1.143h-6.666z"/><path d="M10 4.7H9V2.2h1z"/></svg>wns-utils</a>
   ·
-  <a href="https://import.wei.domains" target="_blank" rel="noopener">import.wei.domains</a>
+  <a href="https://www.npmjs.com/package/@1001-digital/ethereum-names" target="_blank" rel="noopener" title="@1001-digital/ethereum-names — resolve WNS, ENS &amp; GNS names"><svg fill="currentColor" width="14" height="14" viewBox="-2 -8 24 24" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMinYMin" style="vertical-align:middle;margin-right:4px"><path d="M0 0h20v6.857H10V8H5.556V6.857H0V0zm1.111 5.714h2.222V2.286h1.111v3.428h1.112V1.143H1.11v4.571zm5.556-4.571v5.714h2.222V5.714h2.222V1.143H6.667zm5.555 0v4.571h2.222V2.286h1.112v3.428h1.11V2.286h1.112v3.428h1.11V1.143h-6.666z"/><path d="M10 4.7H9V2.2h1z"/></svg>ethereum-names</a>
+  ·
+  <a href="https://dao.wei.limo" target="_blank" rel="noopener" title="Wei DAO governance portal (WNS holders)">Wei DAO</a>
+  ·
+  <a href="https://github.com/src-company/wei-names" target="_blank" rel="noopener" title="wei-names on GitHub" aria-label="wei-names on GitHub"><svg fill="currentColor" width="14" height="14" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" style="vertical-align:middle"><path fill-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg></a>
 </footer>
 
 <script src="vendor/ethers.min.js"></script>
@@ -795,6 +884,7 @@ const RPC_ENDPOINTS = [
 ];
 let rpcProvider = null;
 let readContract = null;
+let _rpcInit = null; // in-flight getRpc() promise — de-dupes concurrent cold-start callers
 
 // Optional user-supplied RPC so power users can bypass the shared public
 // endpoints (which can rate-limit / silently fail) without forking the dapp:
@@ -815,27 +905,38 @@ function customRpcs() {
 
 async function getRpc() {
   if (rpcProvider) return rpcProvider;
+  // Coalesce concurrent cold-start callers (page load fires getRpc(), initPending,
+  // and doCheckName near-simultaneously) so we probe the endpoints once, not N times.
+  if (_rpcInit) return _rpcInit;
 
-  const MAINNET = ethers.Network.from(1);
-  const overrides = customRpcs();
-  const endpoints = overrides.length ? overrides : RPC_ENDPOINTS;
+  _rpcInit = (async () => {
+    const MAINNET = ethers.Network.from(1);
+    const overrides = customRpcs();
+    const endpoints = overrides.length ? overrides : RPC_ENDPOINTS;
 
-  // Race the endpoints - first to respond wins
-  const racePromises = endpoints.map(async (rpc) => {
-    const p = new ethers.JsonRpcProvider(rpc, MAINNET, { staticNetwork: true });
-    await Promise.race([
-      p.getBlockNumber(),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 5000))
-    ]);
-    return p;
-  });
+    // Race the endpoints - first to respond wins
+    const racePromises = endpoints.map(async (rpc) => {
+      const p = new ethers.JsonRpcProvider(rpc, MAINNET, { staticNetwork: true });
+      await Promise.race([
+        p.getBlockNumber(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 5000))
+      ]);
+      return p;
+    });
+
+    try {
+      rpcProvider = await Promise.any(racePromises);
+      readContract = new ethers.Contract(CONTRACT, ABI, rpcProvider);
+      return rpcProvider;
+    } catch (e) {
+      throw new Error('All RPC endpoints failed');
+    }
+  })();
 
   try {
-    rpcProvider = await Promise.any(racePromises);
-    readContract = new ethers.Contract(CONTRACT, ABI, rpcProvider);
-    return rpcProvider;
-  } catch (e) {
-    throw new Error('All RPC endpoints failed');
+    return await _rpcInit;
+  } finally {
+    _rpcInit = null; // success caches rpcProvider; failure clears so the next call retries
   }
 }
 
@@ -882,7 +983,7 @@ async function saveRpcSettings() {
   try {
     const bn = await testRpcUrl(raw);
     try { localStorage.setItem('wns_rpc', raw); } catch (e) {}
-    rpcProvider = null; readContract = null; // force re-init on the new endpoint
+    rpcProvider = null; readContract = null; _rpcInit = null; // force re-init on the new endpoint
     await getRpc();
     msg.textContent = 'Connected ✓  (block ' + bn + ')';
     msg.className = 'rpc-test success';
@@ -895,7 +996,7 @@ async function saveRpcSettings() {
 
 function resetRpcSettings() {
   try { localStorage.removeItem('wns_rpc'); } catch (e) {}
-  rpcProvider = null; readContract = null;
+  rpcProvider = null; readContract = null; _rpcInit = null;
   $('rpcInput').value = '';
   const msg = $('rpcTestMsg');
   msg.textContent = 'Back to the built-in public RPCs.';
@@ -918,14 +1019,19 @@ async function waitForTx(tx, timeoutMs = 90000) {
   async function pollReceipt(maxAttempts = 45) {
     const p = await getRpc();
     for (let i = 0; i < maxAttempts; i++) {
+      let receipt;
       try {
-        const receipt = await p.getTransactionReceipt(txHash);
-        if (receipt) {
-          if (receipt.status === 0) throw new Error('Transaction reverted');
-          return receipt;
-        }
+        receipt = await p.getTransactionReceipt(txHash);
       } catch (rpcErr) {
+        // Retry transient RPC errors; only give up on the last attempt.
         if (i === maxAttempts - 1) throw rpcErr;
+        await new Promise(r => setTimeout(r, 2000));
+        continue;
+      }
+      if (receipt) {
+        // A revert is final — surface it immediately, don't keep polling ~90s.
+        if (receipt.status === 0) throw new Error('Transaction reverted');
+        return receipt;
       }
       await new Promise(r => setTimeout(r, 2000));
     }
@@ -1030,7 +1136,7 @@ async function wcTransaction(txPromise, message = 'Confirm in your wallet app') 
     <div style="position:fixed;top:0;left:0;right:0;background:#1a1a2e;color:#fff;padding:16px;text-align:center;z-index:10000;font-size:14px;">
       <div style="margin-bottom:8px;">📱 ${message}</div>
       <div style="font-size:12px;opacity:0.7;">Open your wallet app to approve the transaction</div>
-      ${_wcDeepLink ? `<a href="${_wcDeepLink}" style="display:inline-block;margin-top:8px;padding:8px 16px;background:#fff;color:#000;border-radius:0;text-decoration:none;">Open Wallet</a>` : ''}
+      ${_wcDeepLink ? `<a href="${escapeHtml(_wcDeepLink)}" style="display:inline-block;margin-top:8px;padding:8px 16px;background:#fff;color:#000;border-radius:0;text-decoration:none;">Open Wallet</a>` : ''}
     </div>
   `;
   document.body.appendChild(notif);
@@ -1253,6 +1359,7 @@ async function doCheckName() {
       const escaped = escapeHtml(fullName);
 
       if (!owner) {
+        hideManage(); // available subdomain — clear any manage panel from a prior search
         availEl.innerHTML = '<span class="available">' + escaped + '.wei is available</span>' +
           '<div class="view-link"><a href="#" onclick="copyShareLink();return false;">Copy link →</a></div>';
 
@@ -1318,6 +1425,7 @@ async function doCheckName() {
           '<div class="view-link"><a href="' + osLink + '" target="_blank" rel="noopener">View on OpenSea →</a> · <a href="#" onclick="copyShareLink();return false;">Copy link →</a></div>';
         feeEl.textContent = '';
         await showManage(tokenId, fullName);
+        if (thisVersion !== checkVersion) return; // superseded by a newer search
       }
 
       availEl.classList.add('show');
@@ -1400,6 +1508,7 @@ async function doCheckName() {
 
       // Show manage section with owner info
       await showManage(tokenId, name);
+      if (thisVersion !== checkVersion) return; // superseded by a newer search
     }
     availEl.classList.add('show');
     updateHash(name);
@@ -1491,6 +1600,7 @@ async function doCommit() {
 }
 
 let selectedPayMethod = 'eth';
+let isRevealing = false; // Guards the reveal/register step against double-submit
 
 function selectPayMethod(el) {
   document.querySelectorAll('.pay-option').forEach(b => b.classList.remove('active'));
@@ -1498,10 +1608,23 @@ function selectPayMethod(el) {
   selectedPayMethod = el.dataset.method;
 }
 
-function doRevealSelected() {
-  if (selectedPayMethod === 'usdc') doRevealWithUSDC();
-  else if (selectedPayMethod === 'dai') doRevealWithDAI();
-  else doReveal();
+async function doRevealSelected() {
+  // The reveal is single-use on-chain: the commitment is deleted and (for the
+  // token paths) the permit nonce is consumed, so a second submission is
+  // guaranteed to revert and waste gas. updateTimer() re-enables revealBtn every
+  // second, so disabling the button alone can't block a double-click — gate on an
+  // in-flight flag that spans the whole reveal instead.
+  if (isRevealing) return;
+  isRevealing = true;
+  try {
+    if (selectedPayMethod === 'usdc') await doRevealWithUSDC();
+    else if (selectedPayMethod === 'dai') await doRevealWithDAI();
+    else await doReveal();
+  } finally {
+    isRevealing = false;
+    // Refresh the button's enabled state immediately instead of waiting up to 1s.
+    updateTimer(pendingTimerId);
+  }
 }
 
 async function doReveal() {
@@ -1836,6 +1959,9 @@ async function updateTimer(timerId) {
       try {
         const p = rpcProvider || await getRpc();
         const receipt = await p.getTransactionReceipt(pending.txHash);
+        // Bail if the commitment was cleared/restarted while we awaited the RPC,
+        // otherwise savePending() below would resurrect the dead commitment.
+        if (timerId !== pendingTimerId) return;
         pending._pollErrors = 0; // RPC answered — reset the error streak
         if (receipt) {
           if (receipt.status === 1) {
@@ -1880,13 +2006,18 @@ async function updateTimer(timerId) {
     const hrs = Math.floor(expires / 3600);
     const mins = Math.floor((expires % 3600) / 60);
     timerEl.textContent = 'Ready to reveal. Expires in ' + hrs + 'h ' + mins + 'm';
-    revealBtn.disabled = !_signer;
+    revealBtn.disabled = !_signer || isRevealing;
   } else {
     timerEl.textContent = 'Expired';
     revealBtn.disabled = true;
   }
 
   if (elapsed < MAX_COMMIT_AGE) {
+    // Enforce a single timer chain: cancel any outstanding tick before scheduling
+    // the next. Without this, a re-entrant caller that reuses the current
+    // pendingTimerId (e.g. doRevealSelected's finally after a failed reveal) would
+    // spawn a second self-sustaining setTimeout chain that never invalidates.
+    if (pendingTimeoutId) clearTimeout(pendingTimeoutId);
     pendingTimeoutId = setTimeout(() => updateTimer(timerId), 1000);
   }
 }
@@ -1896,9 +2027,10 @@ document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
     if (pendingTimeoutId) { clearTimeout(pendingTimeoutId); pendingTimeoutId = null; }
   } else {
-    // Resume timer if there's a pending commitment
+    // Resume timer if there's a pending commitment. Bump the id first so any
+    // still-in-flight timer chain invalidates itself instead of double-polling.
     const pending = loadPending();
-    if (pending) updateTimer(pendingTimerId);
+    if (pending) { pendingTimerId++; updateTimer(pendingTimerId); }
   }
 });
 
@@ -1920,6 +2052,9 @@ let isProcessing = false; // Prevent double-click on manage actions
 let pendingMintInfo = null;
 
 function hideManage() {
+  // Invalidate any in-flight showManage() so a slow response from a previous
+  // search can't re-show a stale owner/manager panel after we've moved on.
+  manageVersion++;
   $('manage').classList.remove('show');
   $('manageForm').classList.remove('show');
   currentTokenId = null;
@@ -1932,23 +2067,41 @@ async function showManage(tokenId, name) {
   currentTokenId = tokenId;
   currentTokenName = name;
   const thisManageVersion = ++manageVersion;
+  // True once a newer showManage()/hideManage() has superseded this call. Guard
+  // every DOM mutation with it so an older, slower response can't clobber a
+  // newer panel (and so our own retry can't fight a newer search).
+  const stale = () => thisManageVersion !== manageVersion;
 
-  if (!rpcProvider && !readContract) { hideManage(); return; }
+  if (!rpcProvider && !readContract) { if (!stale()) hideManage(); return; }
 
   try {
     // Common text record keys to display
     const textKeys = ['url', 'email', 'description', 'com.twitter', 'com.github'];
 
-    // Batch all reads into one RPC call (including text records)
-    const results = await multicall([
-      { fn: 'ownerOf', args: [tokenId], allowFailure: true },
-      { fn: 'resolve', args: [tokenId], allowFailure: true },
-      { fn: 'records', args: [tokenId], allowFailure: true },
-      { fn: 'contenthash', args: [tokenId], allowFailure: true },
-      ...textKeys.map(key => ({ fn: 'text', args: [tokenId, key], allowFailure: true }))
-    ]);
-    const [owner, resolved, record, contentHash] = [
-      results[0]?.[0] || null,
+    // Batch all reads into one RPC call (including text records). Retry once:
+    // a single flaky public-RPC aggregate3 call — or an allowFailure ownerOf
+    // that transiently reverts — must not silently blank the panel for a name
+    // we already know is registered.
+    let results = null, owner = null;
+    for (let attempt = 0; attempt < 2 && !owner; attempt++) {
+      try {
+        results = await multicall([
+          { fn: 'ownerOf', args: [tokenId], allowFailure: true },
+          { fn: 'resolve', args: [tokenId], allowFailure: true },
+          { fn: 'records', args: [tokenId], allowFailure: true },
+          { fn: 'contenthash', args: [tokenId], allowFailure: true },
+          ...textKeys.map(key => ({ fn: 'text', args: [tokenId, key], allowFailure: true }))
+        ]);
+      } catch (_) {
+        results = null;
+      }
+      if (stale()) return; // a newer search superseded this one
+      owner = results?.[0]?.[0] || null;
+    }
+
+    if (!owner) { if (!stale()) hideManage(); return; }
+
+    const [resolved, record, contentHash] = [
       results[1]?.[0] || null,
       results[2] || null,
       results[3]?.[0] || null
@@ -1960,14 +2113,14 @@ async function showManage(tokenId, name) {
       if (val) textRecords[key] = val;
     });
 
-    // Ignore stale results if user switched names
-    if (thisManageVersion !== manageVersion) return;
-
-    if (!owner) { hideManage(); return; }
-
     const isOwner = _connectedAddress && owner.toLowerCase() === _connectedAddress.toLowerCase();
     const expiryDate = record?.expiresAt ? new Date(Number(record.expiresAt) * 1000).toLocaleDateString() : null;
     const isTopLevel = record?.parent === 0n;
+    // A top-level name past expiresAt (still shown because it hasn't cleared grace,
+    // or it wouldn't be "taken") is INACTIVE on-chain: setAddr/setText/setContenthash/
+    // transfer/registerSubdomain/setPrimaryName all revert with Expired. Only renew()
+    // works. Detect it so we surface Renew instead of actions that are sure to fail.
+    const isExpiredInGrace = !!(isTopLevel && record?.expiresAt && (Date.now() / 1000) > Number(record.expiresAt));
 
     // Subdomain staleness: if parent has been re-registered, record.parentEpoch won't
     // match records(parent).epoch. Contract's _isActive returns false → write actions
@@ -1979,7 +2132,7 @@ async function showManage(tokenId, name) {
         const parentResults = await multicall([
           { fn: 'records', args: [record.parent], allowFailure: true }
         ]);
-        if (thisManageVersion !== manageVersion) return;
+        if (stale()) return;
         const parentRecord = parentResults[0] || null;
         if (parentRecord && parentRecord.epoch !== record.parentEpoch) {
           isStaleSubdomain = true;
@@ -1994,6 +2147,9 @@ async function showManage(tokenId, name) {
     let infoHtml = '';
     if (isStaleSubdomain) {
       infoHtml += `<div style="padding:10px;background:var(--status-warning,#fff3cd);color:#7a4f00;margin-bottom:12px;font-size:12px;border-radius:4px;">This subdomain is expired — its parent has been re-registered since. On-chain updates (website, records, transfer) will revert.</div>`;
+    }
+    if (isExpiredInGrace) {
+      infoHtml += `<div style="padding:10px;background:var(--status-warning,#fff3cd);color:#7a4f00;margin-bottom:12px;font-size:12px;border-radius:4px;">This name has expired and is in its grace period. Renew to reactivate — all other on-chain actions (transfer, records, website) will revert until you do.</div>`;
     }
     infoHtml += `<div><span>Owner:</span>${addrLink(owner)}</div>`;
     if (resolved && resolved !== ethers.ZeroAddress) {
@@ -2035,7 +2191,10 @@ async function showManage(tokenId, name) {
     $('manageInfo').innerHTML = infoHtml;
 
     // Build actions if owner (suppress for stale subdomains — writes would revert)
-    if (isOwner && !isStaleSubdomain) {
+    if (isOwner && isExpiredInGrace) {
+      // Expired (in grace): renewal is the only action that succeeds on-chain.
+      $('manageActions').innerHTML = `<button onclick="showManageForm('renew')">Renew</button>`;
+    } else if (isOwner && !isStaleSubdomain) {
       let actionsHtml = `
         <button onclick="showManageForm('transfer')">Transfer</button>
         <button onclick="showManageForm('setAddr')">Set Recipient</button>
@@ -2055,10 +2214,11 @@ async function showManage(tokenId, name) {
       $('manageActions').innerHTML = '<span style="font-size:12px;opacity:0.5;">Connect as owner to manage</span>';
     }
 
+    if (stale()) return;
     $('manage').classList.add('show');
     $('manageForm').classList.remove('show');
   } catch (e) {
-    hideManage();
+    if (!stale()) hideManage();
   }
 }
 
@@ -2793,6 +2953,27 @@ async function doWithdrawRegFees() {
   }
 }
 
+// App-configured subdomain sales are always FLASH mode (deposit() is never
+// called), so registrar.register() does name.transferFrom(controller, ...) and
+// reverts unless the parent owner still has setApprovalForAll(registrar) active.
+// The owner can revoke that out-of-band while leaving the sale enabled. Probe it
+// on the buyer path so we don't submit a guaranteed-revert tx. Returns true when
+// minting can proceed (escrow mode, approved, or on any read error — never block
+// on a flaky RPC).
+async function registrarFlashApproved(parentId) {
+  try {
+    const rpc = await getRpc();
+    const escRes = await rpc.call({ to: SUBDOMAIN_REGISTRAR, data: regIface.encodeFunctionData('escrowedController', [parentId]) });
+    if (regIface.decodeFunctionResult('escrowedController', escRes)[0] !== ethers.ZeroAddress) return true; // escrow mode: no approval needed
+    const ownerRes = await rpc.call({ to: CONTRACT, data: ownerOfIface.encodeFunctionData('ownerOf', [parentId]) });
+    const owner = ownerOfIface.decodeFunctionResult('ownerOf', ownerRes)[0];
+    const apprRes = await rpc.call({ to: CONTRACT, data: approvalIface.encodeFunctionData('isApprovedForAll', [owner, SUBDOMAIN_REGISTRAR]) });
+    return approvalIface.decodeFunctionResult('isApprovedForAll', apprRes)[0];
+  } catch (e) {
+    return true; // best-effort: a read failure must not block a legitimate mint
+  }
+}
+
 // Free subdomain minting for id.wei
 const ID_WEI_PARENT = 93476697939188154236260161789725673383255207760354288944172500327559511035582n;
 
@@ -2861,6 +3042,11 @@ async function doFreeMint() {
       btn.disabled = false;
       return;
     }
+    if (!(await registrarFlashApproved(ID_WEI_PARENT))) {
+      showFreeStatus('Free minting is temporarily unavailable — please try again later', 'error');
+      btn.disabled = false;
+      return;
+    }
 
     // Check availability
     const subFullName = label + '.id.wei';
@@ -2917,6 +3103,13 @@ async function doMintSubdomain() {
           return;
         }
       } catch (e) { /* ownerOf reverts if not minted — name is available */ }
+    }
+
+    // Bail before spending gas if the seller revoked the registrar's approval.
+    if (!(await registrarFlashApproved(parentId))) {
+      showStatus("This name's owner hasn't approved the registrar — minting is temporarily unavailable", 'error');
+      if (btn) btn.disabled = false;
+      return;
     }
 
     // Balance check
@@ -3119,14 +3312,14 @@ async function doSendEth() {
       // Bridge to Base via OptimismPortal
       showStatus('Bridging ' + amountStr + ' ETH to ' + displayTo + ' on Base...', '');
       const portal = new ethers.Contract(BASE_PORTAL, BASE_PORTAL_ABI, _signer);
-      const tx = await portal.depositTransaction(
+      const tx = await wcTransaction(portal.depositTransaction(
         to,           // recipient on Base
         amount,       // value to receive on Base
         100000n,      // gas limit for L2 tx
         false,        // not a contract creation
         '0x',         // no calldata
         { value: amount }
-      );
+      ), 'Approve bridge to Base');
       showStatus('Waiting for confirmation...', '', tx.hash);
       await waitForTx(tx);
       showStatus('Bridged ' + amountStr + ' ETH to ' + displayTo + ' on Base! (arrives in ~1-2 min)', 'success', tx.hash);
@@ -3183,9 +3376,11 @@ function parseTokenId(input) {
     if (/^\d+$/.test(s)) return BigInt(s);
   } catch {}
 
-  // Extract from URL - look for last numeric sequence or hex
+  // Extract from URL - look for last numeric sequence or hex.
+  // Skip 42-char (0x + 40 hex) strings: in OpenSea/Etherscan NFT URLs that's
+  // the collection contract address, not the token id (which is decimal).
   const hexMatch = s.match(/0x[0-9a-fA-F]+/);
-  if (hexMatch) {
+  if (hexMatch && hexMatch[0].length !== 42) {
     try { return BigInt(hexMatch[0]); } catch {}
   }
 
