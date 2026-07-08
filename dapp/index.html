@@ -875,12 +875,19 @@ const STORAGE_KEY = 'wei_pending_commits';
 const $ = id => document.getElementById(id);
 const textEncoder = new TextEncoder();
 
-// RPC fallback for read-only calls
+// RPC fallback for read-only calls.
+// Public endpoints must send CORS headers for the browser origin AND tolerate
+// browser load. 1rpc.io (rate-limits/403s under load) and llamarpc (Cloudflare
+// challenge, no CORS header) were removed after breaking in production on
+// wei.domains. Each endpoint below was verified to return an
+// Access-Control-Allow-Origin header + eth_chainId from a cross-origin request.
 const RPC_ENDPOINTS = [
-  'https://ethereum.publicnode.com',
-  'https://1rpc.io/eth',
+  'https://ethereum-rpc.publicnode.com',
+  'https://cloudflare-eth.com',
   'https://eth.drpc.org',
-  'https://eth.llamarpc.com'
+  'https://eth.merkle.io',
+  'https://mainnet.gateway.tenderly.co',
+  'https://eth-mainnet.public.blastapi.io'
 ];
 let rpcProvider = null;
 let readContract = null;

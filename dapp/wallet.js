@@ -1,11 +1,16 @@
 (function() {
 'use strict';
 
+// CORS-enabled, browser-tolerant public endpoints (kept in sync with index.html's
+// RPC_ENDPOINTS). 1rpc.io and llamarpc were dropped: they CORS-block / rate-limit
+// the wei.domains origin in production.
 const RPCS = [
-  'https://ethereum.publicnode.com',
-  'https://1rpc.io/eth',
+  'https://ethereum-rpc.publicnode.com',
+  'https://cloudflare-eth.com',
   'https://eth.drpc.org',
-  'https://eth.llamarpc.com'
+  'https://eth.merkle.io',
+  'https://mainnet.gateway.tenderly.co',
+  'https://eth-mainnet.public.blastapi.io'
 ];
 const WEINS = '0x0000000000696760E15f265e828DB644A0c242EB';
 const WEINS_ABI = ['function reverseResolve(address) view returns (string)'];
@@ -162,7 +167,7 @@ async function connectWithWallet(walletKey, options = {}) {
       const WCProvider = wcModule?.EthereumProvider;
       if (!WCProvider?.init) throw new Error('WalletConnect not available');
       if (_walletConnectProvider) { try { await _walletConnectProvider.disconnect?.(); } catch (e) {} _walletConnectProvider = null; }
-      _walletConnectProvider = await WCProvider.init({ projectId: WC_PROJECT_ID, chains: [1], showQrModal: !silent, rpcMap: { 1: 'https://1rpc.io/eth' }, metadata: { name: _appName, description: _appName, url: window.location.origin, icons: [] } });
+      _walletConnectProvider = await WCProvider.init({ projectId: WC_PROJECT_ID, chains: [1], showQrModal: !silent, rpcMap: { 1: 'https://ethereum-rpc.publicnode.com' }, metadata: { name: _appName, description: _appName, url: window.location.origin, icons: [] } });
       if (!silent) _walletConnectProvider.on('display_uri', () => { _wcDeepLink = readWalletConnectRedirect(_walletConnectProvider.session?.peer?.metadata); });
       // WalletConnect v2 emits 'disconnect'/'session_delete' when the session is
       // ended from the wallet side or expires — it does NOT emit accountsChanged:[]
