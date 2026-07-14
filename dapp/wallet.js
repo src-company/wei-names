@@ -228,8 +228,12 @@ async function connectWithWallet(walletKey, options = {}) {
     }
     const chainId = await walletProvider.request({ method: 'eth_chainId' });
     if (BigInt(chainId) !== 1n) {
+      // A silent auto-connect must not pop a wallet chain-switch dialog on page
+      // load — that defeats the whole point of the no-prompt reconnect. Abort
+      // quietly and let the user connect manually (which does prompt).
+      if (silent) throw new Error('wrong chain');
       try { await walletProvider.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: '0x1' }] }); const nc = await walletProvider.request({ method: 'eth_chainId' }); if (BigInt(nc) !== 1n) throw new Error('Chain switch failed'); }
-      catch (switchErr) { if (!silent) console.error('Chain switch failed:', switchErr); document.getElementById('walletBtn').textContent = 'connect'; if (!silent && typeof showStatus === 'function') showStatus('Please switch to Ethereum mainnet in your wallet.', 'error'); if (walletKey === 'walletconnect') { try { Promise.resolve(_walletConnectProvider?.disconnect()).catch(() => {}); } catch (e) {} _walletConnectProvider = null; } _isWalletConnect = false; _wcDeepLink = null; return; }
+      catch (switchErr) { console.error('Chain switch failed:', switchErr); const wb = document.getElementById('walletBtn'); wb.textContent = 'connect'; wb.classList.remove('connected'); if (typeof showStatus === 'function') showStatus('Please switch to Ethereum mainnet in your wallet.', 'error'); if (walletKey === 'walletconnect') { try { Promise.resolve(_walletConnectProvider?.disconnect()).catch(() => {}); } catch (e) {} _walletConnectProvider = null; } _isWalletConnect = false; _wcDeepLink = null; return; }
     }
     _walletProvider = new ethers.BrowserProvider(walletProvider);
     _signer = await _walletProvider.getSigner();

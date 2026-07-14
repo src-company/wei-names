@@ -931,6 +931,7 @@ const ABI = [
   'function isAvailable(string label, uint256 parentId) view returns (bool)',
   'function makeCommitment(string label, address owner, bytes32 secret) pure returns (bytes32)',
   'function commit(bytes32 commitment)',
+  'function commitments(bytes32 commitment) view returns (uint256)',
   'function reveal(string label, bytes32 secret) payable returns (uint256)',
   'function getFee(uint256 length) view returns (uint256)',
   'function getPremium(uint256 tokenId) view returns (uint256)',
@@ -980,13 +981,22 @@ let rpcProvider = null;   // ethers FallbackProvider spanning every endpoint bel
 let readContract = null;
 let _rpcInit = null; // in-flight getRpc() promise — de-dupes concurrent cold-start callers
 
-// JsonRpcProviders are cached by URL so rebuilding the FallbackProvider (e.g. on
-// wallet connect) reuses live connections instead of reopening them each time.
+// JsonRpcProviders are cached by URL so rebuilding the provider reuses live
+// connections. Each is built from a FetchRequest with retries DISABLED and a hard
+// per-request timeout: ethers' default behaviour is to sit on a 429/503 endpoint
+// retrying with backoff (measured at 15s+ before giving up), which would defeat
+// the FallbackProvider — it can only fail over once the sub-request errors or
+// times out. With retryFunc=false a rate-limited endpoint errors within one round
+// trip, so FallbackProvider rotates to a healthy endpoint in ~100ms.
 const _providerPool = new Map();
+const RPC_REQUEST_TIMEOUT = 4000;
 function providerFor(url) {
   let p = _providerPool.get(url);
   if (!p) {
-    p = new ethers.JsonRpcProvider(url, MAINNET, { staticNetwork: true });
+    const req = new ethers.FetchRequest(url);
+    req.timeout = RPC_REQUEST_TIMEOUT;
+    req.retryFunc = async () => false;
+    p = new ethers.JsonRpcProvider(req, MAINNET, { staticNetwork: true });
     _providerPool.set(url, p);
   }
   return p;
@@ -1009,33 +1019,52 @@ function customRpcs() {
   return out.map(s => s.trim()).filter(u => /^https?:\/\//i.test(u));
 }
 
-// Build a FallbackProvider spanning every available endpoint. Unlike the old
-// "first to respond wins, then pinned forever" approach, this fails over on EVERY
-// call: if the top endpoint errors or stalls, ethers automatically advances to the
-// next one within the same request. quorum:1 means one good response is enough, so
-// the happy path only touches the highest-priority endpoint (no fan-out overhead).
-// A connected wallet's own node is added as a lower-priority extra fallback — it
-// has no browser CORS limits and is often a paid endpoint, but we keep it last so
-// reads don't hammer the user's wallet / WalletConnect relay unless the public
-// endpoints are down.
+// Build the read provider. With one endpoint (a custom ?rpc= / wns_rpc override)
+// use it directly; with several, wrap them in a FallbackProvider that fails over on
+// EVERY call — if the top endpoint errors or stalls, ethers advances to the next
+// within the same request (see providerFor for why the FetchRequest tweak is what
+// makes this actually work under rate limiting). quorum:1 means one good response
+// suffices, so the happy path only touches the highest-priority endpoint.
+//
+// The connected wallet's node is deliberately NOT a member here: FallbackProvider's
+// initial sync awaits getBlockNumber on ALL members, so a slow/asleep wallet
+// (common with WalletConnect on mobile) would stall every read on cold start. It is
+// instead consulted on demand as a bounded last resort — see withRpc().
 function buildRpcProvider() {
   const overrides = customRpcs();
   const endpoints = overrides.length ? overrides : RPC_ENDPOINTS;
+  if (endpoints.length === 1) return providerFor(endpoints[0]);
   const configs = endpoints.map((url, i) => ({
     provider: providerFor(url),
     priority: i + 1,      // lower = tried first; preserves list order
     stallTimeout: 2000,   // ms to wait before also trying the next endpoint
     weight: 1
   }));
-  if (typeof _walletProvider !== 'undefined' && _walletProvider) {
-    configs.push({
-      provider: _walletProvider,
-      priority: endpoints.length + 1,
-      stallTimeout: 3000,
-      weight: 1
-    });
-  }
   return new ethers.FallbackProvider(configs, MAINNET, { quorum: 1 });
+}
+
+// Run a read with resilience beyond the public endpoints. fn(provider) performs the
+// call. The public provider already fails over across endpoints internally; withRpc
+// adds (a) a short retry to ride out a lone flaky response (e.g. an endpoint that
+// returns empty 0x data, which counts as "success" so FallbackProvider won't rotate
+// off it), and (b) a final fallback to the connected wallet's own node. The wallet
+// leg is skipped for WalletConnect (its relay can hang) and hard-bounded by a
+// timeout so a sluggish wallet can't wedge the call.
+async function withRpc(fn, { tries = 2 } = {}) {
+  let lastErr = null;
+  for (let i = 0; i < tries; i++) {
+    try { return await fn(await getRpc()); }
+    catch (e) { lastErr = e; if (i < tries - 1) await new Promise(r => setTimeout(r, 250)); }
+  }
+  if (typeof _walletProvider !== 'undefined' && _walletProvider && !_isWalletConnect) {
+    try {
+      return await Promise.race([
+        fn(_walletProvider),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('wallet rpc timeout')), RPC_REQUEST_TIMEOUT))
+      ]);
+    } catch (e) { lastErr = e; }
+  }
+  throw lastErr || new Error('All RPC endpoints failed');
 }
 
 async function getRpc() {
@@ -1062,13 +1091,6 @@ async function getRpc() {
   } finally {
     _rpcInit = null; // success caches rpcProvider; failure clears so the next call retries
   }
-}
-
-// Rebuild the read provider (e.g. after a wallet connects/disconnects so its node
-// joins/leaves the fallback set, or after the custom RPC changes).
-function refreshRpc() {
-  rpcProvider = null; readContract = null; _rpcInit = null;
-  getRpc().catch(() => {});
 }
 
 // Initialize RPC on load
@@ -1148,11 +1170,10 @@ async function waitForTx(tx, timeoutMs = 90000) {
 
   // Helper to poll receipt directly via public RPC (more reliable than wallet provider)
   async function pollReceipt(maxAttempts = 45) {
-    const p = await getRpc();
     for (let i = 0; i < maxAttempts; i++) {
       let receipt;
       try {
-        receipt = await p.getTransactionReceipt(txHash);
+        receipt = await withRpc(p => p.getTransactionReceipt(txHash));
       } catch (rpcErr) {
         // Retry transient RPC errors; only give up on the last attempt.
         if (i === maxAttempts - 1) throw rpcErr;
@@ -1251,16 +1272,19 @@ function computeIdFull(name) {
   return BigInt(node);
 }
 
-// Batch multiple contract calls into one RPC call
+// Batch multiple contract calls into one RPC call. Routed through withRpc so a
+// flaky/empty response is retried and can fall back to the wallet node — this is the
+// path behind the reveal fee lookup, where a single bad response used to fail the
+// first Register click (the user then had to click again).
 async function multicall(calls) {
-  const provider = rpcProvider || await getRpc();
-  const mc = new ethers.Contract(MULTICALL3, MULTICALL3_ABI, provider);
   const callData = calls.map(c => ({
     target: CONTRACT,
     allowFailure: c.allowFailure || false,
     callData: iface.encodeFunctionData(c.fn, c.args)
   }));
-  const results = await mc.aggregate3(callData);
+  const results = await withRpc(provider =>
+    new ethers.Contract(MULTICALL3, MULTICALL3_ABI, provider).aggregate3(callData)
+  );
   return results.map((r, i) => {
     if (!r.success) return null;
     try {
@@ -1282,21 +1306,15 @@ async function aggregate3(calls, retries = 2) {
     allowFailure: true,
     callData: c.iface.encodeFunctionData(c.fn, c.args)
   }));
-  let lastErr = null;
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    if (attempt) await new Promise(r => setTimeout(r, 350));
-    try {
-      const provider = rpcProvider || await getRpc();
-      const mc = new ethers.Contract(MULTICALL3, MULTICALL3_ABI, provider);
-      const results = await mc.aggregate3(build());
-      return results.map((r, i) => {
-        if (!r.success) return null;
-        try { return calls[i].iface.decodeFunctionResult(calls[i].fn, r.returnData); }
-        catch { return null; }
-      });
-    } catch (e) { lastErr = e; }
-  }
-  throw lastErr || new Error('aggregate3 failed');
+  const results = await withRpc(provider =>
+    new ethers.Contract(MULTICALL3, MULTICALL3_ABI, provider).aggregate3(build()),
+    { tries: retries + 1 }
+  );
+  return results.map((r, i) => {
+    if (!r.success) return null;
+    try { return calls[i].iface.decodeFunctionResult(calls[i].fn, r.returnData); }
+    catch { return null; }
+  });
 }
 
 let contract = null;
@@ -1492,6 +1510,11 @@ async function doCheckName() {
   pendingMintInfo = null;
   pendingOwnerSub = null;
   commitBtn.textContent = 'Commit'; // reset; the available branch relabels if disconnected
+
+  // Invalidate any in-flight lookup up front, so a slow prior RPC result can't
+  // repaint the box after the user has cleared it or typed an invalid name (the
+  // early-return branches below don't otherwise bump the version).
+  checkVersion++;
 
   if (!raw.trim()) {
     availEl.classList.remove('show');
@@ -2140,12 +2163,21 @@ async function initPending() {
   const pending = loadPending();
   if (!pending) { hidePendingPanel(); return null; }
 
-  // Check if name is still available - if not, clear stale pending
+  // If the name is no longer available, clear the stale pending — but clearPending()
+  // deletes the secret irrecoverably, so never act on isAvailable alone: a single
+  // flaky/false `false` from a public node would nuke a still-revealable commitment
+  // and its paid fee. Require an authoritative second signal — ownerOf(tokenId)
+  // returning a real owner — before deleting. isAvailable=false while ownerOf still
+  // reverts (token unminted) means the `false` was spurious, so we keep the secret.
   try {
-    if (!readContract) await getRpc();
-    if (readContract) {
-      const available = await readContract.isAvailable(pending.name, 0);
-      if (!available) {
+    const available = await withRpc(p => new ethers.Contract(CONTRACT, ABI, p).isAvailable(pending.name, 0));
+    if (!available) {
+      let registered = false;
+      try {
+        const owner = await withRpc(p => new ethers.Contract(CONTRACT, ABI, p).ownerOf(localComputeId(pending.name)));
+        registered = !!owner && owner !== ethers.ZeroAddress;
+      } catch (_) { registered = false; } // ownerOf reverts for an unminted token
+      if (registered) {
         clearPending();
         return null;
       }
@@ -2211,8 +2243,7 @@ async function updateTimer(timerId) {
     revealBtn.disabled = true;
     pending._revealPolls = (pending._revealPolls || 0) + 1;
     try {
-      const p = rpcProvider || await getRpc();
-      const receipt = await p.getTransactionReceipt(pending.revealTxHash);
+      const receipt = await withRpc(p => p.getTransactionReceipt(pending.revealTxHash));
       if (timerId !== pendingTimerId) return;
       if (receipt) {
         if (receipt.status === 1) {
@@ -2280,28 +2311,50 @@ async function updateTimer(timerId) {
         }
       };
 
+      const markCommitConfirmed = () => {
+        pending.confirmed = true;
+        pending.timestamp = Math.floor(Date.now() / 1000);
+        delete pending._pollAttempts;
+        delete pending._pollErrors;
+        savePending(pending);
+        showStatus('Commitment confirmed! Wait 60 seconds then reveal.', 'success', pending.txHash);
+      };
+      // Authoritative confirmation independent of the tx hash: the on-chain
+      // commitments mapping is keyed by the commitment itself, so it's set even
+      // when the wallet sped-up/replaced the commit tx (it then mined under a hash
+      // we'd never find a receipt for). Without this, such a user holds a valid,
+      // paid-for commitment the dapp would never let them reveal.
+      const commitLandedOnchain = async () => {
+        if (!pending.commitment) return false;
+        try {
+          const ts = await withRpc(p => new ethers.Contract(CONTRACT, ABI, p).commitments(pending.commitment));
+          return !!ts && ts !== 0n;
+        } catch (_) { return false; }
+      };
+
       try {
-        const p = rpcProvider || await getRpc();
-        const receipt = await p.getTransactionReceipt(pending.txHash);
+        const receipt = await withRpc(p => p.getTransactionReceipt(pending.txHash));
         // Bail if the commitment was cleared/restarted while we awaited the RPC,
         // otherwise savePending() below would resurrect the dead commitment.
         if (timerId !== pendingTimerId) return;
         pending._pollErrors = 0; // RPC answered — reset the error streak
-        if (receipt) {
-          if (receipt.status === 1) {
-            // TX confirmed! Update pending
-            pending.confirmed = true;
-            pending.timestamp = Math.floor(Date.now() / 1000);
-            delete pending._pollAttempts;
-            delete pending._pollErrors;
-            savePending(pending);
-            showStatus('Commitment confirmed! Wait 60 seconds then reveal.', 'success', pending.txHash);
+        if (receipt && receipt.status === 1) {
+          markCommitConfirmed();
+        } else if (receipt && receipt.status === 0) {
+          // The mined tx reverted — but only give up if no commitment exists
+          // on-chain (a replacement tx could have committed successfully).
+          if (await commitLandedOnchain()) {
+            if (timerId !== pendingTimerId) return;
+            markCommitConfirmed();
           } else {
-            // TX reverted - clear pending and show error
             showStatus('Commit transaction reverted. Please try again.', 'error', pending.txHash);
             clearPending();
             return;
           }
+        } else if (await commitLandedOnchain()) {
+          // No receipt for our hash, but the commitment is on-chain (replaced tx).
+          if (timerId !== pendingTimerId) return;
+          markCommitConfirmed();
         } else if (pending._pollAttempts >= 30) {
           // Mined txs index within seconds; this long with no receipt means
           // the RPC is behind or the tx never landed.
@@ -3922,13 +3975,15 @@ async function doVerifyNow() {
       html += `<div style="color:#b80;font-size:12px;margin-bottom:4px;">Note: Contains multi-byte characters (emoji or non-ASCII)</div>`;
     }
 
-    // Compare with expected
+    // Compare with expected. Use the full-name normalizer + namehash so this works
+    // for subdomains too (a.b.wei): normalizeLabel/localComputeId are top-level only,
+    // so they made the verifier reject every legitimate subdomain as a spoof.
     if (expectedInput) {
-      const expectedNorm = normalizeLabel(expectedInput);
+      const expectedNorm = normalizeFullName(expectedInput);
       if (!expectedNorm) {
         html += `<div style="color:#c00;font-size:12px;">✗ Expected name "${escapeHtml(expectedInput)}" is invalid</div>`;
       } else {
-        const computedId = localComputeId(expectedNorm);
+        const computedId = computeIdFull(expectedNorm);
 
         if (computedId === tokenId) {
           html += `<div style="color:#080;font-size:12px;">✓ Matches expected name "${escapeHtml(expectedInput)}"</div>`;
@@ -4004,8 +4059,8 @@ window.addEventListener('hashchange', initFromHash);
 
 walletInit({
   appName: 'zFi Domains',
-  onConnect: [() => { contract = new ethers.Contract(CONTRACT, ABI, _signer); refreshRpc(); }, initPending, doCheckName],
-  onDisconnect: [() => { contract = null; $('commitBtn').disabled = true; refreshRpc(); }, hideManage, doCheckName]
+  onConnect: [() => { contract = new ethers.Contract(CONTRACT, ABI, _signer); }, initPending, doCheckName],
+  onDisconnect: [() => { contract = null; $('commitBtn').disabled = true; }, hideManage, doCheckName]
 });
 
 </script>
