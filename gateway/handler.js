@@ -9,7 +9,7 @@
 // Used by both worker.js (Cloudflare) and server.js (Node/Railway).
 
 import { resolveContenthash } from './wns.js'
-import { contenthashToCid } from './contenthash.js'
+import { decodeContenthash } from './contenthash.js'
 
 // Zones this gateway serves. Comma-separated; a request to <label>.<zone>
 // resolves the IPFS content of <label>.wei for ANY listed zone.
@@ -107,12 +107,14 @@ export async function handleRequest(request, env) {
   const contract = readEnv(env, 'WNS_CONTRACT', undefined)
   const opts = { rpc, contract }
 
-  // Resolve label -> CID, with a short cache.
-  let cid
+  // Resolve label -> { ns, id }, with a short cache. `ns` is 'ipfs' or 'ipns';
+  // for IPNS `id` is a stable key and the IPNS gateway resolves it fresh each
+  // request, so the owner can update the site with no new on-chain transaction.
+  let content
   const cached = cache.get(sub)
   const now = Date.now()
   if (cached && now - cached.at < CACHE_TTL_MS) {
-    cid = cached.cid
+    content = cached.content
   } else {
     let contenthash
     try {
@@ -123,19 +125,20 @@ export async function handleRequest(request, env) {
         headers: { 'cache-control': 'no-store' },
       })
     }
-    cid = contenthashToCid(contenthash)
-    cacheSet(sub, { cid, at: now })
+    content = decodeContenthash(contenthash)
+    cacheSet(sub, { content, at: now })
   }
 
-  if (!cid) {
-    // Registered names without an IPFS contenthash, or unregistered names.
+  if (!content) {
+    // Registered names without an IPFS/IPNS contenthash, or unregistered names.
     return new Response(
-      `No IPFS content set for ${sub}.\n` +
+      `No IPFS or IPNS content set for ${sub}.\n` +
         `Set a contenthash on this name at https://wei.domains to publish here.\n`,
       { status: 404, headers: { 'content-type': 'text/plain; charset=utf-8' } },
     )
   }
 
+  const { ns, id } = content // ns: 'ipfs' | 'ipns'
   const mode = readEnv(env, 'GATEWAY_MODE', 'redirect')
   const pathAndQuery = url.pathname + url.search
 
@@ -143,7 +146,7 @@ export async function handleRequest(request, env) {
     // Stream the content through the gateway, keeping <label>.wei.limo in the bar.
     // Heavier: the gateway carries the bandwidth. Prefer `redirect` at scale.
     const pathGw = readEnv(env, 'IPFS_PATH_GATEWAY', 'https://ipfs.io')
-    const target = `${pathGw}/ipfs/${cid}${pathAndQuery}`
+    const target = `${pathGw}/${ns}/${id}${pathAndQuery}`
     const upstream = await fetch(target, {
       method: request.method,
       headers: { accept: request.headers.get('accept') || '*/*' },
@@ -160,22 +163,22 @@ export async function handleRequest(request, env) {
     // Defense-in-depth for untrusted content executing on this origin.
     headers.set('x-content-type-options', 'nosniff')
     headers.set('x-wns-name', sub)
-    headers.set('x-ipfs-cid', cid)
+    headers.set(ns === 'ipns' ? 'x-ipns-name' : 'x-ipfs-cid', id)
     return new Response(upstream.body, { status: upstream.status, headers })
   }
 
-  // Default: 302 to a subdomain IPFS gateway. Bandwidth-light (the gateway is
-  // never in the data path) and per-name origin isolation comes for free from
-  // the CID subdomain. Each <label>.wei.limo is already its own origin too.
+  // Default: 302 to a subdomain IPFS/IPNS gateway. Bandwidth-light (the gateway
+  // is never in the data path) and per-name origin isolation comes for free from
+  // the CID/key subdomain. Each <label>.wei.limo is already its own origin too.
   const subGw = readEnv(env, 'IPFS_SUBDOMAIN_GATEWAY', 'dweb.link')
-  const target = `https://${cid}.ipfs.${subGw}${pathAndQuery}`
+  const target = `https://${id}.${ns}.${subGw}${pathAndQuery}`
   return new Response(null, {
     status: 302,
     headers: {
       location: target,
       'cache-control': 'public, max-age=300',
       'x-wns-name': sub,
-      'x-ipfs-cid': cid,
+      [ns === 'ipns' ? 'x-ipns-name' : 'x-ipfs-cid']: id,
     },
   })
 }
