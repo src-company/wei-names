@@ -1812,6 +1812,10 @@ async function doReveal() {
       tx = await wcTransaction(contract.reveal(pending.name, pending.secret, { value: total }), 'Approve registration');
     }
     const txHash = tx.hash;
+    // Persist the reveal tx so a reload mid-confirmation resumes polling instead
+    // of offering Register again (a second reveal would revert and waste gas).
+    pending.revealTxHash = txHash;
+    savePending(pending);
     showStatus('Waiting for confirmation...', '', txHash);
     await waitForTx(tx);
 
@@ -1952,6 +1956,9 @@ async function doRevealWithToken(tk) {
     const router = new ethers.Contract(ZROUTER, routerIface, _signer);
     const tx = await wcTransaction(router.multicall([permitCall, quote.callData, revealCall, sweepCall]), `Approve ${tk.name} registration`);
     const txHash = tx.hash;
+    // Persist the reveal tx so a reload mid-confirmation resumes polling.
+    pending.revealTxHash = txHash;
+    savePending(pending);
     showStatus('Waiting for confirmation...', '', txHash);
     await waitForTx(tx);
 
@@ -1966,11 +1973,35 @@ async function doRevealWithToken(tk) {
 function doRevealWithUSDC() { return doRevealWithToken(USDC_REVEAL); }
 function doRevealWithDAI() { return doRevealWithToken(DAI_REVEAL); }
 
-function savePending(data) {
-  pendingCache = null; // Invalidate cache
+// Pending commitments are keyed PER ACCOUNT so switching wallets doesn't show a
+// ghost commitment or block a second account from committing. Cache is keyed too,
+// so an account switch (which changes the key) self-invalidates.
+const PENDING_PREFIX = 'wei_pending:';
+let pendingCache = null; // { key, data }
+
+function pendingKeyFor(addr) {
+  return addr ? PENDING_PREFIX + addr.toLowerCase() : null;
+}
+
+// One-time migration of the legacy single-slot commitment into its per-account key.
+(function migrateLegacyPending() {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
-    pendingCache = data;
+    const legacy = localStorage.getItem(STORAGE_KEY);
+    if (!legacy) return;
+    const data = JSON.parse(legacy);
+    const k = data && data.owner ? pendingKeyFor(data.owner) : null;
+    if (k && !localStorage.getItem(k)) localStorage.setItem(k, legacy);
+    localStorage.removeItem(STORAGE_KEY);
+  } catch (_) {}
+})();
+
+function savePending(data) {
+  const key = pendingKeyFor((data && data.owner) || _connectedAddress);
+  pendingCache = null; // Invalidate cache
+  if (!key) return false; // no account context (commit always has one)
+  try {
+    localStorage.setItem(key, JSON.stringify(data));
+    pendingCache = { key, data };
     return true;
   } catch (e) {
     // iOS private browsing or storage full
@@ -1980,23 +2011,44 @@ function savePending(data) {
   }
 }
 
-let pendingCache = null;
-
 function loadPending() {
-  if (pendingCache) return pendingCache;
-  try {
-    const data = localStorage.getItem(STORAGE_KEY);
-    if (!data) return null;
-    pendingCache = JSON.parse(data);
-    return pendingCache;
-  } catch (e) {
-    return null;
+  const key = pendingKeyFor(_connectedAddress);
+  if (key) {
+    if (pendingCache && pendingCache.key === key) return pendingCache.data;
+    try {
+      const raw = localStorage.getItem(key);
+      const data = raw ? JSON.parse(raw) : null;
+      pendingCache = { key, data };
+      return data;
+    } catch (_) { return null; }
   }
+  // Disconnected: show the most recent pending across accounts (informational —
+  // reveal/commit actions are still gated on the committing wallet).
+  try {
+    let best = null, bestKey = null;
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!k || k.indexOf(PENDING_PREFIX) !== 0) continue;
+      const d = JSON.parse(localStorage.getItem(k) || 'null');
+      if (d && (!best || (d.timestamp || 0) > (best.timestamp || 0))) { best = d; bestKey = k; }
+    }
+    pendingCache = bestKey ? { key: bestKey, data: best } : null;
+    return best;
+  } catch (_) { return null; }
+}
+
+// Hide the pending panel + stop its timer WITHOUT deleting storage (used when the
+// current account has no pending of its own, e.g. after switching wallets).
+function hidePendingPanel() {
+  $('pending').classList.remove('show');
+  const oldBtn = $('manualCheckBtn'); if (oldBtn) oldBtn.remove();
+  pendingTimerId++;
+  if (pendingTimeoutId) { clearTimeout(pendingTimeoutId); pendingTimeoutId = null; }
 }
 
 async function initPending() {
   const pending = loadPending();
-  if (!pending) return null;
+  if (!pending) { hidePendingPanel(); return null; }
 
   // Check if name is still available - if not, clear stale pending
   try {
@@ -2017,8 +2069,13 @@ async function initPending() {
 }
 
 function clearPending() {
+  const p = loadPending();
+  const key = pendingKeyFor((p && p.owner) || _connectedAddress) || (pendingCache && pendingCache.key);
   pendingCache = null; // Invalidate cache
-  try { localStorage.removeItem(STORAGE_KEY); } catch (e) {}
+  try {
+    if (key) localStorage.removeItem(key);
+    localStorage.removeItem(STORAGE_KEY); // legacy slot, just in case
+  } catch (e) {}
   $('pending').classList.remove('show');
   const oldBtn = $('manualCheckBtn'); if (oldBtn) oldBtn.remove();
   pendingTimerId++; // Invalidate any running timer callbacks
@@ -2053,6 +2110,49 @@ async function updateTimer(timerId) {
   const remaining = MIN_COMMIT_AGE - elapsed;
   const timerEl = $('pendingTimer');
   const revealBtn = $('revealBtn');
+
+  // A reveal/registration tx has already been broadcast (persisted so a reload
+  // mid-reveal doesn't offer Register again and cause a wasteful second tx that
+  // reverts). Poll its receipt to completion.
+  if (pending.revealTxHash) {
+    const esLink = `https://etherscan.io/tx/${pending.revealTxHash}`;
+    timerEl.innerHTML = spinnerSVG(13) + 'Registering — confirming… <a href="' + esLink +
+      '" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;">Check Etherscan</a>';
+    revealBtn.disabled = true;
+    pending._revealPolls = (pending._revealPolls || 0) + 1;
+    try {
+      const p = rpcProvider || await getRpc();
+      const receipt = await p.getTransactionReceipt(pending.revealTxHash);
+      if (timerId !== pendingTimerId) return;
+      if (receipt) {
+        if (receipt.status === 1) {
+          showStatus(pending.name + '.wei registered!', 'success', pending.revealTxHash);
+          clearPending();
+          doCheckName();
+          return;
+        }
+        // Reverted — the whole tx reverted so the commitment survives; allow retry.
+        const revertedHash = pending.revealTxHash;
+        delete pending.revealTxHash;
+        delete pending._revealPolls;
+        savePending(pending);
+        showStatus('Registration reverted — you can try again.', 'error', revertedHash);
+        // fall through to the normal ready-to-reveal state below
+      } else if (pending._revealPolls < 60) {
+        if (pendingTimeoutId) clearTimeout(pendingTimeoutId);
+        pendingTimeoutId = setTimeout(() => updateTimer(timerId), 2000);
+        return;
+      } else {
+        return; // gave up auto-polling; the Etherscan link stays, a reload re-checks
+      }
+    } catch (_) {
+      if (pending._revealPolls < 60) {
+        if (pendingTimeoutId) clearTimeout(pendingTimeoutId);
+        pendingTimeoutId = setTimeout(() => updateTimer(timerId), 2000);
+      }
+      return;
+    }
+  }
 
   if (pending.confirmed === false) {
     // Explicitly false means commit tx is still pending
