@@ -490,23 +490,45 @@ body.modal-open { overflow: hidden; }
   border-color: var(--btn-bg);
 }
 
-  /* Custom RPC settings */
-  /* Sits left of the dark-mode toggle; offsets mirror .dark-toggle's box
-     model so both icons share the same visual centre on every screen size. */
-  .rpc-gear {
-    position: fixed;
-    bottom: calc(max(20px, env(safe-area-inset-bottom, 0px)) - 13px);
-    right: calc(max(20px, env(safe-area-inset-right, 0px)) + 27px);
-    z-index: 100;
-    width: 40px; height: 40px;
-    display: flex; align-items: center; justify-content: center;
-    background: none; border: none; padding: 0; margin: 0;
-    color: var(--fg); opacity: 0.5; cursor: pointer;
+  /* Bottom-right utility controls — network settings + theme toggle. Rendered as
+     a matched pair of quiet frosted circles so they read as intentional buttons
+     and stay legible over footer content instead of colliding with it. */
+  .rpc-gear, .dark-toggle {
+    width: 38px; height: 38px;
     border-radius: 50%;
-    transition: opacity 0.2s, background 0.15s;
+    border: 1px solid var(--border-muted);
+    background: color-mix(in srgb, var(--bg) 80%, transparent);
+    -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
+    opacity: 0.8;
+    transition: opacity 0.2s, background 0.15s, border-color 0.15s;
   }
-  .rpc-gear svg { width: 18px; height: 18px; }
-  .rpc-gear:hover, .rpc-gear:focus-visible { opacity: 1; background: var(--surface-hover); outline: none; }
+  .rpc-gear {
+    position: fixed; z-index: 100;
+    bottom: max(20px, env(safe-area-inset-bottom, 0px));
+    right: calc(max(20px, env(safe-area-inset-right, 0px)) + 48px);
+    display: flex; align-items: center; justify-content: center;
+    padding: 0; margin: 0; color: var(--fg); cursor: pointer;
+  }
+  .rpc-gear svg { width: 17px; height: 17px; }
+  .rpc-gear:hover, .rpc-gear:focus-visible { opacity: 1; background: var(--surface); outline: none; }
+
+  /* Theme toggle: same chip as the gear, with the theme "ink" dot inside (was a
+     heavy filled circle that clashed with the outline gear). Override beats
+     theme.css including its :root.dark background rule. */
+  .dark-toggle, :root.dark .dark-toggle {
+    background: color-mix(in srgb, var(--bg) 80%, transparent);
+  }
+  .dark-toggle {
+    bottom: max(20px, env(safe-area-inset-bottom, 0px));
+    right: max(20px, env(safe-area-inset-right, 0px));
+    padding: 0; margin: 0;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .dark-toggle::before {
+    content: ''; width: 13px; height: 13px; border-radius: 50%;
+    background: var(--fg);
+  }
+  .dark-toggle:hover, .dark-toggle:focus-visible { opacity: 1; outline: none; }
   .rpc-label { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; opacity: 0.7; margin-bottom: 8px; }
   .rpc-input {
     font-size: 16px; padding: 10px 12px; width: 100%; /* 16px: avoids iOS Safari auto-zoom on focus */
