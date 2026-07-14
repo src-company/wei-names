@@ -7,13 +7,21 @@ lookup against the WNS contract. **No per-name DNS records** — one wildcard
 ```
 GET alice.wei.limo
   ├─ eth_call WNS.computeId("alice.wei")      -> tokenId
-  ├─ eth_call WNS.contenthash(tokenId)        -> 0xe301…  (EIP-1577)
-  ├─ decode contenthash                        -> bafy… (IPFS CIDv1)
+  ├─ eth_call WNS.contenthash(tokenId)        -> 0xe301…/0xe501…  (EIP-1577)
+  ├─ decode contenthash                        -> bafy… (IPFS) or k51… (IPNS)
   └─ 302  https://bafy….ipfs.dweb.link/        (default) — or proxy the bytes
+         https://k51….ipns.dweb.link/          (IPNS → .ipns. gateway)
 ```
 
 A newly registered `.wei` name works **instantly**, with zero provisioning.
 Unregistered / expired names, and names without a contenthash, return `404`.
+
+**IPFS or IPNS.** An IPFS contenthash pins a fixed site (a new CID = a new
+on-chain tx). An **IPNS** contenthash points at a stable key set on-chain
+**once**; the owner republishes the IPNS record off-chain on every update, so
+the site changes with **no further transaction**. The gateway never resolves
+IPNS itself — it hands the `k51…` name to the IPNS subdomain gateway, which
+resolves it fresh per request.
 
 ## Why a wildcard, not per-name records
 
@@ -32,7 +40,7 @@ The gateway also keeps a `RESERVED_LABELS` guard as defense-in-depth.
 | File | Role |
 |------|------|
 | `wns.js` | Minimal WNS read client (`computeId` + `contenthash` via `eth_call`), zero deps |
-| `contenthash.js` | EIP-1577 contenthash → IPFS CIDv1 (base32) |
+| `contenthash.js` | EIP-1577 contenthash → IPFS CIDv1 (base32) or IPNS name (base36) |
 | `handler.js` | Core `handleRequest(request, env)` — runtime-agnostic Web Fetch |
 | `worker.js` | Cloudflare Worker entrypoint |
 | `server.js` | Node / Railway / Render entrypoint |
@@ -43,8 +51,8 @@ The gateway also keeps a `RESERVED_LABELS` guard as defense-in-depth.
 | Var | Default | Notes |
 |-----|---------|-------|
 | `GATEWAY_MODE` | `redirect` | `redirect` (302 to a subdomain IPFS gateway, bandwidth-light) or `proxy` (stream through the gateway, keeps `<name>.wei.limo` in the URL bar) |
-| `IPFS_SUBDOMAIN_GATEWAY` | `dweb.link` | Used in redirect mode → `https://<cid>.ipfs.<gw>` |
-| `IPFS_PATH_GATEWAY` | `https://ipfs.io` | Used in proxy mode → `<gw>/ipfs/<cid>` |
+| `IPFS_SUBDOMAIN_GATEWAY` | `dweb.link` | Used in redirect mode → `https://<id>.<ipfs\|ipns>.<gw>` |
+| `IPFS_PATH_GATEWAY` | `https://ipfs.io` | Used in proxy mode → `<gw>/<ipfs\|ipns>/<id>` |
 | `RPC_URLS` | built-in list | Comma-separated mainnet RPCs with fallback |
 | `WNS_CONTRACT` | mainnet WNS | Override the registry address |
 | `RESERVED_LABELS` | — | Extra labels to never treat as `.wei` names (added to the built-in set) |
@@ -107,8 +115,9 @@ wrangler deploy
 
 ```bash
 cd gateway
-# decode a contenthash
-node --input-type=module -e 'import {contenthashToCid} from "./contenthash.js"; console.log(contenthashToCid("0xe3010170122029f2d17be6139079dc48696d1f582a8530eb9805b561eda517e22a892c7e3f1f"))'
+npm test          # contenthash codec round-trips (IPFS + IPNS)
+# decode a contenthash -> { ns, id }
+node --input-type=module -e 'import {decodeContenthash} from "./contenthash.js"; console.log(decodeContenthash("0xe3010170122029f2d17be6139079dc48696d1f582a8530eb9805b561eda517e22a892c7e3f1f"))'
 # live resolve a real name
 node --input-type=module -e 'import {resolveContenthash} from "./wns.js"; console.log(await resolveContenthash("z0r0z"))'
 ```
