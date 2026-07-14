@@ -2169,12 +2169,16 @@ async function showManage(tokenId, name) {
       infoHtml += `<div><span>Resolves to:</span>${addrLink(resolved)}</div>`;
     }
     if (contentHash && contentHash !== '0x' && contentHash.length > 2) {
-      const cid = decodeContenthash(contentHash);
+      const content = decodeContenthash(contentHash);
       const gatewayUrl = `https://${escapeHtml(name)}.${WEI_GATEWAY}`;
       infoHtml += `<div><span>Website:</span><a href="${gatewayUrl}" target="_blank" rel="noopener" style="color:inherit;">${gatewayUrl}</a></div>`;
-      if (cid) {
-        const short = cid.slice(0, 16) + '...' + cid.slice(-6);
-        infoHtml += `<div><span>Content:</span><a href="https://ipfs.io/ipfs/${escapeHtml(cid)}" target="_blank" rel="noopener" style="color:inherit;font-family:monospace;font-size:11px;">${escapeHtml(short)}</a></div>`;
+      if (content) {
+        const short = content.id.slice(0, 16) + '...' + content.id.slice(-6);
+        const href = content.ns === 'ipns'
+          ? `https://${content.id}.ipns.dweb.link`
+          : `https://ipfs.io/ipfs/${content.id}`;
+        const label = content.ns === 'ipns' ? 'ipns://' + short : short;
+        infoHtml += `<div><span>Content:</span><a href="${escapeHtml(href)}" target="_blank" rel="noopener" style="color:inherit;font-family:monospace;font-size:11px;">${escapeHtml(label)}</a></div>`;
       }
     }
     if (expiryDate && isTopLevel) {
@@ -2260,9 +2264,9 @@ function showManageForm(action) {
       break;
     case 'setContent':
       html = `
-        <label>IPFS Content</label>
-        <div style="font-size:11px;opacity:0.5;margin-bottom:8px;">Enter IPFS CID to host a website at ${escapeHtml(currentTokenName)}.wei</div>
-        <input type="text" id="contentHash" placeholder="QmXxx... bafxxx... or 0x (raw bytes)">
+        <label>IPFS / IPNS Content</label>
+        <div style="font-size:11px;opacity:0.5;margin-bottom:8px;">Host a website at ${escapeHtml(currentTokenName)}.wei. Use an IPFS CID for a fixed site, or an IPNS name (ipns://k51...) to update the site later without a new transaction.</div>
+        <input type="text" id="contentHash" placeholder="bafy... / Qm... (IPFS) · ipns://k51... (IPNS) · 0x (raw)">
         <div style="font-size:11px;opacity:0.5;margin-top:4px;">Visit via: <a href="https://${escapeHtml(currentTokenName)}.${WEI_GATEWAY}" target="_blank" rel="noopener">${escapeHtml(currentTokenName)}.${WEI_GATEWAY}</a></div>
         <button onclick="doSetContent()">Set Website</button>
         <button class="secondary" onclick="$('manageForm').classList.remove('show')">Cancel</button>
@@ -2522,7 +2526,47 @@ function base32Encode(bytes) {
   return out;
 }
 
-// Decode ENSIP-7 contenthash to human-readable CID
+// Base36 (multibase 'k'), used for IPNS names (k51...). Base36 rather than
+// base32 because an ed25519 IPNS name in base32 exceeds the 63-char DNS label.
+const BASE36_ALPHABET = '0123456789abcdefghijklmnopqrstuvwxyz';
+
+function base36Encode(bytes) {
+  const digits = [0];
+  for (const byte of bytes) {
+    let carry = byte;
+    for (let i = 0; i < digits.length; i++) {
+      carry += digits[i] << 8;
+      digits[i] = carry % 36;
+      carry = (carry / 36) | 0;
+    }
+    while (carry > 0) { digits.push(carry % 36); carry = (carry / 36) | 0; }
+  }
+  let out = '';
+  for (let i = 0; i < bytes.length && bytes[i] === 0; i++) out += BASE36_ALPHABET[0];
+  for (let i = digits.length - 1; i >= 0; i--) out += BASE36_ALPHABET[digits[i]];
+  return out;
+}
+
+function base36Decode(str) {
+  const bytes = [0];
+  for (const ch of str.toLowerCase()) {
+    const value = BASE36_ALPHABET.indexOf(ch);
+    if (value === -1) throw new Error('Invalid base36 character');
+    let carry = value;
+    for (let i = 0; i < bytes.length; i++) {
+      carry += bytes[i] * 36;
+      bytes[i] = carry & 0xff;
+      carry >>= 8;
+    }
+    while (carry > 0) { bytes.push(carry & 0xff); carry >>= 8; }
+  }
+  for (let i = 0; i < str.length && str[i] === '0'; i++) bytes.push(0);
+  return new Uint8Array(bytes.reverse());
+}
+
+// Decode an ENSIP-7 contenthash into { ns: 'ipfs'|'ipns', id }, or null.
+//   ipfs -> id is a base32 CIDv1 (bafy...)
+//   ipns -> id is a base36 IPNS name (k51...)
 function decodeContenthash(hex) {
   try {
     const bytes = ethers.getBytes(hex);
@@ -2534,14 +2578,32 @@ function decodeContenthash(hex) {
       shift += 7;
       if (!(bytes[offset] & 0x80)) { offset++; break; }
     }
-    if (proto !== 0xe3) return null; // only IPFS supported
-    const cidBytes = bytes.slice(offset);
-    // CIDv1: version(1) + codec + multihash
-    if (cidBytes[0] === 0x01) {
-      return 'b' + base32Encode(cidBytes); // base32 multibase prefix
+    let cidBytes = bytes.slice(offset);
+    if (proto === 0xe3) {
+      // IPFS: CIDv1 version(1) + codec + multihash
+      if (cidBytes[0] === 0x01) return { ns: 'ipfs', id: 'b' + base32Encode(cidBytes) };
+      return null;
+    }
+    if (proto === 0xe5) {
+      // IPNS: libp2p-key CIDv1. Legacy encoders may store a bare peer-id
+      // multihash; wrap it as CIDv1 codec 0x72 (libp2p-key).
+      if (cidBytes[0] !== 0x01) cidBytes = new Uint8Array([0x01, 0x72, ...cidBytes]);
+      return { ns: 'ipns', id: 'k' + base36Encode(cidBytes) };
     }
     return null;
   } catch { return null; }
+}
+
+// Encode an IPNS name (ipns://k51..., a bare k.../baf.../f... CID, or a base58
+// peer id) into libp2p-key CIDv1 bytes for the ipns-ns contenthash.
+function encodeIpnsCid(name) {
+  name = name.trim();
+  if (name.startsWith('k')) return base36Decode(name.slice(1));      // base36 CIDv1
+  if (name.startsWith('baf')) return base32Decode(name.slice(1));    // base32 CIDv1
+  if (name.startsWith('f')) return ethers.getBytes('0x' + name.slice(1)); // base16 CIDv1
+  // Otherwise a base58 peer id (Qm..., 12D3Koo..., 1...) -> wrap its multihash.
+  const mh = base58Decode(name);
+  return new Uint8Array([0x01, 0x72, ...mh]);
 }
 
 function encodeContenthash(input) {
@@ -2550,6 +2612,16 @@ function encodeContenthash(input) {
   // Raw bytes passthrough (for advanced users)
   if (cid.startsWith('0x')) {
     return ethers.getBytes(cid);
+  }
+
+  // IPNS: ipns:// / /ipns/ prefix, or a bare base36 libp2p-key name (k51.../k2k...).
+  // ipns-ns protoCode = 0xe5, uvarint encoded as 0xe501.
+  let ipnsName = null;
+  if (cid.startsWith('ipns://')) ipnsName = cid.slice(7);
+  else if (cid.startsWith('/ipns/')) ipnsName = cid.slice(6);
+  else if (/^k(51|2k)/.test(cid)) ipnsName = cid;
+  if (ipnsName !== null) {
+    return ethers.concat([encodeUvarint(0xe5), encodeIpnsCid(ipnsName)]);
   }
 
   // Strip ipfs:// prefix
@@ -2571,7 +2643,7 @@ function encodeContenthash(input) {
     // CIDv1 - base16 (hex) encoded
     cidBytes = ethers.getBytes('0x' + cid.slice(1));
   } else {
-    throw new Error('Unsupported CID format. Use Qm... or baf...');
+    throw new Error('Unsupported CID format. Use Qm.../baf... (IPFS) or ipns://k51... (IPNS).');
   }
 
   // ENSIP-7 contenthash format: uvarint(protoCode) + CID bytes
