@@ -3,6 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" id="metaTheme" content="#ffffff">
+<meta name="description" content="Wei Name Service — affordable .wei names on Ethereum, named after the smallest unit of ether.">
 <title>WNS</title>
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2064%2064%22%3E%3Crect%20width%3D%2264%22%20height%3D%2264%22%20fill%3D%22%230A0A0A%22%2F%3E%3Cpath%20d%3D%22M16%2C16%20V48%20H22%20L32%2C32%20L42%2C48%20H48%20V16%20H42%20V38%20L32%2C22%20L22%2C38%20V16%20Z%22%20fill%3D%22%232D5FE8%22%2F%3E%3C%2Fsvg%3E">
 <link rel="stylesheet" href="theme.css">
@@ -11,6 +13,9 @@
 <script>
 // Prevent dark-mode FOUC: apply class before first paint
 try{var d=localStorage.getItem('dark');if(d==='1'||(d===null&&matchMedia('(prefers-color-scheme:dark)').matches))document.documentElement.classList.add('dark')}catch(_){}
+// Keep the mobile browser chrome (theme-color) in sync with the current theme,
+// including the manual dark toggle (not just the system preference).
+(function(){function s(){var m=document.getElementById('metaTheme');if(m)m.content=document.documentElement.classList.contains('dark')?'#0a0a0a':'#ffffff';}s();try{new MutationObserver(s).observe(document.documentElement,{attributes:true,attributeFilter:['class']});}catch(_){}})();
 </script>
 <script src="theme.js"></script>
 <script>
@@ -58,6 +63,23 @@ try{var d=localStorage.getItem('dark');if(d==='1'||(d===null&&matchMedia('(prefe
   --manage-border:#333;--manage-bg:#151515;
   --link-dim:0.5;
 }
+
+/* Base polish: crisper text on retina, stop mobile Safari inflating font sizes
+   in landscape, and native controls (scrollbars, autofill) that match the theme. */
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; color-scheme: light; }
+html.dark { color-scheme: dark; }
+body { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+
+/* Keyboard focus rings (a11y) — only for keyboard users, never on mouse/touch.
+   Inputs keep their underline treatment, so exclude them. */
+button:focus-visible, a:focus-visible, .pay-option:focus-visible,
+.net-btn:focus-visible, .wallet-option:focus-visible, [role="button"]:focus-visible {
+  outline: 2px solid var(--btn-bg);
+  outline-offset: 2px;
+}
+/* Tactile press feedback (skipped under prefers-reduced-motion below). */
+button:active:not(:disabled), .pay-option:active, .net-btn:active { transform: translateY(1px); }
+
 h1 {
   font-size: 14px;
   font-weight: 400;
@@ -391,7 +413,13 @@ body.modal-open { overflow: hidden; }
   button { padding: 14px 20px; font-size: 11px; width: 100%; margin-right: 0; }
   button.secondary { width: auto; margin-left: 8px; }
   .manage-actions { grid-template-columns: 1fr; }
+  /* Keep the segmented pill controls (ETH/USDC/DAI, Free/ETH/ERC20) on one row
+     instead of the blanket button{width:100%} stacking them vertically. */
+  .pay-option { width: auto; flex: 1 1 0; }
   .pay-method { flex-wrap: wrap; }
+  .pay-method label { width: 100%; margin: 0 0 8px; }
+  /* Roomier tap targets for the small text links/toggles. */
+  .view-link a, .send-toggle, .free-cta { display: inline-block; padding: 6px 0; }
   .pending .actions { flex-direction: row; gap: 8px; }
   .pending .actions button { flex: 1; }
   .send-form { padding: 14px; }
@@ -481,7 +509,7 @@ body.modal-open { overflow: hidden; }
   .rpc-gear:hover, .rpc-gear:focus-visible { opacity: 1; background: var(--surface-hover); outline: none; }
   .rpc-label { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; opacity: 0.7; margin-bottom: 8px; }
   .rpc-input {
-    font-size: 15px; padding: 10px 12px; width: 100%;
+    font-size: 16px; padding: 10px 12px; width: 100%; /* 16px: avoids iOS Safari auto-zoom on focus */
     border: 1px solid var(--border); background: var(--bg); color: var(--fg);
   }
   .rpc-input:focus { border-color: var(--fg); border-bottom-width: 1px; margin-bottom: 0; }
@@ -682,7 +710,7 @@ try{if(localStorage.getItem('wns_dao_banner')==='1'){var _db=document.getElement
 <div class="section">
   <label>Name</label>
   <div class="input-wrap">
-    <input type="text" id="nameInput" placeholder="yourname" oninput="checkName()">
+    <input type="text" id="nameInput" placeholder="yourname" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" enterkeyhint="search" oninput="checkName()" onkeydown="nameInputKey(event)">
     <span class="suffix">.wei</span>
   </div>
   <div id="availability" class="availability"></div>
@@ -1311,13 +1339,24 @@ function checkName() {
   checkDebounce = setTimeout(() => doCheckName(), 350);
 }
 
+// Enter flushes the debounce for an immediate lookup and drops the mobile keyboard.
+function nameInputKey(e) {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    clearTimeout(checkDebounce);
+    e.target.blur();
+    doCheckName();
+  }
+}
+
 async function doCheckName() {
   const raw = $('nameInput').value;
   const availEl = $('availability');
   const feeEl = $('feeDisplay');
   const commitBtn = $('commitBtn');
-  const hasPending = !!loadPending();
   pendingMintInfo = null;
+  pendingOwnerSub = null;
+  commitBtn.textContent = 'Commit'; // reset; the available branch relabels if disconnected
 
   if (!raw.trim()) {
     availEl.classList.remove('show');
@@ -1353,6 +1392,9 @@ async function doCheckName() {
         availEl.classList.add('show');
         return;
       }
+
+      availEl.innerHTML = '<span style="opacity:0.5;">' + zfiLoadingSVG(16) + ' Checking ' + escapeHtml(fullName) + '.wei…</span>';
+      availEl.classList.add('show');
 
       // Use contract's computeId for full name (handles recursive namehash)
       const tokenId = await readContract.computeId(fullName + '.wei');
@@ -1400,8 +1442,19 @@ async function doCheckName() {
             // Mirror contract's _controllerOf: escrow takes priority over ownerOf
             const currentController = escrowedAddr !== ethers.ZeroAddress ? escrowedAddr : parentOwner;
 
-            // Only show mint if enabled AND controller matches (not stale)
-            if (cfgEnabled && cfgController.toLowerCase() === currentController.toLowerCase()) {
+            // If the connected wallet owns the parent directly (not escrowed to the
+            // registrar), it can register subdomains itself via NameNFT.registerSubdomain
+            // for free (gas only) — no registrar sale needed. Offer that instead of the
+            // dead-end "sales not enabled" / "only the parent owner can register" messages.
+            const isParentOwner = _connectedAddress &&
+              escrowedAddr === ethers.ZeroAddress &&
+              parentOwner.toLowerCase() === _connectedAddress.toLowerCase();
+
+            if (isParentOwner) {
+              pendingOwnerSub = { parentId, subLabel, parentName };
+              feeEl.innerHTML = 'You own ' + escapeHtml(parentName) + '.wei — register this subdomain for free (gas only)' +
+                '<br><button onclick="doOwnerRegisterSubdomain()" style="margin-top:8px;">Register ' + escaped + '.wei</button>';
+            } else if (cfgEnabled && cfgController.toLowerCase() === currentController.toLowerCase()) {
               let priceDisplay, tokenDecimals = 18, tokenSymbol = '';
 
               if (cfgFeeToken === ethers.ZeroAddress) {
@@ -1482,6 +1535,11 @@ async function doCheckName() {
       return;
     }
 
+    // Lightweight checking state so the previous name's result doesn't linger
+    // while this lookup is in flight.
+    availEl.innerHTML = '<span style="opacity:0.5;">' + zfiLoadingSVG(16) + ' Checking ' + escapeHtml(name) + '.wei…</span>';
+    availEl.classList.add('show');
+
     // Compute tokenId locally to batch all 4 calls into 1 RPC call
     const tokenId = localComputeId(name);
     const results = await multicall([
@@ -1502,9 +1560,13 @@ async function doCheckName() {
     if (available) {
       availEl.innerHTML = '<span class="available">' + escaped + '.wei is available</span>' +
         '<div class="view-link"><a href="#" onclick="copyShareLink();return false;">Copy link →</a></div>';
-      // Enable commit only if: available + no pending + wallet connected
+      // Enable commit only if: available + no pending + wallet connected.
+      // Re-read the pending live (not the value captured at function entry): a
+      // doCheckName already in flight when the user commits must not re-enable
+      // the button that displayPending just disabled.
       commitBtn.style.display = '';
-      commitBtn.disabled = hasPending || !_signer;
+      commitBtn.disabled = !!loadPending();
+      commitBtn.textContent = _signer ? 'Commit' : 'Connect to commit';
       hideManage();
 
       let feeText = ethers.formatEther(fee) + ' ETH';
@@ -1540,7 +1602,10 @@ async function doCheckName() {
 
 async function doCommit() {
   const name = normalizeLabel($('nameInput').value);
-  if (!name || !_signer) return;
+  if (!name) return;
+  // Not connected: open the wallet picker instead of dead-ending on a disabled
+  // button. doCheckName re-runs on connect and re-enables the real Commit action.
+  if (!_signer) { toggleWallet(); return; }
 
   // Disable immediately to prevent double-clicks
   $('commitBtn').disabled = true;
@@ -1601,11 +1666,20 @@ async function doCommit() {
       showStatus('Commitment confirmed! Wait 60 seconds then reveal.', 'success', tx.hash);
     }
   } catch (e) {
-    // Clear pending if tx failed (only if we saved one)
-    if (loadPending()?.name === name) {
+    const p = loadPending();
+    if (p?.name === name && p.txHash) {
+      // The commit tx was already broadcast (we have a hash) but confirmation
+      // threw. Do NOT clear — that would delete the secret while the tx may still
+      // mine, leaving an on-chain commitment the user can never reveal. Keep the
+      // pending panel; its timer polls the receipt and recovers. Return so the
+      // error isn't surfaced over the recovery status.
+      showStatus('Waiting for confirmation... (checking)', '', p.txHash);
+      return;
+    } else if (p?.name === name) {
+      // Failed before broadcast (e.g. user rejected in wallet) — safe to clear.
       clearPending();
     } else {
-      // Re-enable commit if we failed before saving pending
+      // Failed before we saved any pending — re-enable commit.
       $('commitBtn').disabled = false;
     }
     handleError(e);
@@ -1616,7 +1690,9 @@ let selectedPayMethod = 'eth';
 let isRevealing = false; // Guards the reveal/register step against double-submit
 
 function selectPayMethod(el) {
-  document.querySelectorAll('.pay-option').forEach(b => b.classList.remove('active'));
+  // Scope to this button group only. The Subdomain-Sales form reuses the
+  // .pay-option class, so a document-wide query would clear its selection too.
+  el.parentNode.querySelectorAll('.pay-option').forEach(b => b.classList.remove('active'));
   el.classList.add('active');
   selectedPayMethod = el.dataset.method;
 }
@@ -1964,7 +2040,14 @@ async function updateTimer(timerId) {
           btn.textContent = 'Retry Check';
           btn.className = 'secondary';
           btn.style.marginTop = '8px';
-          btn.onclick = () => { pending._pollAttempts = 0; pending._pollErrors = 0; updateTimer(timerId); };
+          // Start a FRESH timer chain rather than reusing the captured timerId:
+          // a tab switch (visibilitychange) bumps pendingTimerId, which would make
+          // updateTimer(timerId) bail immediately and leave the button dead.
+          btn.onclick = () => {
+            pending._pollAttempts = 0; pending._pollErrors = 0;
+            pendingTimerId++;
+            updateTimer(pendingTimerId);
+          };
           timerEl.parentNode.insertBefore(btn, timerEl.nextSibling);
         }
       };
@@ -2063,6 +2146,7 @@ let currentTokenId = null;
 let currentTokenName = null;
 let isProcessing = false; // Prevent double-click on manage actions
 let pendingMintInfo = null;
+let pendingOwnerSub = null; // parent-owner direct subdomain registration (free, via NameNFT)
 
 function hideManage() {
   // Invalidate any in-flight showManage() so a slow response from a previous
@@ -2155,11 +2239,22 @@ async function showManage(tokenId, name) {
       }
     }
 
+    // A subdomain is ALSO inactive when its parent has merely expired (grace) even
+    // without an epoch bump. resolve() recurses the whole parent chain and returns
+    // address(0) whenever a token is inactive, so it's a reliable catch-all: every
+    // write (setAddr/setText/setContenthash/transfer/setPrimaryName) would revert
+    // Expired. (resolved is null only if the read failed — stay conservative then.)
+    const isParentExpiredSub = !!(record && record.parent !== 0n && !isStaleSubdomain && resolved === ethers.ZeroAddress);
+    const isSubInactive = isStaleSubdomain || isParentExpiredSub;
+
     // Build info section
     const addrLink = (addr) => `<a href="https://etherscan.io/address/${addr}" target="_blank" rel="noopener" style="color:inherit;">${addr.slice(0, 8)}...${addr.slice(-6)}</a>`;
     let infoHtml = '';
-    if (isStaleSubdomain) {
-      infoHtml += `<div style="padding:10px;background:var(--status-warning,#fff3cd);color:#7a4f00;margin-bottom:12px;font-size:12px;border-radius:4px;">This subdomain is expired — its parent has been re-registered since. On-chain updates (website, records, transfer) will revert.</div>`;
+    if (isSubInactive) {
+      const reason = isStaleSubdomain
+        ? 'its parent has been re-registered since'
+        : 'its parent has expired';
+      infoHtml += `<div style="padding:10px;background:var(--status-warning,#fff3cd);color:#7a4f00;margin-bottom:12px;font-size:12px;border-radius:4px;">This subdomain is inactive — ${reason}. On-chain updates (website, records, transfer) will revert.</div>`;
     }
     if (isExpiredInGrace) {
       infoHtml += `<div style="padding:10px;background:var(--status-warning,#fff3cd);color:#7a4f00;margin-bottom:12px;font-size:12px;border-radius:4px;">This name has expired and is in its grace period. Renew to reactivate — all other on-chain actions (transfer, records, website) will revert until you do.</div>`;
@@ -2211,7 +2306,7 @@ async function showManage(tokenId, name) {
     if (isOwner && isExpiredInGrace) {
       // Expired (in grace): renewal is the only action that succeeds on-chain.
       $('manageActions').innerHTML = `<button onclick="showManageForm('renew')">Renew</button>`;
-    } else if (isOwner && !isStaleSubdomain) {
+    } else if (isOwner && !isSubInactive) {
       let actionsHtml = `
         <button onclick="showManageForm('transfer')">Transfer</button>
         <button onclick="showManageForm('setAddr')">Set Recipient</button>
@@ -2225,7 +2320,7 @@ async function showManage(tokenId, name) {
         actionsHtml += `<button onclick="showManageForm('renew')">Renew</button>`;
       }
       $('manageActions').innerHTML = actionsHtml;
-    } else if (isStaleSubdomain) {
+    } else if (isSubInactive) {
       $('manageActions').innerHTML = '';
     } else {
       $('manageActions').innerHTML = '<span style="font-size:12px;opacity:0.5;">Connect as owner to manage</span>';
@@ -3269,6 +3364,34 @@ async function doMintSubdomain() {
   }
 }
 
+// Parent owner registering their own subdomain directly (free, gas only) via
+// NameNFT.registerSubdomain — no SubdomainRegistrar sale involved. Offered from
+// doCheckName when the connected wallet owns the (non-escrowed) parent.
+async function doOwnerRegisterSubdomain() {
+  if (isProcessing || !contract || !pendingOwnerSub) return;
+  const { parentId, subLabel, parentName } = pendingOwnerSub;
+
+  isProcessing = true;
+  const btn = (typeof event !== 'undefined' && event?.target) || null; if (btn) btn.disabled = true;
+  try {
+    showStatus('Registering subdomain...', '');
+    const tx = await wcTransaction(contract.registerSubdomain(subLabel, parentId), 'Approve subdomain');
+    showStatus('Waiting for confirmation...', '', tx.hash);
+    await waitForTx(tx);
+    const fullName = subLabel + '.' + parentName;
+    showStatus(fullName + '.wei registered!', 'success', tx.hash);
+    // Navigate the view into the new subdomain so follow-up actions target it.
+    $('nameInput').value = fullName;
+    updateHash(fullName);
+    doCheckName();
+  } catch (e) {
+    handleError(e);
+  } finally {
+    isProcessing = false;
+    if (btn) btn.disabled = false;
+  }
+}
+
 async function doRenew() {
   if (isProcessing || !contract || !currentTokenId) return;
 
@@ -3621,6 +3744,14 @@ function copyShareLink() {
 
 // Init from hash on load
 initFromHash();
+
+// Autofocus the name field on desktop (not touch — avoids popping the mobile
+// keyboard on load) when nothing was pre-filled from the URL hash.
+try {
+  if (!('ontouchstart' in window) && !navigator.maxTouchPoints && !$('nameInput').value) {
+    $('nameInput').focus();
+  }
+} catch (_) {}
 
 // Listen for hash changes (back/forward navigation)
 window.addEventListener('hashchange', initFromHash);
