@@ -1144,6 +1144,23 @@ function localComputeId(name) {
   return BigInt(ethers.keccak256(ethers.concat([WEI_NODE, labelHash])));
 }
 
+// Local recursive namehash for a full name (top-level OR subdomain), matching the
+// contract's computeNamehash exactly (keccak of already-normalized lowercase
+// labels; no ENSIP-15 re-normalization). Verified equal to on-chain computeId /
+// ethers.namehash for the label forms this dapp produces. Lets us skip an RPC
+// round-trip that previously hashed the name on-chain on every subdomain lookup,
+// recipient resolve, and subdomain mint. Accepts names with or without ".wei".
+const ROOT_NODE = '0x' + '00'.repeat(32);
+function computeIdFull(name) {
+  const full = name.endsWith('.wei') ? name : name + '.wei';
+  const labels = full.split('.');
+  let node = ROOT_NODE;
+  for (let i = labels.length - 1; i >= 0; i--) {
+    node = ethers.keccak256(ethers.concat([node, ethers.keccak256(ethers.toUtf8Bytes(labels[i]))]));
+  }
+  return BigInt(node);
+}
+
 // Batch multiple contract calls into one RPC call
 async function multicall(calls) {
   const provider = rpcProvider || await getRpc();
@@ -1393,11 +1410,11 @@ async function doCheckName() {
         return;
       }
 
-      availEl.innerHTML = '<span style="opacity:0.5;">' + zfiLoadingSVG(16) + ' Checking ' + escapeHtml(fullName) + '.wei…</span>';
+      availEl.innerHTML = '<span style="opacity:0.5;">' + spinnerSVG(15) + 'Checking ' + escapeHtml(fullName) + '.wei…</span>';
       availEl.classList.add('show');
 
-      // Use contract's computeId for full name (handles recursive namehash)
-      const tokenId = await readContract.computeId(fullName + '.wei');
+      // Recursive namehash computed locally (matches on-chain computeId).
+      const tokenId = computeIdFull(fullName);
 
       if (thisVersion !== checkVersion) return;
 
@@ -1424,8 +1441,7 @@ async function doCheckName() {
           const subLabel = parts[0];
           const parentName = parts.slice(1).join('.');
           try {
-            const parentId = await readContract.computeId(parentName + '.wei');
-            if (thisVersion !== checkVersion) return;
+            const parentId = computeIdFull(parentName);
 
             const [cfgRes, parentOwnerRes, escrowRes] = await Promise.all([
               rpcProvider.call({ to: SUBDOMAIN_REGISTRAR, data: regIface.encodeFunctionData('config', [parentId]) }),
@@ -1537,7 +1553,7 @@ async function doCheckName() {
 
     // Lightweight checking state so the previous name's result doesn't linger
     // while this lookup is in flight.
-    availEl.innerHTML = '<span style="opacity:0.5;">' + zfiLoadingSVG(16) + ' Checking ' + escapeHtml(name) + '.wei…</span>';
+    availEl.innerHTML = '<span style="opacity:0.5;">' + spinnerSVG(15) + 'Checking ' + escapeHtml(name) + '.wei…</span>';
     availEl.classList.add('show');
 
     // Compute tokenId locally to batch all 4 calls into 1 RPC call
@@ -2130,13 +2146,22 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 
+// Minimal monochrome spinner (currentColor) — matches the B/W design better than
+// the brand cube for inline "in-progress" text.
+function spinnerSVG(s = 13) {
+  return `<svg width="${s}" height="${s}" viewBox="0 0 24 24" style="display:inline-block;vertical-align:-2px;margin-right:7px;" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2.5" stroke-opacity="0.25"/><path d="M12 3a9 9 0 0 1 9 9" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="0.7s" repeatCount="indefinite"/></path></svg>`;
+}
+
 function showStatus(msg, type, txHash) {
   const el = $('status');
+  // No success/error type => an in-progress step: lead with a spinner so the user
+  // sees the tx is actively working rather than stalled.
+  const lead = type ? '' : spinnerSVG();
   if (txHash) {
     const link = `https://etherscan.io/tx/${txHash}`;
-    el.innerHTML = escapeHtml(msg) + ` <a href="${link}" target="_blank" rel="noopener" style="color:inherit;">View tx →</a>`;
+    el.innerHTML = lead + escapeHtml(msg) + ` <a href="${link}" target="_blank" rel="noopener" style="color:inherit;">View tx →</a>`;
   } else {
-    el.textContent = msg;
+    el.innerHTML = lead + escapeHtml(msg);
   }
   el.className = 'status show' + (type ? ' ' + type : '');
 }
@@ -2420,8 +2445,8 @@ async function resolveRecipient(input) {
     const rc = readContract || contract;
     if (!rc) return null;
 
-    // Use contract's computeId for proper subdomain support
-    const tokenId = await rc.computeId(normalized + '.wei');
+    // Local namehash (matches on-chain computeId) — supports subdomains too.
+    const tokenId = computeIdFull(normalized);
     const resolved = await rc.resolve(tokenId);
     if (!resolved || resolved === ethers.ZeroAddress) {
       return null;
@@ -2446,7 +2471,7 @@ function previewTransferRecipient() {
   }
 
   // Show loading for .wei names
-  preview.innerHTML = '<span style="opacity:0.5;">' + zfiLoadingSVG(14) + ' Resolving...</span>';
+  preview.innerHTML = '<span style="opacity:0.5;">' + spinnerSVG(13) + 'Resolving…</span>';
   preview.style.display = 'block';
 
   clearTimeout(transferPreviewDebounce);
@@ -3171,7 +3196,7 @@ function toggleFreePanel() {
 
 function showFreeStatus(msg, type) {
   const el = $('freeStatus');
-  el.textContent = msg;
+  el.innerHTML = (type ? '' : spinnerSVG()) + escapeHtml(msg);
   el.className = 'free-status show' + (type ? ' ' + type : '');
 }
 
@@ -3230,7 +3255,7 @@ async function doFreeMint() {
 
     // Check availability
     const subFullName = label + '.id.wei';
-    const tokenId = await readContract.computeId(subFullName);
+    const tokenId = computeIdFull(subFullName);
     let owner = null;
     try { owner = await readContract.ownerOf(tokenId); } catch (e) {}
     if (owner) {
@@ -3275,7 +3300,7 @@ async function doMintSubdomain() {
     // Check if subdomain is already taken
     if (readContract && pendingMintInfo.parentName) {
       try {
-        const tokenId = await readContract.computeId(subLabel + '.' + pendingMintInfo.parentName + '.wei');
+        const tokenId = computeIdFull(subLabel + '.' + pendingMintInfo.parentName);
         const owner = await readContract.ownerOf(tokenId);
         if (owner) {
           showStatus(subLabel + '.' + pendingMintInfo.parentName + '.wei is already taken', 'error');
@@ -3441,7 +3466,7 @@ function previewSendRecipient() {
     return;
   }
 
-  preview.innerHTML = '<span style="opacity:0.5;">' + zfiLoadingSVG(14) + ' Resolving...</span>';
+  preview.innerHTML = '<span style="opacity:0.5;">' + spinnerSVG(13) + 'Resolving…</span>';
   preview.style.display = 'block';
 
   clearTimeout(sendPreviewDebounce);
