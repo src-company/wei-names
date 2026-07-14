@@ -975,9 +975,22 @@ const RPC_ENDPOINTS = [
   'https://mainnet.gateway.tenderly.co',
   'https://eth-mainnet.public.blastapi.io'
 ];
-let rpcProvider = null;
+const MAINNET = ethers.Network.from(1);
+let rpcProvider = null;   // ethers FallbackProvider spanning every endpoint below
 let readContract = null;
 let _rpcInit = null; // in-flight getRpc() promise — de-dupes concurrent cold-start callers
+
+// JsonRpcProviders are cached by URL so rebuilding the FallbackProvider (e.g. on
+// wallet connect) reuses live connections instead of reopening them each time.
+const _providerPool = new Map();
+function providerFor(url) {
+  let p = _providerPool.get(url);
+  if (!p) {
+    p = new ethers.JsonRpcProvider(url, MAINNET, { staticNetwork: true });
+    _providerPool.set(url, p);
+  }
+  return p;
+}
 
 // Optional user-supplied RPC so power users can bypass the shared public
 // endpoints (which can rate-limit / silently fail) without forking the dapp:
@@ -996,34 +1009,52 @@ function customRpcs() {
   return out.map(s => s.trim()).filter(u => /^https?:\/\//i.test(u));
 }
 
+// Build a FallbackProvider spanning every available endpoint. Unlike the old
+// "first to respond wins, then pinned forever" approach, this fails over on EVERY
+// call: if the top endpoint errors or stalls, ethers automatically advances to the
+// next one within the same request. quorum:1 means one good response is enough, so
+// the happy path only touches the highest-priority endpoint (no fan-out overhead).
+// A connected wallet's own node is added as a lower-priority extra fallback — it
+// has no browser CORS limits and is often a paid endpoint, but we keep it last so
+// reads don't hammer the user's wallet / WalletConnect relay unless the public
+// endpoints are down.
+function buildRpcProvider() {
+  const overrides = customRpcs();
+  const endpoints = overrides.length ? overrides : RPC_ENDPOINTS;
+  const configs = endpoints.map((url, i) => ({
+    provider: providerFor(url),
+    priority: i + 1,      // lower = tried first; preserves list order
+    stallTimeout: 2000,   // ms to wait before also trying the next endpoint
+    weight: 1
+  }));
+  if (typeof _walletProvider !== 'undefined' && _walletProvider) {
+    configs.push({
+      provider: _walletProvider,
+      priority: endpoints.length + 1,
+      stallTimeout: 3000,
+      weight: 1
+    });
+  }
+  return new ethers.FallbackProvider(configs, MAINNET, { quorum: 1 });
+}
+
 async function getRpc() {
   if (rpcProvider) return rpcProvider;
   // Coalesce concurrent cold-start callers (page load fires getRpc(), initPending,
-  // and doCheckName near-simultaneously) so we probe the endpoints once, not N times.
+  // and doCheckName near-simultaneously) so we build the provider once, not N times.
   if (_rpcInit) return _rpcInit;
 
   _rpcInit = (async () => {
-    const MAINNET = ethers.Network.from(1);
-    const overrides = customRpcs();
-    const endpoints = overrides.length ? overrides : RPC_ENDPOINTS;
-
-    // Race the endpoints - first to respond wins
-    const racePromises = endpoints.map(async (rpc) => {
-      const p = new ethers.JsonRpcProvider(rpc, MAINNET, { staticNetwork: true });
-      await Promise.race([
-        p.getBlockNumber(),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 5000))
-      ]);
-      return p;
-    });
-
-    try {
-      rpcProvider = await Promise.any(racePromises);
-      readContract = new ethers.Contract(CONTRACT, ABI, rpcProvider);
-      return rpcProvider;
-    } catch (e) {
-      throw new Error('All RPC endpoints failed');
-    }
+    const provider = buildRpcProvider();
+    // Verify at least one endpoint answers before caching, so a total outage still
+    // rejects (callers/timers retry) rather than caching a dead provider.
+    await Promise.race([
+      provider.getBlockNumber(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 8000))
+    ]);
+    rpcProvider = provider;
+    readContract = new ethers.Contract(CONTRACT, ABI, provider);
+    return provider;
   })();
 
   try {
@@ -1031,6 +1062,13 @@ async function getRpc() {
   } finally {
     _rpcInit = null; // success caches rpcProvider; failure clears so the next call retries
   }
+}
+
+// Rebuild the read provider (e.g. after a wallet connects/disconnects so its node
+// joins/leaves the fallback set, or after the custom RPC changes).
+function refreshRpc() {
+  rpcProvider = null; readContract = null; _rpcInit = null;
+  getRpc().catch(() => {});
 }
 
 // Initialize RPC on load
@@ -3966,8 +4004,8 @@ window.addEventListener('hashchange', initFromHash);
 
 walletInit({
   appName: 'zFi Domains',
-  onConnect: [() => { contract = new ethers.Contract(CONTRACT, ABI, _signer); }, initPending, doCheckName],
-  onDisconnect: [() => { contract = null; $('commitBtn').disabled = true; }, hideManage, doCheckName]
+  onConnect: [() => { contract = new ethers.Contract(CONTRACT, ABI, _signer); refreshRpc(); }, initPending, doCheckName],
+  onDisconnect: [() => { contract = null; $('commitBtn').disabled = true; refreshRpc(); }, hideManage, doCheckName]
 });
 
 </script>
