@@ -236,7 +236,7 @@ async function connectWithWallet(walletKey, options = {}) {
     _connectedAddress = await _signer.getAddress();
     const oldWP = _connectedWalletProvider;
     _connectedWalletProvider = walletProvider;
-    document.getElementById('walletBtn').textContent = _connectedAddress.slice(0, 6) + '...' + _connectedAddress.slice(-4);
+    setWalletLabel(_connectedAddress);
     document.getElementById('walletBtn').classList.add('connected');
     resolveWeiName(_connectedAddress);
     updateWcBanner();
@@ -268,7 +268,7 @@ async function connectWithWallet(walletKey, options = {}) {
             _walletProvider = new ethers.BrowserProvider(_connectedWalletProvider);
             _signer = await _walletProvider.getSigner();
             _connectedAddress = await _signer.getAddress();
-            document.getElementById('walletBtn').textContent = _connectedAddress.slice(0, 6) + '...' + _connectedAddress.slice(-4);
+            setWalletLabel(_connectedAddress);
             resolveWeiName(_connectedAddress);
             for (const fn of _onConnectCallbacks) { try { fn(); } catch (e) { console.error('onConnect callback error:', e); } }
           } catch (e) { console.error('Account change re-derive failed, reloading:', e); window.location.reload(); }
@@ -309,7 +309,13 @@ async function connectWithWallet(walletKey, options = {}) {
   } catch (error) {
     if (silent) console.warn('Auto-connect failed:', error?.message || error);
     else console.error('Wallet connect error:', error);
-    document.getElementById('walletBtn').textContent = 'connect';
+    // Reset the button fully (an auto-connect may have optimistically shown the
+    // last account's cached .wei name + connected styling before failing).
+    if (!_connectedAddress) {
+      const wb = document.getElementById('walletBtn');
+      wb.textContent = 'connect';
+      wb.classList.remove('connected');
+    }
     if (silent) {
       // Auto-connect failed silently — clean up WC provider if applicable
       if (_walletConnectProvider) { try { Promise.resolve(_walletConnectProvider.disconnect()).catch(() => {}); } catch (_) {} _walletConnectProvider = null; }
@@ -384,10 +390,44 @@ function getRpcProvider() {
   return _rpcProvider;
 }
 
+function _shortAddr(addr) { return addr.slice(0, 6) + '...' + addr.slice(-4); }
+function _cachedWeiName(addr) { try { return localStorage.getItem('wns_rev:' + addr.toLowerCase()) || null; } catch (_) { return null; } }
+function _cacheWeiName(addr, name) {
+  try {
+    if (name) localStorage.setItem('wns_rev:' + addr.toLowerCase(), name);
+    else localStorage.removeItem('wns_rev:' + addr.toLowerCase());
+  } catch (_) {}
+}
+
+// Paint the wallet label immediately, preferring a cached reverse name so a
+// returning user never sees their address flash to their .wei name.
+function setWalletLabel(addr) {
+  const btn = document.getElementById('walletBtn');
+  if (!btn) return;
+  try { localStorage.setItem('wns_last', addr.toLowerCase()); } catch (_) {}
+  btn.textContent = _cachedWeiName(addr) || _shortAddr(addr);
+}
+window.setWalletLabel = setWalletLabel;
+
 function resolveWeiName(addr) {
   try {
     const ns = new ethers.Contract(WEINS, WEINS_ABI, getRpcProvider());
-    ns.reverseResolve(addr).then(name => { if (name && _connectedAddress === addr) document.getElementById('walletBtn').textContent = name.toLowerCase(); }).catch(() => {});
+    ns.reverseResolve(addr).then(name => {
+      if (_connectedAddress !== addr) return;
+      const btn = document.getElementById('walletBtn');
+      if (!btn) return;
+      const label = name ? name.toLowerCase() : '';
+      _cacheWeiName(addr, label);
+      const target = label || _shortAddr(addr);
+      if (btn.textContent === target) return; // already correct (e.g. from cache) — no flash
+      // Gentle cross-fade only when the visible label actually changes.
+      btn.style.opacity = '0';
+      setTimeout(() => {
+        if (_connectedAddress !== addr) return;
+        btn.textContent = target;
+        btn.style.opacity = '';
+      }, 130);
+    }).catch(() => {});
   } catch (e) {}
 }
 window.resolveWeiName = resolveWeiName;
@@ -415,7 +455,14 @@ async function tryAutoConnect() {
   const savedWallet = localStorage.getItem('zfi_wallet');
   if (!savedWallet) return;
   const btn = document.getElementById('walletBtn');
-  if (btn && !_connectedAddress) btn.textContent = '...';
+  if (btn && !_connectedAddress) {
+    // Optimistically show the last account's cached .wei name while we reconnect,
+    // so a returning user sees it immediately on load instead of "..." → 0x → name.
+    let last = null; try { last = localStorage.getItem('wns_last'); } catch (_) {}
+    const cached = last && _cachedWeiName(last);
+    btn.textContent = cached || '...';
+    if (cached) btn.classList.add('connected');
+  }
   setTimeout(async () => {
     try {
       if (_isConnecting || _connectedAddress) return;

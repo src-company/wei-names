@@ -584,7 +584,9 @@ body.modal-open { overflow: hidden; }
     transition: border-color 0.15s, background 0.15s;
   }
   .featured-card:hover { border-color: var(--border); background: var(--surface); }
-  .featured-thumb { width: 124px; object-fit: cover; flex-shrink: 0; display: block; }
+  /* height:auto defeats the img's height="63" attribute so align-self:stretch can
+     fill the full card height; object-fit:cover then crops instead of leaving a gap. */
+  .featured-thumb { width: 124px; height: auto; align-self: stretch; object-fit: cover; object-position: center; flex-shrink: 0; display: block; }
   .featured-text { display: flex; flex-direction: column; justify-content: center; gap: 4px; padding: 12px 16px; min-width: 0; }
   .featured-site { font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; opacity: 0.5; }
   .featured-title { font-size: 13px; font-weight: 600; line-height: 1.3; }
