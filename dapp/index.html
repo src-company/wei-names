@@ -1181,6 +1181,34 @@ async function multicall(calls) {
   });
 }
 
+// Mixed-target batched read via Multicall3 (one RPC round-trip across several
+// contracts). Each call: { target, iface, fn, args }. Per-call failures decode to
+// null (allowFailure); a null-decoded slot means that sub-call reverted/returned
+// empty. Retries the whole aggregate to ride out a flaky public RPC returning
+// empty data (the "missing revert data" CALL_EXCEPTION seen in the wild).
+async function aggregate3(calls, retries = 2) {
+  const build = () => calls.map(c => ({
+    target: c.target,
+    allowFailure: true,
+    callData: c.iface.encodeFunctionData(c.fn, c.args)
+  }));
+  let lastErr = null;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    if (attempt) await new Promise(r => setTimeout(r, 350));
+    try {
+      const provider = rpcProvider || await getRpc();
+      const mc = new ethers.Contract(MULTICALL3, MULTICALL3_ABI, provider);
+      const results = await mc.aggregate3(build());
+      return results.map((r, i) => {
+        if (!r.success) return null;
+        try { return calls[i].iface.decodeFunctionResult(calls[i].fn, r.returnData); }
+        catch { return null; }
+      });
+    } catch (e) { lastErr = e; }
+  }
+  throw lastErr || new Error('aggregate3 failed');
+}
+
 let contract = null;
 
 // WalletConnect transaction helper - shows notification and handles deep links
@@ -1415,19 +1443,22 @@ async function doCheckName() {
 
       // Recursive namehash computed locally (matches on-chain computeId).
       const tokenId = computeIdFull(fullName);
+      const parts = fullName.split('.');
+      const subLabel = parts[0];
+      const parentName = parts.slice(1).join('.');
+      const parentId = computeIdFull(parentName);
 
+      // One round-trip: subdomain ownerOf + the parent's registrar config, owner
+      // and escrow. ownerOf(sub) decoding to null (reverted) means it's unminted.
+      const agg = await aggregate3([
+        { target: CONTRACT, iface: ownerOfIface, fn: 'ownerOf', args: [tokenId] },
+        { target: SUBDOMAIN_REGISTRAR, iface: regIface, fn: 'config', args: [parentId] },
+        { target: CONTRACT, iface: ownerOfIface, fn: 'ownerOf', args: [parentId] },
+        { target: SUBDOMAIN_REGISTRAR, iface: regIface, fn: 'escrowedController', args: [parentId] }
+      ]);
       if (thisVersion !== checkVersion) return;
 
-      // Check if it exists by trying to get owner
-      let owner = null;
-      try {
-        owner = await readContract.ownerOf(tokenId);
-      } catch (e) {
-        // Doesn't exist
-      }
-
-      if (thisVersion !== checkVersion) return;
-
+      const owner = agg[0] ? agg[0][0] : null;
       const escaped = escapeHtml(fullName);
 
       if (!owner) {
@@ -1435,24 +1466,15 @@ async function doCheckName() {
         availEl.innerHTML = '<span class="available">' + escaped + '.wei is available</span>' +
           '<div class="view-link"><a href="#" onclick="copyShareLink();return false;">Copy link →</a></div>';
 
-        // Check if parent has subdomain sales enabled via SubdomainRegistrar
-        const parts = fullName.split('.');
-        if (parts.length >= 2) {
-          const subLabel = parts[0];
-          const parentName = parts.slice(1).join('.');
-          try {
-            const parentId = computeIdFull(parentName);
+        try {
+          const cfg = agg[1];
+          const parentOwner = agg[2] ? agg[2][0] : null; // null => parent not registered
+          const escrowedAddr = agg[3] ? agg[3][0] : ethers.ZeroAddress;
 
-            const [cfgRes, parentOwnerRes, escrowRes] = await Promise.all([
-              rpcProvider.call({ to: SUBDOMAIN_REGISTRAR, data: regIface.encodeFunctionData('config', [parentId]) }),
-              rpcProvider.call({ to: CONTRACT, data: ownerOfIface.encodeFunctionData('ownerOf', [parentId]) }),
-              rpcProvider.call({ to: SUBDOMAIN_REGISTRAR, data: regIface.encodeFunctionData('escrowedController', [parentId]) })
-            ]);
-            if (thisVersion !== checkVersion) return;
-
-            const cfg = regIface.decodeFunctionResult('config', cfgRes);
-            const parentOwner = ownerOfIface.decodeFunctionResult('ownerOf', parentOwnerRes)[0];
-            const escrowedAddr = regIface.decodeFunctionResult('escrowedController', escrowRes)[0];
+          if (!cfg || parentOwner === null) {
+            // The parent name isn't registered yet, so its subdomains can't exist.
+            feeEl.textContent = escapeHtml(parentName) + '.wei is not registered yet';
+          } else {
             const [cfgController, cfgEnabled, cfgFeeToken, cfgPrice] = cfg;
 
             // Mirror contract's _controllerOf: escrow takes priority over ownerOf
@@ -1497,9 +1519,9 @@ async function doCheckName() {
             } else {
               feeEl.textContent = 'Only the parent owner can register this subdomain';
             }
-          } catch {
-            feeEl.textContent = 'Could not check subdomain availability — try again';
           }
+        } catch {
+          feeEl.textContent = 'Could not check subdomain availability — try again';
         }
       } else {
         const osLink = `https://opensea.io/assets/ethereum/${CONTRACT}/${tokenId}`;
@@ -2147,9 +2169,13 @@ document.addEventListener('visibilitychange', () => {
 });
 
 // Minimal monochrome spinner (currentColor) — matches the B/W design better than
-// the brand cube for inline "in-progress" text.
+// the brand cube for inline "in-progress" text. Honors prefers-reduced-motion by
+// dropping the rotation (renders a static ring) for users who ask for less motion.
 function spinnerSVG(s = 13) {
-  return `<svg width="${s}" height="${s}" viewBox="0 0 24 24" style="display:inline-block;vertical-align:-2px;margin-right:7px;" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2.5" stroke-opacity="0.25"/><path d="M12 3a9 9 0 0 1 9 9" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="0.7s" repeatCount="indefinite"/></path></svg>`;
+  let reduce = false;
+  try { reduce = matchMedia('(prefers-reduced-motion: reduce)').matches; } catch (_) {}
+  const spin = reduce ? '' : '<animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="0.7s" repeatCount="indefinite"/>';
+  return `<svg width="${s}" height="${s}" viewBox="0 0 24 24" style="display:inline-block;vertical-align:-2px;margin-right:7px;" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2.5" stroke-opacity="0.25"/><path d="M12 3a9 9 0 0 1 9 9" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">${spin}</path></svg>`;
 }
 
 function showStatus(msg, type, txHash) {
@@ -2926,20 +2952,22 @@ function previewSubSalesToken() {
 
 async function showSubSalesForm() {
   const form = $('manageForm');
-  form.innerHTML = '<div style="opacity:0.5;font-size:12px;text-align:center;">' + zfiLoadingSVG(32) + 'Loading config...</div>';
+  form.innerHTML = '<div style="opacity:0.5;font-size:12px;text-align:center;">' + spinnerSVG(20) + 'Loading config…</div>';
   form.classList.add('show');
 
   try {
-    const rpc = await getRpc();
-    const [cfgRes, approvedRes, balRes] = await Promise.all([
-      rpc.call({ to: SUBDOMAIN_REGISTRAR, data: regIface.encodeFunctionData('config', [currentTokenId]) }),
-      rpc.call({ to: CONTRACT, data: approvalIface.encodeFunctionData('isApprovedForAll', [_connectedAddress, SUBDOMAIN_REGISTRAR]) }),
-      rpc.call({ to: SUBDOMAIN_REGISTRAR, data: regIface.encodeFunctionData('ethBalance', [_connectedAddress]) })
+    // Single retrying multicall so a flaky public RPC returning empty data on one
+    // of these reads no longer aborts the form with a raw CALL_EXCEPTION.
+    const res = await aggregate3([
+      { target: SUBDOMAIN_REGISTRAR, iface: regIface, fn: 'config', args: [currentTokenId] },
+      { target: CONTRACT, iface: approvalIface, fn: 'isApprovedForAll', args: [_connectedAddress, SUBDOMAIN_REGISTRAR] },
+      { target: SUBDOMAIN_REGISTRAR, iface: regIface, fn: 'ethBalance', args: [_connectedAddress] }
     ]);
+    if (!res[0]) throw new Error('config read failed');
 
-    const cfg = regIface.decodeFunctionResult('config', cfgRes);
-    const isApproved = approvalIface.decodeFunctionResult('isApprovedForAll', approvedRes)[0];
-    const ethBal = regIface.decodeFunctionResult('ethBalance', balRes)[0];
+    const cfg = res[0];
+    const isApproved = res[1] ? res[1][0] : false;
+    const ethBal = res[2] ? res[2][0] : 0n;
 
     const [cfgController, cfgEnabled, cfgFeeToken, cfgPrice, , , cfgPayout] = cfg;
 
@@ -3030,7 +3058,10 @@ async function showSubSalesForm() {
       <button class="secondary" onclick="$(\'manageForm\').classList.remove(\'show\')">Cancel</button>\
       <div style="font-size:10px;opacity:0.4;margin-top:12px;">Your name stays in your wallet at all times. The registrar temporarily uses it to create each subdomain, then returns it in the same transaction.</div>';
   } catch (e) {
-    form.innerHTML = '<div style="color:#c00;font-size:12px;">Error loading config: ' + escapeHtml(e.message) + '</div><button class="secondary" onclick="$(\'manageForm\').classList.remove(\'show\')" style="margin-top:8px;">Close</button>';
+    // Almost always a transient public-RPC hiccup — offer a retry, not a dead end.
+    form.innerHTML = '<div style="font-size:12px;margin-bottom:10px;">Couldn\'t load subdomain-sales config — the network RPC didn\'t respond. This is usually temporary.</div>' +
+      '<button onclick="showSubSalesForm()">Retry</button>' +
+      '<button class="secondary" onclick="$(\'manageForm\').classList.remove(\'show\')">Close</button>';
   }
 }
 
