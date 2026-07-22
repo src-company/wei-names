@@ -77,6 +77,15 @@ https://alice.wei.domains     ->  same, alternate zone
 - **Subdomains resolve too**, to any depth the owner registers: `https://send.slow.wei.limo` serves the contenthash of `send.slow.wei`.
 - The gateway reads the contenthash live from the contract on each request, so a name published to IPFS works instantly.
 
+## Give an agent an identity
+
+A `.wei` name is a portable, human-readable identity for an autonomous agent — the naming/resolver layer that complements **ERC-8004** (onchain agent identity, which is tokenId-based). One name gives an agent:
+
+- **Name ↔ address** — `setAddr` / `resolve()` so others pay or verify the agent by `agent.wei` instead of a raw `0x…`; `setPrimaryName` makes wallets/explorers show `agent.wei` for its address (reverse resolution).
+- **Endpoints & metadata** — `setText(tokenId, key, value)` for `url`, `description`, `com.twitter`, or custom keys (A2A / MCP endpoint, agent-card URI).
+- **A hosted agent card / site** — `setContenthash` → served at `https://agent.wei.limo` with zero infra.
+- **Fleets** — one parent name mints free subdomains (`worker1.fleet.wei`, `worker2.fleet.wei`), each with its own address and records, up to 10 levels deep.
+
 ## Register a name (commit-reveal)
 
 Front-running protection requires two transactions with a wait between them.
