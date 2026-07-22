@@ -13,7 +13,7 @@ import { decodeContenthash } from './contenthash.js'
 
 // Zones this gateway serves. Comma-separated; a request to <label>.<zone>
 // resolves the IPFS content of <label>.wei for ANY listed zone.
-const ZONE = 'wei.limo,wei.is'
+const ZONE = 'wei.limo,wei.is,wei.domains'
 
 // Labels that must never be treated as `.wei` names.
 //

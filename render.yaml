@@ -54,7 +54,29 @@ services:
       # The gateway serves both zones (ZONE=wei.limo,wei.is in handler.js).
       - "*.wei.limo"
       - "*.wei.is"
+      # Second-level wildcards, opt-in per parent name. A TLS wildcard covers
+      # exactly one label, so *.wei.limo does NOT secure send.slow.wei.limo —
+      # each parent that offers sub-subdomains needs its own *.<parent>.wei.limo
+      # entry (Render issues a wildcard cert per entry; add the ACME validation
+      # record + a *.<parent>.wei.limo CNAME to the same target as *.wei.limo).
+      # The gateway handler already resolves send.slow.wei.limo -> send.slow.wei
+      # (recursive computeId), so no code change is needed — just this cert/DNS.
+      - "*.slow.wei.limo"
+      - "*.id.wei.limo"
+      # wei.domains subdomains resolve .wei content too (the apex wei.domains
+      # stays on the wei-dapp service above — an explicit host beats a wildcard).
+      # <name>.wei.domains -> contenthash of <name>.wei, same as *.wei.limo.
+      # Single level only: a wildcard cert covers one label, so send.slow.wei.domains
+      # would need its own *.slow.wei.domains entry (intentionally not added).
+      - "*.wei.domains"
+      # Opt-in second-level wildcard for the `id` parent on wei.domains
+      # (<x>.id.wei.domains -> <x>.id.wei), mirroring *.id.wei.limo above.
+      - "*.id.wei.domains"
     envVars:
+      # Zones this gateway resolves (comma-separated). Must include every zone
+      # whose *.<zone> wildcard points here. Mirrors the handler.js default.
+      - key: ZONE
+        value: wei.limo,wei.is,wei.domains
       # 'proxy' (streams through this service; keeps <name>.<zone> in the URL
       # bar) or 'redirect' (302, bandwidth-light, per-CID origin isolation).
       - key: GATEWAY_MODE
