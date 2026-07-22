@@ -1,0 +1,13 @@
+{
+  "name": "wns",
+  "version": "1.0.0",
+  "description": "Integrate .wei names (Wei Name Service) — resolve, register, host IPFS/IPNS sites, and give agents a human-readable identity. ENS-compatible, on Ethereum mainnet.",
+  "author": {
+    "name": "zOrg",
+    "url": "https://github.com/src-company/wei-names"
+  },
+  "homepage": "https://wei.domains",
+  "repository": "https://github.com/src-company/wei-names",
+  "license": "MIT",
+  "keywords": ["wns", "wei", "ens", "naming", "ethereum", "ipfs", "web3", "agent-identity"]
+}

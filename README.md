@@ -14,7 +14,7 @@ A simple namespace on Ethereum named after the smallest unit of ether.
 
 **Dapp:** [`wei.domains`](https://wei.domains) (hosted via IPFS)
 
-**Integrating? / AI agents:** [`skills/wns/SKILL.md`](skills/wns/SKILL.md) — a single-file, copy-paste guide to resolving, registering, and serving `.wei` names (ENS-compatible, zero deps).
+**Integrating? / AI agents:** [`skills/wns/SKILL.md`](skills/wns/SKILL.md) — a single-file, copy-paste guide to resolving, registering, and serving `.wei` names (ENS-compatible, zero deps). Installable as a Claude Code plugin: `/plugin marketplace add src-company/wei-names` then `/plugin install wns@wei-names`.
 
 ---
 

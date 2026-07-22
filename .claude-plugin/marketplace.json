@@ -1,0 +1,21 @@
+{
+  "name": "wei-names",
+  "owner": {
+    "name": "zOrg"
+  },
+  "metadata": {
+    "version": "1.0.0",
+    "description": "Wei Name Service (.wei) — integration skill for AI agents and developers."
+  },
+  "plugins": [
+    {
+      "name": "wns",
+      "source": "./",
+      "version": "1.0.0",
+      "description": "Integrate .wei names — resolve, register, host IPFS/IPNS sites, agent identity. ENS-compatible, Ethereum mainnet.",
+      "author": {
+        "name": "zOrg"
+      }
+    }
+  ]
+}
