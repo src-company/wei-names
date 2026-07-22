@@ -61,6 +61,15 @@ services:
       # record + a *.<parent>.wei.limo CNAME to the same target as *.wei.limo).
       # The gateway handler already resolves send.slow.wei.limo -> send.slow.wei
       # (recursive computeId), so no code change is needed — just this cert/DNS.
+      #
+      # GOTCHA (RFC 4592): adding *.<parent>.<zone> BREAKS <parent>.<zone> itself.
+      # A wildcard only synthesizes names that don't otherwise exist; creating
+      # *.slow.wei.limo makes slow.wei.limo an "empty non-terminal" (a node with
+      # descendants but no records), so *.wei.limo stops covering it and it goes
+      # NOERROR/NODATA. Fix: add an explicit record for the parent alongside each
+      # second-level wildcard, pointing at the same target:
+      #   slow.wei.limo  CNAME  wns-gateway.onrender.com.
+      # The *.<zone> wildcard cert already covers the parent, so this is DNS-only.
       - "*.slow.wei.limo"
       - "*.id.wei.limo"
       # wei.domains subdomains resolve .wei content too (the apex wei.domains
