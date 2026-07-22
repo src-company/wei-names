@@ -51,7 +51,7 @@ services:
       # Wildcards: catch every subdomain of wei.limo / wei.is that lacks a more
       # specific record. Render issues a wildcard TLS cert per domain (each needs
       # a DNS validation record + the *.<zone> CNAME/ALIAS at your DNS provider).
-      # The gateway serves both zones (ZONE=wei.limo,wei.is in handler.js).
+      # The gateway serves every zone listed in the ZONE env var below.
       - "*.wei.limo"
       - "*.wei.is"
       # Second-level wildcards, opt-in per parent name. A TLS wildcard covers
@@ -90,7 +90,8 @@ services:
       # public list if unset.
       - key: RPC_URLS
         sync: false
-      # Extra reserved labels to never treat as .wei names (added to the
-      # built-in www/api/zfi/multisig/srcco set). Comma-separated.
+      # Labels to never treat as .wei names, comma-separated. The built-in
+      # reserved set in handler.js is currently EMPTY, so e.g. www.wei.domains
+      # resolves www.wei unless you list `www` here (applies to every zone).
       - key: RESERVED_LABELS
         sync: false
