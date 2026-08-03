@@ -145,8 +145,15 @@ export async function handleRequest(request, env) {
   if (mode === 'proxy') {
     // Stream the content through the gateway, keeping <label>.wei.limo in the bar.
     // Heavier: the gateway carries the bandwidth. Prefer `redirect` at scale.
-    const pathGw = readEnv(env, 'IPFS_PATH_GATEWAY', 'https://ipfs.io')
-    const target = `${pathGw}/${ns}/${id}${pathAndQuery}`
+    //
+    // Fetch from a SUBDOMAIN gateway (`<cid>.ipfs.<gw>`), not a path gateway
+    // (`<gw>/ipfs/<cid>`). Path gateways don't apply the site's `_redirects` /
+    // SPA fallback, so deep paths like `/docs` on a client-routed site 404 even
+    // though `/` works. Subdomain gateways serve each CID as its own origin and
+    // honour `_redirects`. Requires a base32 CIDv1 (bafy…/k51…) so it fits a
+    // DNS label — decodeContenthash always emits that form.
+    const subGw = readEnv(env, 'IPFS_SUBDOMAIN_GATEWAY', 'dweb.link')
+    const target = `https://${id}.${ns}.${subGw}${pathAndQuery}`
     const upstream = await fetch(target, {
       method: request.method,
       headers: { accept: request.headers.get('accept') || '*/*' },

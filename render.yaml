@@ -99,10 +99,11 @@ services:
       # bar) or 'redirect' (302, bandwidth-light, per-CID origin isolation).
       - key: GATEWAY_MODE
         value: proxy
+      # Subdomain gateway used in both modes. Must be subdomain (not path) form
+      # so the site's _redirects/SPA fallback applies — deep paths like /docs
+      # 404 on a path gateway (ipfs.io/ipfs/<cid>/docs) even when / works.
       - key: IPFS_SUBDOMAIN_GATEWAY
         value: dweb.link
-      - key: IPFS_PATH_GATEWAY
-        value: https://ipfs.io
       # Set to a trusted/authenticated mainnet RPC (comma-separated) so a
       # malicious public RPC can't forge a contenthash. Falls back to a built-in
       # public list if unset.

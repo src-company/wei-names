@@ -51,8 +51,7 @@ The gateway also keeps a `RESERVED_LABELS` guard as defense-in-depth.
 | Var | Default | Notes |
 |-----|---------|-------|
 | `GATEWAY_MODE` | `redirect` | `redirect` (302 to a subdomain IPFS gateway, bandwidth-light) or `proxy` (stream through the gateway, keeps `<name>.wei.limo` in the URL bar) |
-| `IPFS_SUBDOMAIN_GATEWAY` | `dweb.link` | Used in redirect mode → `https://<id>.<ipfs\|ipns>.<gw>` |
-| `IPFS_PATH_GATEWAY` | `https://ipfs.io` | Used in proxy mode → `<gw>/<ipfs\|ipns>/<id>` |
+| `IPFS_SUBDOMAIN_GATEWAY` | `dweb.link` | Subdomain gateway used in **both** modes → `https://<id>.<ipfs\|ipns>.<gw>`. Subdomain (not path) form so the site's `_redirects`/SPA fallback applies and deep paths like `/docs` resolve. |
 | `RPC_URLS` | built-in list | Comma-separated mainnet RPCs with fallback |
 | `WNS_CONTRACT` | mainnet WNS | Override the registry address |
 | `RESERVED_LABELS` | — | Extra labels to never treat as `.wei` names (added to the built-in set) |
