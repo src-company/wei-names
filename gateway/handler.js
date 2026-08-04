@@ -8,7 +8,7 @@
 // Runtime-agnostic: takes a standard `Request`, returns a standard `Response`.
 // Used by both worker.js (Cloudflare) and server.js (Node/Railway).
 
-import { resolveContenthash } from './wns.js'
+import { computeId, contenthashOf, resolveAddress, resolveMode, WEB3_MODES } from './wns.js'
 import { decodeContenthash } from './contenthash.js'
 
 // Zones this gateway serves. Comma-separated; a request to <label>.<zone>
@@ -107,53 +107,84 @@ export async function handleRequest(request, env) {
   const contract = readEnv(env, 'WNS_CONTRACT', undefined)
   const opts = { rpc, contract }
 
-  // Resolve label -> { ns, id }, with a short cache. `ns` is 'ipfs' or 'ipns';
-  // for IPNS `id` is a stable key and the IPNS gateway resolves it fresh each
-  // request, so the owner can update the site with no new on-chain transaction.
-  let content
+  // Resolve label -> a servable target, with a short cache. Two kinds:
+  //   { kind: 'web3', address }  — an on-chain (ERC-4804) dapp: the name's addr
+  //       record is a contract whose resolveMode() is a web3:// mode. Served via
+  //       a web3:// HTTP gateway so deep paths / raw files (…/tokenlist.json)
+  //       come straight from chain, always live. Takes precedence over any IPFS
+  //       contenthash the same name may also carry (an ERC-8244 loader).
+  //   { kind: 'ipfs' | 'ipns', id } — a contenthash. For IPNS `id` is a stable
+  //       key the gateway resolves fresh each request, so the owner can update
+  //       the site with no new on-chain transaction.
+  let resolved
   const cached = cache.get(sub)
   const now = Date.now()
   if (cached && now - cached.at < CACHE_TTL_MS) {
-    content = cached.content
+    resolved = cached.resolved
   } else {
-    let contenthash
     try {
-      contenthash = await resolveContenthash(sub, opts)
+      const tokenId = await computeId(sub, opts)
+      if (tokenId === 0n) {
+        resolved = null
+      } else {
+        // Address record and contenthash in parallel (one round-trip); the
+        // resolveMode() probe only runs when the name resolves to an address.
+        const [address, contenthash] = await Promise.all([
+          resolveAddress(tokenId, opts),
+          contenthashOf(tokenId, opts),
+        ])
+        const mode = address ? await resolveMode(address, opts) : ''
+        if (WEB3_MODES.has(mode)) {
+          resolved = { kind: 'web3', address }
+        } else {
+          const content = decodeContenthash(contenthash)
+          resolved = content ? { kind: content.ns, id: content.id } : null
+        }
+      }
     } catch (e) {
       return new Response('Upstream RPC error resolving ' + sub, {
         status: 502,
         headers: { 'cache-control': 'no-store' },
       })
     }
-    content = decodeContenthash(contenthash)
-    cacheSet(sub, { content, at: now })
+    cacheSet(sub, { resolved, at: now })
   }
 
-  if (!content) {
-    // Registered names without an IPFS/IPNS contenthash, or unregistered names.
+  if (!resolved) {
+    // Registered names without servable content, or unregistered names.
     return new Response(
-      `No IPFS or IPNS content set for ${sub}.\n` +
-        `Set a contenthash on this name at https://wei.domains to publish here.\n`,
+      `No on-chain dapp or IPFS/IPNS content set for ${sub}.\n` +
+        `Set an addr (ERC-4804 contract) or a contenthash on this name at https://wei.domains to publish here.\n`,
       { status: 404, headers: { 'content-type': 'text/plain; charset=utf-8' } },
     )
   }
 
-  const { ns, id } = content // ns: 'ipfs' | 'ipns'
   const mode = readEnv(env, 'GATEWAY_MODE', 'redirect')
   const pathAndQuery = url.pathname + url.search
+
+  // Build the upstream target + the id header that records what we served.
+  //   web3 -> a web3:// HTTP gateway: `https://<addr>.<chainId>.<gw>/<path>`.
+  //   ipfs/ipns -> a SUBDOMAIN gateway (`<id>.ipfs.<gw>`), NOT a path gateway
+  //     (`<gw>/ipfs/<id>`): path gateways don't apply the site's `_redirects` /
+  //     SPA fallback, so deep paths 404 even when `/` works. Subdomain gateways
+  //     serve each id as its own origin and honour `_redirects`. Needs a base32
+  //     CIDv1 / base36 IPNS name (fits a DNS label) — decodeContenthash emits it.
+  let target
+  let idHeader
+  if (resolved.kind === 'web3') {
+    const web3Gw = readEnv(env, 'WEB3_GATEWAY', 'w3link.io')
+    const chainId = readEnv(env, 'WEB3_CHAIN_ID', '1')
+    target = `https://${resolved.address}.${chainId}.${web3Gw}${pathAndQuery}`
+    idHeader = ['x-wns-contract', resolved.address]
+  } else {
+    const subGw = readEnv(env, 'IPFS_SUBDOMAIN_GATEWAY', 'dweb.link')
+    target = `https://${resolved.id}.${resolved.kind}.${subGw}${pathAndQuery}`
+    idHeader = [resolved.kind === 'ipns' ? 'x-ipns-name' : 'x-ipfs-cid', resolved.id]
+  }
 
   if (mode === 'proxy') {
     // Stream the content through the gateway, keeping <label>.wei.limo in the bar.
     // Heavier: the gateway carries the bandwidth. Prefer `redirect` at scale.
-    //
-    // Fetch from a SUBDOMAIN gateway (`<cid>.ipfs.<gw>`), not a path gateway
-    // (`<gw>/ipfs/<cid>`). Path gateways don't apply the site's `_redirects` /
-    // SPA fallback, so deep paths like `/docs` on a client-routed site 404 even
-    // though `/` works. Subdomain gateways serve each CID as its own origin and
-    // honour `_redirects`. Requires a base32 CIDv1 (bafy…/k51…) so it fits a
-    // DNS label — decodeContenthash always emits that form.
-    const subGw = readEnv(env, 'IPFS_SUBDOMAIN_GATEWAY', 'dweb.link')
-    const target = `https://${id}.${ns}.${subGw}${pathAndQuery}`
     const upstream = await fetch(target, {
       method: request.method,
       headers: { accept: request.headers.get('accept') || '*/*' },
@@ -170,22 +201,20 @@ export async function handleRequest(request, env) {
     // Defense-in-depth for untrusted content executing on this origin.
     headers.set('x-content-type-options', 'nosniff')
     headers.set('x-wns-name', sub)
-    headers.set(ns === 'ipns' ? 'x-ipns-name' : 'x-ipfs-cid', id)
+    headers.set(idHeader[0], idHeader[1])
     return new Response(upstream.body, { status: upstream.status, headers })
   }
 
-  // Default: 302 to a subdomain IPFS/IPNS gateway. Bandwidth-light (the gateway
-  // is never in the data path) and per-name origin isolation comes for free from
-  // the CID/key subdomain. Each <label>.wei.limo is already its own origin too.
-  const subGw = readEnv(env, 'IPFS_SUBDOMAIN_GATEWAY', 'dweb.link')
-  const target = `https://${id}.${ns}.${subGw}${pathAndQuery}`
+  // Default: 302 to the upstream gateway. Bandwidth-light (the gateway is never
+  // in the data path) and per-target origin isolation comes for free from the
+  // CID/key/contract subdomain. Each <label>.wei.limo is already its own origin.
   return new Response(null, {
     status: 302,
     headers: {
       location: target,
       'cache-control': 'public, max-age=300',
       'x-wns-name': sub,
-      [ns === 'ipns' ? 'x-ipns-name' : 'x-ipfs-cid']: id,
+      [idHeader[0]]: idHeader[1],
     },
   })
 }

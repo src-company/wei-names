@@ -5,7 +5,7 @@
 //
 // Deploy: `node server.js` behind a `*.wei.limo` DNS record pointing here.
 // Config via env: PORT, ZONE, RPC_URLS, WNS_CONTRACT, GATEWAY_MODE,
-// IPFS_SUBDOMAIN_GATEWAY, IPFS_PATH_GATEWAY, RESERVED_LABELS.
+// IPFS_SUBDOMAIN_GATEWAY, WEB3_GATEWAY, WEB3_CHAIN_ID, RESERVED_LABELS.
 
 import { createServer } from 'node:http'
 import { Readable } from 'node:stream'

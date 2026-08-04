@@ -1,8 +1,16 @@
 // Minimal WNS (Wei Name Service) read client — zero dependencies.
 //
-// The gateway only needs two read calls:
+// The gateway needs these read calls:
 //   computeId(string fullName) -> uint256   (0xfb021939)
 //   contenthash(uint256 tokenId) -> bytes   (0xcb323d76)
+//   resolve(uint256 tokenId) -> address     (0x4f896d4f)  — the name's addr record
+//   resolveMode() -> bytes32                (0xdd473fae)  — ERC-4804, on the addr
+//
+// The last two let the gateway serve *on-chain* dapps: a `.wei` name whose addr
+// record points to an ERC-4804 contract (`resolveMode()` = manual/auto/5219) is
+// served live from chain through a web3:// gateway, so deep paths and raw files
+// (e.g. token.list.wei/tokenlist.json) work — an IPFS contenthash can only carry
+// the ERC-8244 loader HTML, which bootstraps `/` in a browser but has no paths.
 //
 // ABI encoders/decoders below are ported from the `wns-utils` package
 // (github: wns-utils), which is unit-tested against viem. Kept inline so the
@@ -14,6 +22,14 @@ export const WNS_CONTRACT = '0x0000000000696760E15f265e828DB644A0c242EB'
 // Function selectors.
 const COMPUTE_ID = '0xfb021939'
 const CONTENTHASH = '0xcb323d76'
+const RESOLVE = '0x4f896d4f' // resolve(uint256) -> address
+const RESOLVE_MODE = '0xdd473fae' // resolveMode() -> bytes32 (ERC-4804)
+
+// ERC-4804 resolve modes a web3:// gateway can serve. 'auto'/'manual' are the
+// two standard modes; '5219' is the ERC-5219 request extension (what the WNS
+// on-chain dapps use). A resolved address reporting any of these is treated as
+// an on-chain dapp and served via a web3:// gateway rather than IPFS.
+export const WEB3_MODES = new Set(['auto', 'manual', '5219'])
 
 // Public mainnet RPCs with fallback (same set zFi already allows in its CSP).
 const DEFAULT_RPCS = [
@@ -75,6 +91,25 @@ function decodeBytes(data) {
   return `0x${hex.slice(128, 128 + 2 * length)}`
 }
 
+// Decode an ABI `address` (right-aligned in the first 32-byte word). Returns a
+// lowercase 0x-address, or null for the zero address / empty data.
+function decodeAddress(data) {
+  if (!data || data === '0x' || data.length < 66) return null
+  const addr = '0x' + data.slice(26, 66).toLowerCase()
+  if (/^0x0{40}$/.test(addr)) return null
+  return addr
+}
+
+// Decode a `bytes32` into its trimmed ASCII string (trailing zero bytes removed),
+// e.g. the "5219" / "manual" / "auto" tags returned by ERC-4804 resolveMode().
+function decodeBytes32Ascii(data) {
+  if (!data || data === '0x') return ''
+  const hex = data.slice(2, 66).replace(/(00)+$/, '')
+  let out = ''
+  for (let i = 0; i + 1 < hex.length; i += 2) out += String.fromCharCode(Number.parseInt(hex.slice(i, i + 2), 16))
+  return out
+}
+
 // --- RPC -------------------------------------------------------------------
 
 async function ethCall(data, opts) {
@@ -121,15 +156,43 @@ export function normalizeName(name) {
   return n
 }
 
+// Compute a full `.wei` name's WNS tokenId (0n if the name has no id).
+export async function computeId(name, opts) {
+  const res = await ethCall(COMPUTE_ID + encodeString(normalizeName(name)), opts)
+  return decodeUint256(res)
+}
+
+// Raw contenthash (0x-hex bytes) for a tokenId, or null if none is set.
+export async function contenthashOf(tokenId, opts) {
+  if (!tokenId) return null
+  const res = await ethCall(CONTENTHASH + encodeUint256(tokenId), opts)
+  return decodeBytes(res)
+}
+
+// The tokenId's addr record (lowercase 0x-address), or null if unset/zero.
+export async function resolveAddress(tokenId, opts) {
+  if (!tokenId) return null
+  const res = await ethCall(RESOLVE + encodeUint256(tokenId), opts)
+  return decodeAddress(res)
+}
+
+// ERC-4804 resolveMode() of a contract, as a trimmed ASCII tag ('' if the
+// address has no code, doesn't implement it, or reverts). Never throws for a
+// non-web3 address: a reverting call just means "not an on-chain dapp".
+export async function resolveMode(address, opts) {
+  try {
+    const res = await ethCall(RESOLVE_MODE, { ...opts, contract: address })
+    return decodeBytes32Ascii(res)
+  } catch {
+    return ''
+  }
+}
+
 // Resolve a `.wei` name to its raw contenthash (0x-hex bytes), or null if the
-// name is unregistered or has no contenthash set.
+// name is unregistered or has no contenthash set. Kept for callers that only
+// need contenthash; the gateway uses the granular helpers above.
 export async function resolveContenthash(name, opts) {
-  const fullName = normalizeName(name)
-
-  const tokenIdRes = await ethCall(COMPUTE_ID + encodeString(fullName), opts)
-  const tokenId = decodeUint256(tokenIdRes)
+  const tokenId = await computeId(name, opts)
   if (tokenId === 0n) return null
-
-  const chRes = await ethCall(CONTENTHASH + encodeUint256(tokenId), opts)
-  return decodeBytes(chRes)
+  return contenthashOf(tokenId, opts)
 }

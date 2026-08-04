@@ -104,6 +104,14 @@ services:
       # 404 on a path gateway (ipfs.io/ipfs/<cid>/docs) even when / works.
       - key: IPFS_SUBDOMAIN_GATEWAY
         value: dweb.link
+      # web3:// HTTP gateway for on-chain (ERC-4804) dapps: a name whose addr
+      # record is a contract with resolveMode() = manual/auto/5219 is served
+      # live from chain at https://<addr>.<WEB3_CHAIN_ID>.<WEB3_GATEWAY><path>,
+      # so deep paths/raw files work (e.g. token.list.wei/tokenlist.json).
+      - key: WEB3_GATEWAY
+        value: w3link.io
+      - key: WEB3_CHAIN_ID
+        value: "1"
       # Set to a trusted/authenticated mainnet RPC (comma-separated) so a
       # malicious public RPC can't forge a contenthash. Falls back to a built-in
       # public list if unset.

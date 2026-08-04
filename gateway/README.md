@@ -7,14 +7,27 @@ lookup against the WNS contract. **No per-name DNS records** — one wildcard
 ```
 GET alice.wei.limo
   ├─ eth_call WNS.computeId("alice.wei")      -> tokenId
-  ├─ eth_call WNS.contenthash(tokenId)        -> 0xe301…/0xe501…  (EIP-1577)
-  ├─ decode contenthash                        -> bafy… (IPFS) or k51… (IPNS)
-  └─ 302  https://bafy….ipfs.dweb.link/        (default) — or proxy the bytes
-         https://k51….ipns.dweb.link/          (IPNS → .ipns. gateway)
+  ├─ eth_call WNS.resolve(tokenId)            -> addr record
+  ├─ if addr is an ERC-4804 contract (resolveMode = manual/auto/5219):
+  │    └─ 302 / proxy  https://<addr>.1.w3link.io/…   (live on-chain dapp)
+  └─ else eth_call WNS.contenthash(tokenId)   -> 0xe301…/0xe501…  (EIP-1577)
+       ├─ decode contenthash                   -> bafy… (IPFS) or k51… (IPNS)
+       └─ 302  https://bafy….ipfs.dweb.link/   (default) — or proxy the bytes
+              https://k51….ipns.dweb.link/     (IPNS → .ipns. gateway)
 ```
 
 A newly registered `.wei` name works **instantly**, with zero provisioning.
-Unregistered / expired names, and names without a contenthash, return `404`.
+Unregistered / expired names, and names with neither an on-chain dapp nor a
+contenthash, return `404`.
+
+**On-chain dapps (ERC-4804 / ERC-8244).** If a name's `addr` record points to a
+contract that reports an ERC-4804 `resolveMode()` (`manual` / `auto` / `5219`),
+the gateway serves it **live from chain** through a web3:// HTTP gateway
+(`w3link.io`), preserving the request path. This is what makes deep paths and
+raw files work — e.g. `token.list.wei.limo/tokenlist.json` returns the contract's
+JSON with the right `content-type`. An IPFS contenthash can only carry the
+ERC-8244 *loader* HTML, which bootstraps `/` in a browser but has no sub-paths, so
+the on-chain path takes **precedence** when both are set.
 
 **IPFS or IPNS.** An IPFS contenthash pins a fixed site (a new CID = a new
 on-chain tx). An **IPNS** contenthash points at a stable key set on-chain
@@ -39,7 +52,7 @@ The gateway also keeps a `RESERVED_LABELS` guard as defense-in-depth.
 
 | File | Role |
 |------|------|
-| `wns.js` | Minimal WNS read client (`computeId` + `contenthash` via `eth_call`), zero deps |
+| `wns.js` | Minimal WNS read client (`computeId`, `contenthash`, `resolve` addr, ERC-4804 `resolveMode`), zero deps |
 | `contenthash.js` | EIP-1577 contenthash → IPFS CIDv1 (base32) or IPNS name (base36) |
 | `handler.js` | Core `handleRequest(request, env)` — runtime-agnostic Web Fetch |
 | `worker.js` | Cloudflare Worker entrypoint |
@@ -52,6 +65,8 @@ The gateway also keeps a `RESERVED_LABELS` guard as defense-in-depth.
 |-----|---------|-------|
 | `GATEWAY_MODE` | `redirect` | `redirect` (302 to a subdomain IPFS gateway, bandwidth-light) or `proxy` (stream through the gateway, keeps `<name>.wei.limo` in the URL bar) |
 | `IPFS_SUBDOMAIN_GATEWAY` | `dweb.link` | Subdomain gateway used in **both** modes → `https://<id>.<ipfs\|ipns>.<gw>`. Subdomain (not path) form so the site's `_redirects`/SPA fallback applies and deep paths like `/docs` resolve. |
+| `WEB3_GATEWAY` | `w3link.io` | web3:// HTTP gateway for on-chain (ERC-4804) dapps → `https://<addr>.<chainId>.<gw>` |
+| `WEB3_CHAIN_ID` | `1` | Chain id used in the web3:// gateway host (mainnet) |
 | `RPC_URLS` | built-in list | Comma-separated mainnet RPCs with fallback |
 | `WNS_CONTRACT` | mainnet WNS | Override the registry address |
 | `RESERVED_LABELS` | — | Extra labels to never treat as `.wei` names (added to the built-in set) |
