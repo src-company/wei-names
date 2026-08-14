@@ -142,16 +142,14 @@ services:
       # fail or rate-limit for 30s, and caps concurrent calls.
       - key: RPC_URLS
         sync: false
-      # OPT-IN hardening, intentionally UNSET. If set, only these parents may
-      # serve `<x>.<parent>.<zone>` — everything else 404s with no lookup.
-      #
-      # Leave it unset unless you have a reason: the chain is the authority on
-      # which subdomains exist, and a hand-maintained list here drifts the
-      # moment one is registered. It shipped set to slow,id,multisig once and
-      # immediately 404'd 02.zswap.wei, a real name. The gateway already
-      # refuses depths no wildcard cert could ever secure, for free.
-      # - key: SUBDOMAIN_PARENTS
-      #   value: ""
+      # NOTE: there was briefly a SUBDOMAIN_PARENTS var here listing which
+      # parents could serve <x>.<parent>.<zone>. It is gone, and the gateway no
+      # longer reads it — the chain is the authority on which names exist.
+      # If your service still has one set from an earlier deploy it is inert,
+      # but delete it anyway so nobody trusts it. It took down 02.zswap.wei and
+      # token.list.wei: a list of names in config drifts the moment one is
+      # registered, and removing it from this file did not unset it on the
+      # running service.
       # Labels to never treat as .wei names, comma-separated. The built-in
       # reserved set in handler.js is currently EMPTY, so e.g. www.wei.domains
       # resolves www.wei unless you list `www` here (applies to every zone).

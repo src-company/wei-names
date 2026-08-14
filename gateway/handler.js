@@ -59,31 +59,29 @@ const pageInflight = new Map()
 
 // How deep a subdomain may go before the gateway stops believing it.
 //
-// `<x>.<parent>.<zone>` is real — `02.zswap.wei` is a registered name carrying
-// its own contenthash — and the chain is the only authority on which of these
-// exist. So depth 2 always resolves. Only depth 3+ is refused without a lookup,
-// because no wildcard cert secures it at any level: `*.<parent>.<zone>` covers
-// exactly one label below the parent, so `a.b.c.<zone>` cannot be reached over
-// TLS however it is configured. Refusing that costs a scanner its `eth_call`s
-// and costs a real name nothing.
+// Exactly one rule, and it is about arithmetic rather than about any list of
+// names: a wildcard cert covers one label, and `*.<parent>.<zone>` is the
+// deepest entry that can exist, so nothing past two labels below the zone can
+// be reached over TLS however DNS is configured. That is safe to refuse for
+// free because it cannot misjudge a real name.
 //
-// An earlier version of this guard hardcoded the parents that had wildcard
-// certs and 404'd everything else. It dropped `02.zswap.wei.limo` — a live name
-// behind a cert that already existed — because the list was a hand-maintained
-// copy of DNS state and went stale the moment a subdomain was registered. The
-// certificate, not the hostname pattern, is the thing that decides
-// reachability, and the gateway cannot see certificates: a version scan and a
-// real versioning scheme look identical from here. A list that must be updated
-// per name is also the exact per-name provisioning this gateway exists to
-// avoid. So: the chain decides what exists, DNS/TLS decides what is reachable,
-// and the gateway only refuses what neither could ever produce.
+// Everything shallower goes to the chain. There was, briefly, an allowlist of
+// parents here as well, on the theory that only parents with their own cert
+// could legitimately appear. It was wrong twice over and took down two live
+// names — `02.zswap.wei` and `token.list.wei` — because:
+//
+//   - it was a hand-maintained copy of DNS state living in code, so it went
+//     stale the moment a subdomain was registered. That is precisely the
+//     per-name provisioning this gateway exists to abolish; and
+//   - it also shipped as a render.yaml env var, which meant deleting it from
+//     the blueprint did NOT unset it on the running service. The stale value
+//     kept enforcing an allowlist the code no longer even declared.
+//
+// So there is no list, and no env var to leave behind. The chain decides what
+// exists, DNS and TLS decide what is reachable, and this refuses only what
+// neither could ever produce.
 const MAX_SUB_LABELS = 2
 
-// Optional tightening for operators who want it: if set, only these parents may
-// serve `<x>.<parent>.<zone>`. Unset (the default) means any parent may, and
-// the chain answers. Empty on purpose — opt-in hardening, not a registry the
-// gateway needs in order to stay correct.
-const SUBDOMAIN_PARENTS = new Set([])
 
 // `0x<40 hex>.<zone>` — serve that contract directly, skipping WNS entirely.
 //
@@ -233,14 +231,7 @@ export async function handleRequest(request, env) {
   // Depth guard, before any RPC — see MAX_SUB_LABELS. Depth 2 always resolves
   // (the chain decides whether `02.zswap.wei` exists); depth 3+ never can, so
   // it is refused for free rather than costing three `eth_call`s per probe.
-  const labels = sub.split('.')
-  const parents = new Set([
-    ...SUBDOMAIN_PARENTS,
-    ...String(readEnv(env, 'SUBDOMAIN_PARENTS', '')).split(',').map((s) => s.trim()).filter(Boolean),
-  ])
-  const tooDeep = labels.length > MAX_SUB_LABELS
-  const parentNotAllowed = labels.length === 2 && parents.size > 0 && !parents.has(labels[1])
-  if (tooDeep || parentNotAllowed) {
+  if (sub.split('.').length > MAX_SUB_LABELS) {
     return new Response(
       `No such host: ${sub}.${zone}\n` +
         `A wildcard certificate covers one label, so this name cannot be reached over TLS.\n`,

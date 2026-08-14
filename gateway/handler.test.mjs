@@ -331,18 +331,22 @@ routes = nameRoutes(14, P14, {
 res = await get('alice.id.wei.limo/')
 eq('depth: a registered sub-subdomain resolves', res.status, 200)
 
-// The parent allowlist is opt-in hardening: empty by default, enforced when set.
-const P14B = addr(0xdeca15)
-routes = nameRoutes(15, P14B, {
-  [`${P14B}:${RESOLVE_MODE}`]: mode('5219'),
-  [`${P14B}:${REQUEST}`]: RET_IMMUTABLE,
+// A dotted name is an ordinary name, not a suspicious one. token.list.wei is
+// the README's own example and was collateral damage from the allowlist that
+// used to live here; there is no list any more, so nothing to fall off.
+const P15 = addr(0xdeca15)
+routes = nameRoutes(15, P15, {
+  [`${P15}:${RESOLVE_MODE}`]: mode('5219'),
+  [`${P15}:${REQUEST}`]: RET_IMMUTABLE,
 })
-res = await handleRequest(new Request('https://y.id.wei.limo/'), { ...ENV, SUBDOMAIN_PARENTS: 'id' })
-eq('depth: allowlist permits a listed parent', res.status, 200)
+res = await get('token.list.wei.limo/')
+eq('depth: a dotted name resolves', res.status, 200)
+
+// No env var can reintroduce the allowlist — the stale one on the running
+// service is what kept enforcing it after the code stopped declaring it.
 calls = []
-res = await handleRequest(new Request('https://y.other.wei.limo/'), { ...ENV, SUBDOMAIN_PARENTS: 'id' })
-eq('depth: allowlist refuses an unlisted parent', res.status, 404)
-eq('depth: allowlist refusal costs no eth_call', calls.length, 0)
+res = await handleRequest(new Request('https://token.list.wei.limo/x'), { ...ENV, SUBDOMAIN_PARENTS: 'id' })
+eq('depth: a stale SUBDOMAIN_PARENTS env var is inert', res.status, 200)
 
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail ? 1 : 0)
