@@ -57,21 +57,33 @@ const pageCache = new TtlCache({ maxEntries: 500, maxBytes: PAGE_CACHE_MAX_BYTES
 const resolveInflight = new Map()
 const pageInflight = new Map()
 
-// Parents allowed to serve a second label, i.e. `<x>.<parent>.<zone>`.
+// How deep a subdomain may go before the gateway stops believing it.
 //
-// A TLS wildcard covers exactly one label, so only the parents with their own
-// `*.<parent>.<zone>` entry in render.yaml can legitimately be reached this
-// way. Anything else arriving with such a Host never passed through DNS or a
-// cert — it was sent straight at the service — so it is refused here, before
-// any RPC. That is what keeps a scan for `01.foo`, `02.foo`, … from costing
-// three `eth_call`s per probe. Keep this in sync with render.yaml's `domains:`.
-// `zswap` is here because Render has already issued *.zswap.wei.limo and DNS
-// already answers for it — verified 2026-08-14: zswap.wei.limo serves 200 and
-// 02.zswap.wei.limo passes TLS verification. render.yaml had no entry for it, so
-// syncing this Set to that file (as the note above says to) is what dropped a
-// live name. A version scan and a real versioning scheme have the same shape, so
-// the certificate — not the hostname pattern — is the thing to check.
-const SUBDOMAIN_PARENTS = new Set(['slow', 'id', 'multisig', 'zswap'])
+// `<x>.<parent>.<zone>` is real — `02.zswap.wei` is a registered name carrying
+// its own contenthash — and the chain is the only authority on which of these
+// exist. So depth 2 always resolves. Only depth 3+ is refused without a lookup,
+// because no wildcard cert secures it at any level: `*.<parent>.<zone>` covers
+// exactly one label below the parent, so `a.b.c.<zone>` cannot be reached over
+// TLS however it is configured. Refusing that costs a scanner its `eth_call`s
+// and costs a real name nothing.
+//
+// An earlier version of this guard hardcoded the parents that had wildcard
+// certs and 404'd everything else. It dropped `02.zswap.wei.limo` — a live name
+// behind a cert that already existed — because the list was a hand-maintained
+// copy of DNS state and went stale the moment a subdomain was registered. The
+// certificate, not the hostname pattern, is the thing that decides
+// reachability, and the gateway cannot see certificates: a version scan and a
+// real versioning scheme look identical from here. A list that must be updated
+// per name is also the exact per-name provisioning this gateway exists to
+// avoid. So: the chain decides what exists, DNS/TLS decides what is reachable,
+// and the gateway only refuses what neither could ever produce.
+const MAX_SUB_LABELS = 2
+
+// Optional tightening for operators who want it: if set, only these parents may
+// serve `<x>.<parent>.<zone>`. Unset (the default) means any parent may, and
+// the chain answers. Empty on purpose — opt-in hardening, not a registry the
+// gateway needs in order to stay correct.
+const SUBDOMAIN_PARENTS = new Set([])
 
 // `0x<40 hex>.<zone>` — serve that contract directly, skipping WNS entirely.
 //
@@ -218,20 +230,25 @@ export async function handleRequest(request, env) {
     return new Response('Not Found', { status: 404 })
   }
 
-  // Depth guard, before any RPC. `<x>.<parent>.<zone>` is only reachable for
-  // parents that have their own wildcard cert; anything deeper is unreachable
-  // at any depth. A Host header costs an attacker nothing, so refusing these
-  // here is what stops a scan from turning into three `eth_call`s per probe.
+  // Depth guard, before any RPC — see MAX_SUB_LABELS. Depth 2 always resolves
+  // (the chain decides whether `02.zswap.wei` exists); depth 3+ never can, so
+  // it is refused for free rather than costing three `eth_call`s per probe.
   const labels = sub.split('.')
   const parents = new Set([
     ...SUBDOMAIN_PARENTS,
     ...String(readEnv(env, 'SUBDOMAIN_PARENTS', '')).split(',').map((s) => s.trim()).filter(Boolean),
   ])
-  if (labels.length > 2 || (labels.length === 2 && !parents.has(labels[1]))) {
+  const tooDeep = labels.length > MAX_SUB_LABELS
+  const parentNotAllowed = labels.length === 2 && parents.size > 0 && !parents.has(labels[1])
+  if (tooDeep || parentNotAllowed) {
     return new Response(
       `No such host: ${sub}.${zone}\n` +
-        `Sub-subdomains resolve only under parents with their own wildcard certificate.\n`,
-      { status: 404, headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'public, max-age=300' } },
+        `A wildcard certificate covers one label, so this name cannot be reached over TLS.\n`,
+      // Never cacheable. This response once carried `max-age=300`, and when the
+      // guard behind it turned out to be wrong those 404s kept being served
+      // from browser caches long after the server was fixed — the outage
+      // outlived its own cause. An error a client can pin is a liability.
+      { status: 404, headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' } },
     )
   }
 

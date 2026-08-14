@@ -142,14 +142,16 @@ services:
       # fail or rate-limit for 30s, and caps concurrent calls.
       - key: RPC_URLS
         sync: false
-      # Parents allowed to serve `<x>.<parent>.<zone>`. MUST match the
-      # second-level wildcards in `domains:` above — a TLS wildcard covers one
-      # label, so no other parent is reachable through DNS anyway, and anything
-      # else arriving with such a Host was aimed straight at the service.
-      # Refusing them here costs zero eth_calls, which is what stops a scan for
-      # 01.<name>, 02.<name>, … from becoming an RPC bill.
-      - key: SUBDOMAIN_PARENTS
-        value: slow,id,multisig
+      # OPT-IN hardening, intentionally UNSET. If set, only these parents may
+      # serve `<x>.<parent>.<zone>` — everything else 404s with no lookup.
+      #
+      # Leave it unset unless you have a reason: the chain is the authority on
+      # which subdomains exist, and a hand-maintained list here drifts the
+      # moment one is registered. It shipped set to slow,id,multisig once and
+      # immediately 404'd 02.zswap.wei, a real name. The gateway already
+      # refuses depths no wildcard cert could ever secure, for free.
+      # - key: SUBDOMAIN_PARENTS
+      #   value: ""
       # Labels to never treat as .wei names, comma-separated. The built-in
       # reserved set in handler.js is currently EMPTY, so e.g. www.wei.domains
       # resolves www.wei unless you list `www` here (applies to every zone).

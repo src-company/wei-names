@@ -291,38 +291,58 @@ eq('herd: every request served', herd.every((r) => r.status === 200), true)
 eq('herd: one computeId for 25 requests', calls.filter((c) => c.selector === COMPUTE_ID).length, 1)
 eq('herd: one page read for 25 requests', calls.filter((c) => c.selector === REQUEST).length, 1)
 
-// --- 14. depth guard: unreachable hosts cost nothing ------------------------
+// --- 14. depth guard: only what TLS could never reach is refused ------------
 
 // `nosuch` has no wildcard cert, so this host can never have arrived through
-// DNS + TLS. NOT 02.zswap.wei.limo, which reads like a scan but is a real
-// versioned build behind a real *.zswap.wei.limo cert — using it as the junk
-// example here is what made the guard drop a live name.
+// DNS + TLS. Deliberately NOT 02.zswap.wei.limo: that reads like a scan but is
+// a real versioned build behind a real *.zswap.wei.limo cert, and using it as
+// the junk example here is what made the guard drop a live name.
 routes = {}
 res = await get('02.nosuch.wei.limo/')
-eq('depth: sub-subdomain of an unlisted parent 404s', res.status, 404)
-eq('depth: and makes no eth_call at all', calls.length, 0)
+// It reaches the registry and 404s from there, not from a hardcoded list.
+eq('depth: an unregistered sub-subdomain 404s', res.status, 404)
+eq('depth: and it asked the chain first', calls.length > 0, true)
 
+// A numeric label under any parent is the shape of a version scan AND of a real
+// versioned build, so the guard must not judge it by shape. It may still 404 —
+// but only after asking the chain. Refused-before-RPC is the bug; "asked and
+// found nothing" is correct.
+routes = {}
+res = await get('02.zswap.wei.limo/')
+eq('depth: a numeric label still reaches RPC', calls.length > 0, true)
+
+// Three labels cannot be secured by any wildcard cert, so they are refused for
+// free rather than costing a lookup.
+routes = {}
 res = await get('a.b.c.wei.limo/')
 eq('depth: three labels 404', res.status, 404)
 eq('depth: three labels make no eth_call', calls.length, 0)
+// The refusal must not be cacheable. A cacheable error outlives the bug that
+// produced it: the 300s max-age this once carried kept serving 404s from
+// browser caches after the server itself was already fixed.
+eq('depth: the refusal is not cacheable', res.headers.get('cache-control'), 'no-store')
 
-// `id` has its own wildcard cert, so it still resolves.
+// A registered sub-subdomain resolves on the chain's say-so.
 const P14 = addr(0xdeca14)
 routes = nameRoutes(14, P14, {
   [`${P14}:${RESOLVE_MODE}`]: mode('5219'),
   [`${P14}:${REQUEST}`]: RET_IMMUTABLE,
 })
 res = await get('alice.id.wei.limo/')
-eq('depth: a listed parent still resolves', res.status, 200)
+eq('depth: a registered sub-subdomain resolves', res.status, 200)
 
-// A numeric label under a listed parent is the shape of a version scan AND of a
-// real versioned build, so the guard must not judge it by shape. With nothing
-// stubbed it still 404s — but only after asking the chain, and that is the
-// distinction: refused-before-RPC is the bug, "asked and found nothing" is fine.
-routes = {}
-res = await get('02.zswap.wei.limo/')
-eq('depth: numeric label under a listed parent reaches RPC', calls.length > 0, true)
-
+// The parent allowlist is opt-in hardening: empty by default, enforced when set.
+const P14B = addr(0xdeca15)
+routes = nameRoutes(15, P14B, {
+  [`${P14B}:${RESOLVE_MODE}`]: mode('5219'),
+  [`${P14B}:${REQUEST}`]: RET_IMMUTABLE,
+})
+res = await handleRequest(new Request('https://y.id.wei.limo/'), { ...ENV, SUBDOMAIN_PARENTS: 'id' })
+eq('depth: allowlist permits a listed parent', res.status, 200)
+calls = []
+res = await handleRequest(new Request('https://y.other.wei.limo/'), { ...ENV, SUBDOMAIN_PARENTS: 'id' })
+eq('depth: allowlist refuses an unlisted parent', res.status, 404)
+eq('depth: allowlist refusal costs no eth_call', calls.length, 0)
 
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail ? 1 : 0)
