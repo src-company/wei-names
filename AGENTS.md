@@ -12,7 +12,9 @@ is about developing wei-names itself.)
 - `test/`, `script/` — Foundry tests and deploy scripts.
 - `gateway/` — the `*.wei.limo` / `.wei.is` / `.wei.domains` HTTP gateway.
   Zero-dependency ESM; `handler.js` is runtime-agnostic, wrapped by `worker.js`
-  (Cloudflare) and `server.js` (Node/Render).
+  (Cloudflare) and `server.js` (Node/Render). Serves IPFS/IPNS contenthashes and
+  contract pages read straight from chain (`onchain.js`: ERC-5219 `request()`,
+  ERC-8244 `html()`), plus `0x<address>.<zone>` labels that skip WNS.
 - `dapp/` — static client-side app (no build step; vendored bundles committed,
   `#hash` routing). Served at wei.domains and pinned on IPFS.
 - `skills/` — integration skill(s) for external agents/devs.
@@ -29,7 +31,8 @@ forge snapshot        # update .gas-snapshot after gas-affecting changes
 
 **Gateway** (Node ≥18, zero deps):
 ```bash
-cd gateway && npm test        # node ipns.test.mjs
+cd gateway && npm test        # contenthash + ERC-5219 codecs, handler e2e (no network)
+node live-check.mjs zswap.wei.limo   # same handler, against live mainnet
 node server.js                # run locally (GET/HEAD only)
 ```
 

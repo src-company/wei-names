@@ -6,6 +6,9 @@
 //   resolve(uint256 tokenId) -> address     (0x4f896d4f)  — the name's addr record
 //   resolveMode() -> bytes32                (0xdd473fae)  — ERC-4804, on the addr
 //
+// `ethCall` is exported for onchain.js, which adds the two page-reading calls
+// (ERC-5219 `request()`, ERC-8244 `html()`) on top of the same RPC failover.
+//
 // The last two let the gateway serve *on-chain* dapps: a `.wei` name whose addr
 // record points to an ERC-4804 contract (`resolveMode()` = manual/auto/5219) is
 // served live from chain through a web3:// gateway, so deep paths and raw files
@@ -112,9 +115,15 @@ function decodeBytes32Ascii(data) {
 
 // --- RPC -------------------------------------------------------------------
 
-async function ethCall(data, opts) {
+// One `eth_call`, tried across the endpoint list until one answers. Exported so
+// the ERC-5219 / ERC-8244 page reader (onchain.js) shares the same failover,
+// timeout and endpoint config instead of opening its own RPC path.
+// `opts.timeoutMs` overrides the per-endpoint timeout — page reads return whole
+// documents (hundreds of KB) and want longer than a plain registry lookup.
+export async function ethCall(data, opts) {
   const to = opts?.contract || WNS_CONTRACT
   const endpoints = opts?.rpc?.length ? opts.rpc : DEFAULT_RPCS
+  const timeoutMs = opts?.timeoutMs || RPC_TIMEOUT_MS
   const body = JSON.stringify({
     jsonrpc: '2.0',
     id: 1,
@@ -126,7 +135,7 @@ async function ethCall(data, opts) {
   for (const url of endpoints) {
     try {
       const controller = new AbortController()
-      const timer = setTimeout(() => controller.abort(), RPC_TIMEOUT_MS)
+      const timer = setTimeout(() => controller.abort(), timeoutMs)
       const res = await fetch(url, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -136,7 +145,12 @@ async function ethCall(data, opts) {
       clearTimeout(timer)
       const json = await res.json()
       if (json.error) {
+        // The node answered — the call itself failed (a revert, a rate limit, an
+        // unsupported method). Still worth trying the next endpoint, but tag it:
+        // callers that probe for an optional function need to tell "this
+        // contract said no" apart from "no endpoint would talk to us".
         lastErr = new Error(json.error?.message || 'rpc error')
+        lastErr.rpcError = true
         continue
       }
       return json.result ?? '0x'
