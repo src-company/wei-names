@@ -72,6 +72,13 @@ services:
       # The *.<zone> wildcard cert already covers the parent, so this is DNS-only.
       - "*.slow.wei.limo"
       - "*.id.wei.limo"
+      # `zswap` publishes versioned builds as <NN>.zswap.wei (02.zswap.wei carries
+      # its own contenthash). This entry documents state that already exists rather
+      # than requesting anything new: Render has issued the *.zswap.wei.limo cert
+      # and DNS answers for it, including the explicit `zswap` record the RFC 4592
+      # note above requires. It was missing here while live, which is how the
+      # gateway's SUBDOMAIN_PARENTS — kept in sync with this list — came to refuse it.
+      - "*.zswap.wei.limo"
       # `multisig` second-level wildcard on all three zones. multisig.wei already
       # serves content via *.wei.<zone>, so per the RFC 4592 note above you MUST
       # add an explicit `multisig` CNAME on each zone at the same time, or the

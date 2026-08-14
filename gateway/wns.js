@@ -34,12 +34,23 @@ const RESOLVE_MODE = '0xdd473fae' // resolveMode() -> bytes32 (ERC-4804)
 // an on-chain dapp and served via a web3:// gateway rather than IPFS.
 export const WEB3_MODES = new Set(['auto', 'manual', '5219'])
 
-// Public mainnet RPCs with fallback (same set zFi already allows in its CSP).
+// Public mainnet RPCs, every one verified to serve `eth_call` server-side —
+// a stricter bar than the dapp's list in dapp/wallet.js, so the two are
+// deliberately NOT identical. Measured 2026-08-14 against the WNS registry:
+//   - eth.llamarpc.com    a Cloudflare HTML page, never JSON      (was first!)
+//   - 1rpc.io/eth         403 "forbidden" — dropped for the dapp in 762bab8
+//   - cloudflare-eth.com  answers eth_chainId, but -32603 on eth_call, which is
+//                         the only method this gateway ever issues
+//   - eth.merkle.io       edge rate-limit (HTTP 1015) from a single server IP
+//   - blastapi.io         connects, then hangs until the timeout — the worst
+//                         kind, since benching still pays one full timeout first
+// The benching below covers an endpoint that rots later; it does not make a
+// permanently dead one free, because a benched endpoint is re-probed every
+// COOLDOWN_MS forever. Re-check with live-check.mjs before adding one back.
 const DEFAULT_RPCS = [
-  'https://eth.llamarpc.com',
-  'https://ethereum.publicnode.com',
-  'https://1rpc.io/eth',
+  'https://ethereum-rpc.publicnode.com',
   'https://eth.drpc.org',
+  'https://mainnet.gateway.tenderly.co',
 ]
 
 const RPC_TIMEOUT_MS = 5_000

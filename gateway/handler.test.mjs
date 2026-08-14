@@ -293,8 +293,12 @@ eq('herd: one page read for 25 requests', calls.filter((c) => c.selector === REQ
 
 // --- 14. depth guard: unreachable hosts cost nothing ------------------------
 
+// `nosuch` has no wildcard cert, so this host can never have arrived through
+// DNS + TLS. NOT 02.zswap.wei.limo, which reads like a scan but is a real
+// versioned build behind a real *.zswap.wei.limo cert — using it as the junk
+// example here is what made the guard drop a live name.
 routes = {}
-res = await get('02.zswap.wei.limo/')
+res = await get('02.nosuch.wei.limo/')
 eq('depth: sub-subdomain of an unlisted parent 404s', res.status, 404)
 eq('depth: and makes no eth_call at all', calls.length, 0)
 
@@ -310,6 +314,14 @@ routes = nameRoutes(14, P14, {
 })
 res = await get('alice.id.wei.limo/')
 eq('depth: a listed parent still resolves', res.status, 200)
+
+// A numeric label under a listed parent is the shape of a version scan AND of a
+// real versioned build, so the guard must not judge it by shape. With nothing
+// stubbed it still 404s — but only after asking the chain, and that is the
+// distinction: refused-before-RPC is the bug, "asked and found nothing" is fine.
+routes = {}
+res = await get('02.zswap.wei.limo/')
+eq('depth: numeric label under a listed parent reaches RPC', calls.length > 0, true)
 
 
 console.log(`\n${pass} passed, ${fail} failed`)

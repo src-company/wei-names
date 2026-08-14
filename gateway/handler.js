@@ -65,7 +65,13 @@ const pageInflight = new Map()
 // cert — it was sent straight at the service — so it is refused here, before
 // any RPC. That is what keeps a scan for `01.foo`, `02.foo`, … from costing
 // three `eth_call`s per probe. Keep this in sync with render.yaml's `domains:`.
-const SUBDOMAIN_PARENTS = new Set(['slow', 'id', 'multisig'])
+// `zswap` is here because Render has already issued *.zswap.wei.limo and DNS
+// already answers for it — verified 2026-08-14: zswap.wei.limo serves 200 and
+// 02.zswap.wei.limo passes TLS verification. render.yaml had no entry for it, so
+// syncing this Set to that file (as the note above says to) is what dropped a
+// live name. A version scan and a real versioning scheme have the same shape, so
+// the certificate — not the hostname pattern — is the thing to check.
+const SUBDOMAIN_PARENTS = new Set(['slow', 'id', 'multisig', 'zswap'])
 
 // `0x<40 hex>.<zone>` — serve that contract directly, skipping WNS entirely.
 //
