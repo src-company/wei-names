@@ -122,11 +122,27 @@ services:
       # return whole documents. Registry lookups keep the shorter 5s budget.
       - key: PAGE_TIMEOUT_MS
         value: "15000"
-      # Set to a trusted/authenticated mainnet RPC (comma-separated) so a
-      # malicious public RPC can't forge a contenthash. Falls back to a built-in
-      # public list if unset.
+      # STRONGLY RECOMMENDED: set this in the Render dashboard (it is `sync:
+      # false` precisely so the key never lands in this file or in git).
+      #
+      # Two reasons, one of which is now load-bearing:
+      #   - trust: a malicious public RPC can forge a contenthash or a page body.
+      #   - capacity: contract pages are whole documents per read (zswap.wei is
+      #     ~240 KB). The built-in public endpoints rate-limit well before real
+      #     traffic does, and a rate-limited gateway 502s. An authenticated
+      #     endpoint (e.g. https://mainnet.gateway.tenderly.co/<key>) does not.
+      # Comma-separated; the gateway rotates across them, benches endpoints that
+      # fail or rate-limit for 30s, and caps concurrent calls.
       - key: RPC_URLS
         sync: false
+      # Parents allowed to serve `<x>.<parent>.<zone>`. MUST match the
+      # second-level wildcards in `domains:` above — a TLS wildcard covers one
+      # label, so no other parent is reachable through DNS anyway, and anything
+      # else arriving with such a Host was aimed straight at the service.
+      # Refusing them here costs zero eth_calls, which is what stops a scan for
+      # 01.<name>, 02.<name>, … from becoming an RPC bill.
+      - key: SUBDOMAIN_PARENTS
+        value: slow,id,multisig
       # Labels to never treat as .wei names, comma-separated. The built-in
       # reserved set in handler.js is currently EMPTY, so e.g. www.wei.domains
       # resolves www.wei unless you list `www` here (applies to every zone).

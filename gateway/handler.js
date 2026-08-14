@@ -11,6 +11,7 @@
 import { computeId, contenthashOf, resolveAddress, resolveMode, WEB3_MODES } from './wns.js'
 import { decodeContenthash } from './contenthash.js'
 import { fetchErc5219, fetchErc8244 } from './onchain.js'
+import { TtlCache, singleFlight, parseCacheControl } from './cache.js'
 
 // Zones this gateway serves. Comma-separated; a request to <label>.<zone>
 // resolves the IPFS content of <label>.wei for ANY listed zone.
@@ -34,22 +35,37 @@ const RESERVED_BY_ZONE = {
   // e.g. 'wei.is': ['zfi', 'multisig'] — reserve labels only on that zone
 }
 
-// Short in-memory cache of label -> { cid, at } to spare RPCs from repeat hits.
-// Best-effort (per worker isolate / per Node process); not a correctness path.
-// SECURITY: bounded so a flood of random `*.wei.limo` labels can't grow the map
-// unbounded and OOM the instance. Oldest entries are evicted first.
-const CACHE_TTL_MS = 60_000
-const CACHE_MAX = 5_000
-const cache = new Map()
+// Short in-memory cache of label -> servable target, to spare RPCs on repeat
+// hits. Best-effort (per worker isolate / per Node process); not a correctness
+// path. Bounded, so a flood of random `*.wei.limo` labels can't OOM the
+// instance. 60s is short enough that a newly registered name still resolves
+// essentially instantly, which is the point of the wildcard design.
+const RESOLUTION_TTL_MS = 60_000
+const resolutionCache = new TtlCache({ maxEntries: 5_000 })
 
-function cacheSet(key, value) {
-  // Evict the oldest entry when at capacity (Map preserves insertion order).
-  if (cache.size >= CACHE_MAX) {
-    const oldest = cache.keys().next().value
-    if (oldest !== undefined) cache.delete(oldest)
-  }
-  cache.set(key, value)
-}
+// Contract page bodies, held for exactly as long as the contract's own
+// Cache-Control allows (see cache.js). This is the difference between one
+// `eth_call` per request and one per TTL: a hot page is a few hundred KB of
+// RPC every single time without it, which is how the gateway falls over under
+// traffic. Byte-budgeted because the entries are documents, not pointers.
+const PAGE_CACHE_MAX_BYTES = 32 * 1024 * 1024
+const pageCache = new TtlCache({ maxEntries: 500, maxBytes: PAGE_CACHE_MAX_BYTES })
+
+// One in-flight call per key. N simultaneous readers of the same cold page
+// cost one RPC chain, not N — the failure mode a cache alone doesn't fix,
+// because on a cold entry every one of them misses at the same instant.
+const resolveInflight = new Map()
+const pageInflight = new Map()
+
+// Parents allowed to serve a second label, i.e. `<x>.<parent>.<zone>`.
+//
+// A TLS wildcard covers exactly one label, so only the parents with their own
+// `*.<parent>.<zone>` entry in render.yaml can legitimately be reached this
+// way. Anything else arriving with such a Host never passed through DNS or a
+// cert — it was sent straight at the service — so it is refused here, before
+// any RPC. That is what keeps a scan for `01.foo`, `02.foo`, … from costing
+// three `eth_call`s per probe. Keep this in sync with render.yaml's `domains:`.
+const SUBDOMAIN_PARENTS = new Set(['slow', 'id', 'multisig'])
 
 // `0x<40 hex>.<zone>` — serve that contract directly, skipping WNS entirely.
 //
@@ -86,6 +102,37 @@ function labelFromHost(host, zones) {
     return { sub, zone }
   }
   return null
+}
+
+// Hold a page for exactly as long as its own Cache-Control allows, and no
+// longer. A contract saying `immutable` gets held; one saying `max-age=300`
+// gets held for five minutes; one saying `no-store` isn't held at all. The
+// gateway never picks this number itself. Returns the page for chaining.
+function rememberPage(key, page) {
+  if (!page) return page
+  const ttl = parseCacheControl(page.cacheControl)
+  if (ttl > 0) {
+    // +512 for the entry's own overhead, so the byte budget isn't fooled by
+    // many tiny bodies.
+    pageCache.set(key, page, { expires: Date.now() + ttl * 1000, size: page.body.length + 512 })
+  }
+  return page
+}
+
+// RPC trouble, told apart: a full outbound queue is this gateway shedding load
+// and worth retrying shortly (503), anything else is upstream (502). Neither is
+// ever cacheable — a cached error would outlive the condition that caused it.
+function upstreamError(e, what) {
+  if (e?.overloaded) {
+    return new Response('Gateway busy, retry shortly.\n', {
+      status: 503,
+      headers: { 'cache-control': 'no-store', 'retry-after': '2', 'content-type': 'text/plain; charset=utf-8' },
+    })
+  }
+  return new Response('Upstream RPC error ' + what, {
+    status: 502,
+    headers: { 'cache-control': 'no-store', 'retry-after': '5' },
+  })
 }
 
 // Classify an address the gateway has been pointed at, in the order the
@@ -165,6 +212,23 @@ export async function handleRequest(request, env) {
     return new Response('Not Found', { status: 404 })
   }
 
+  // Depth guard, before any RPC. `<x>.<parent>.<zone>` is only reachable for
+  // parents that have their own wildcard cert; anything deeper is unreachable
+  // at any depth. A Host header costs an attacker nothing, so refusing these
+  // here is what stops a scan from turning into three `eth_call`s per probe.
+  const labels = sub.split('.')
+  const parents = new Set([
+    ...SUBDOMAIN_PARENTS,
+    ...String(readEnv(env, 'SUBDOMAIN_PARENTS', '')).split(',').map((s) => s.trim()).filter(Boolean),
+  ])
+  if (labels.length > 2 || (labels.length === 2 && !parents.has(labels[1]))) {
+    return new Response(
+      `No such host: ${sub}.${zone}\n` +
+        `Sub-subdomains resolve only under parents with their own wildcard certificate.\n`,
+      { status: 404, headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'public, max-age=300' } },
+    )
+  }
+
   const rpc = String(readEnv(env, 'RPC_URLS', '')).split(',').map((s) => s.trim()).filter(Boolean)
   const contract = readEnv(env, 'WNS_CONTRACT', undefined)
   // Page reads pull whole documents over `eth_call`, so they get their own
@@ -186,25 +250,25 @@ export async function handleRequest(request, env) {
   //       key the gateway resolves fresh each request, so the owner can update
   //       the site with no new on-chain transaction.
   //
-  // Only the CLASSIFICATION is cached, never a page body — see classifyContract.
+  // Concurrent requests for the same label share one resolution.
   let resolved
   let prefetched
-  const cached = cache.get(sub)
   const now = Date.now()
-  if (cached && now - cached.at < CACHE_TTL_MS) {
-    resolved = cached.resolved
+  const cached = resolutionCache.get(sub, now)
+  if (cached !== undefined) {
+    resolved = cached
   } else {
     try {
-      const hit = await resolveTarget(sub, opts)
+      const hit = await singleFlight(resolveInflight, sub, async () => {
+        const out = await resolveTarget(sub, opts)
+        resolutionCache.set(sub, out.resolved, { expires: Date.now() + RESOLUTION_TTL_MS })
+        return out
+      })
       resolved = hit.resolved
       prefetched = hit.prefetched
     } catch (e) {
-      return new Response('Upstream RPC error resolving ' + sub, {
-        status: 502,
-        headers: { 'cache-control': 'no-store' },
-      })
+      return upstreamError(e, 'resolving ' + sub)
     }
-    cacheSet(sub, { resolved, at: now })
   }
 
   if (!resolved) {
@@ -223,23 +287,35 @@ export async function handleRequest(request, env) {
   // because there is no upstream to redirect to. Each `<label>.<zone>` is
   // already its own origin (see the Public Suffix List note in README.md).
   if (resolved.kind === 'contract') {
-    let page
-    try {
-      page =
-        prefetched ||
-        (resolved.mode === '5219'
-          ? await fetchErc5219(resolved.address, url.pathname, url.search, opts)
-          : // ERC-8244 has no notion of a path: one document, served at every
-            // path, which is the same shape as an SPA fallback.
-            await fetchErc8244(resolved.address, opts))
-    } catch (e) {
-      // Rule 3's corollary: never serve stale here. A page that says
-      // `max-age=300` because it can change is exactly the one where a cached
-      // copy would keep serving a superseded version after the chain moved on.
-      return new Response('Upstream RPC error reading ' + resolved.address, {
-        status: 502,
-        headers: { 'cache-control': 'no-store' },
-      })
+    // Path and query are part of the identity of a 5219 response.
+    const pageKey = `${resolved.address}|${url.pathname}${url.search}`
+    let page = pageCache.get(pageKey, now)
+    if (!page) {
+      try {
+        if (prefetched) {
+          // The html() read that classified this address is also its content;
+          // don't call the contract a second time for the same bytes.
+          page = rememberPage(pageKey, prefetched)
+        } else {
+          page = await singleFlight(pageInflight, pageKey, async () =>
+            rememberPage(
+              pageKey,
+              resolved.mode === '5219'
+                ? await fetchErc5219(resolved.address, url.pathname, url.search, opts)
+                : // ERC-8244 has no notion of a path: one document, served at
+                  // every path, the same shape as an SPA fallback.
+                  await fetchErc8244(resolved.address, opts),
+            ),
+          )
+        }
+      } catch (e) {
+        // Rule 3's corollary: never serve stale here. An expired entry is not a
+        // fallback — a page saying `max-age=300` because it can change is
+        // exactly the one where a stale copy would keep serving a superseded
+        // version after the chain moved on. Only unexpired entries are served,
+        // and those were already returned by the lookup above.
+        return upstreamError(e, 'reading ' + resolved.address)
+      }
     }
     if (!page) {
       return new Response('Not Found', {

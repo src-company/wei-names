@@ -8,7 +8,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
-    "test": "node ipns.test.mjs && node onchain.test.mjs && node handler.test.mjs",
+    "test": "node ipns.test.mjs && node cache.test.mjs && node onchain.test.mjs && node handler.test.mjs",
     "deploy:worker": "wrangler deploy"
   },
   "engines": {

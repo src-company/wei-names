@@ -50,6 +50,12 @@ node server.js                # run locally (GET/HEAD only)
   and `server.js`. `handler.js` takes a Web `Request` and returns a `Response`.
 - **The `ZONE` env var and the `render.yaml` `domains:` list must agree** — a
   zone only resolves if it's both served by the handler and has a wildcard cert.
+  Same for `SUBDOMAIN_PARENTS` and the `*.<parent>.<zone>` entries: a parent not
+  listed there 404s before any RPC, which is deliberate (a `Host` header is free
+  to forge, so unreachable hosts must not cost `eth_calls`).
+- **Never cache a contract page longer than its own `Cache-Control`.** The
+  contract decides, not the gateway, and an expired entry is never a fallback
+  when RPC fails — that stays a `502`. See `cache.js`.
 - Prefer `redirect` gateway mode for per-CID origin isolation; `proxy` keeps the
   name in the URL bar but runs untrusted content same-site with the zone.
 

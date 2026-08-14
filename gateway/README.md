@@ -129,6 +129,7 @@ The gateway also keeps a `RESERVED_LABELS` guard as defense-in-depth.
 |------|------|
 | `wns.js` | Minimal WNS read client (`computeId`, `contenthash`, `resolve` addr, ERC-4804 `resolveMode`) + the shared `ethCall` failover, zero deps |
 | `onchain.js` | ERC-5219 `request()` / ERC-8244 `html()` ABI codec, header whitelist, page reads |
+| `cache.js` | Byte-budgeted LRU + TTL cache, request coalescing, `Cache-Control` parsing |
 | `contenthash.js` | EIP-1577 contenthash → IPFS CIDv1 (base32) or IPNS name (base36) |
 | `handler.js` | Core `handleRequest(request, env)` — runtime-agnostic Web Fetch |
 | `worker.js` | Cloudflare Worker entrypoint |
@@ -143,12 +144,54 @@ The gateway also keeps a `RESERVED_LABELS` guard as defense-in-depth.
 | `IPFS_SUBDOMAIN_GATEWAY` | `dweb.link` | Subdomain gateway used in **both** modes → `https://<id>.<ipfs\|ipns>.<gw>`. Subdomain (not path) form so the site's `_redirects`/SPA fallback applies and deep paths like `/docs` resolve. |
 | `WEB3_GATEWAY` | `w3link.io` | web3:// HTTP gateway for on-chain (ERC-4804) dapps → `https://<addr>.<chainId>.<gw>` |
 | `WEB3_CHAIN_ID` | `1` | Chain id used in the web3:// gateway host (mainnet) |
-| `RPC_URLS` | built-in list | Comma-separated mainnet RPCs with fallback |
+| `RPC_URLS` | built-in list | Comma-separated mainnet RPCs. **Set a dedicated authenticated endpoint in production** — see [Load behaviour](#load-behaviour) |
+| `SUBDOMAIN_PARENTS` | `slow,id,multisig` | Parents allowed to serve `<x>.<parent>.<zone>`. Must match the second-level wildcards in `render.yaml`; anything else 404s with no RPC |
 | `PAGE_TIMEOUT_MS` | `15000` | Per-endpoint timeout for contract page reads (`request()` / `html()`), which return whole documents — longer than a registry lookup's `5000` |
 | `WNS_CONTRACT` | mainnet WNS | Override the registry address |
 | `RESERVED_LABELS` | — | Extra labels to never treat as `.wei` names (added to the built-in set) |
 | `ZONE` | `wei.limo` | The apex zone this gateway serves |
 | `PORT` | `8080` | Node server only |
+
+## Load behaviour
+
+A contract page is a whole document per `eth_call` — `zswap.wei` is ~240 KB.
+Read naively that is 240 KB of RPC *per request*, which public endpoints
+rate-limit long before real traffic stops, and a rate-limited gateway returns
+`502`. Three things keep that from happening, all in `cache.js` + `wns.js`:
+
+**Pages are cached for exactly as long as the contract's own `Cache-Control`
+allows.** Not a config value — an `immutable` build authorises a long hold, a
+resolver that follows the chain authorises 300s, `no-store` authorises none.
+Serving inside the max-age the contract published is the header being honoured;
+serving past it never happens, so an expired entry is *not* a fallback when RPC
+is down. That stays a `502`.
+
+**Concurrent readers of the same cold entry share one call.** A cache alone
+doesn't fix a thundering herd — on a cold entry every request misses at the same
+instant. `singleFlight` gives 50 simultaneous readers one RPC chain, not 50.
+
+**Unreachable hosts are refused before any RPC.** A `Host` header costs an
+attacker nothing, and `<x>.<parent>.<zone>` is only reachable for parents with
+their own wildcard cert. A scan for `01.<name>`, `02.<name>`, … therefore costs
+zero `eth_calls` instead of three per probe.
+
+Measured against mainnet through one authenticated endpoint:
+
+| | RPC calls | wall clock |
+|---|---|---|
+| 50 concurrent cold reads of `zswap.wei.limo` | 5 | 812 ms |
+| 200 further reads (warm) | **0** | 149 ms |
+| 100 distinct `NN.zswap.wei.limo` junk hosts | **0** | 15 ms |
+
+The RPC layer also rotates across endpoints rather than always starting at the
+first, benches one that times out or rate-limits for 30s instead of paying its
+timeout on every request, caps concurrent outbound calls, and sheds load with
+`503` + `Retry-After` rather than queueing without bound.
+
+**In production, set `RPC_URLS` to a dedicated authenticated endpoint.** The
+built-in public list is a fallback for local use; it will rate-limit under real
+traffic. Keep the key in the host's dashboard — `render.yaml` marks `RPC_URLS`
+`sync: false` so it never enters git.
 
 ## Operator note: the Public Suffix List
 

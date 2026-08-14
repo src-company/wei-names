@@ -44,6 +44,73 @@ const DEFAULT_RPCS = [
 
 const RPC_TIMEOUT_MS = 5_000
 
+// --- endpoint health + load shaping -----------------------------------------
+//
+// Two failure modes learned the hard way, both from traffic rather than bugs:
+//
+//   1. A fixed endpoint order means endpoint[0] takes every request and gets
+//      rate-limited first, while the rest sit idle. `rrCursor` rotates the
+//      starting point so load spreads across the list.
+//   2. Once an endpoint starts refusing, retrying it on every request costs a
+//      full timeout each time — with four endpoints that is 20s of dead wait
+//      per request, and connections pile up faster than they drain. A failing
+//      endpoint is benched for COOLDOWN_MS instead.
+//
+// Reverts do NOT bench an endpoint: the node answered correctly, the contract
+// just said no. Only transport failures and rate limits count against it.
+const COOLDOWN_MS = 30_000
+const unhealthyUntil = new Map()
+let rrCursor = 0
+
+// Cap on concurrent outbound RPCs. Without one, a spike opens a socket per
+// request and every call times out together; with one, excess calls queue and
+// the service degrades in latency instead of failing outright.
+// Beyond this many *queued* calls the gateway sheds load instead of queueing
+// deeper. A queue that grows without bound just converts a traffic spike into
+// a slower, longer outage where every request times out; refusing early keeps
+// the requests that are already in progress finishing.
+const MAX_INFLIGHT = 24
+const MAX_QUEUE = 200
+let inflight = 0
+const waiting = []
+
+async function acquire() {
+  if (inflight < MAX_INFLIGHT) {
+    inflight++
+    return
+  }
+  if (waiting.length >= MAX_QUEUE) {
+    const e = new Error('gateway busy: RPC queue full')
+    e.overloaded = true
+    throw e
+  }
+  await new Promise((resolve) => waiting.push(resolve))
+  inflight++
+}
+
+function release() {
+  inflight--
+  const next = waiting.shift()
+  if (next) next()
+}
+
+function isRateLimited(message) {
+  return /rate|limit|429|too many|capacity|quota|exceeded/i.test(message || '')
+}
+
+// Healthy endpoints first (rotated), benched ones last as a last resort — if
+// every endpoint is benched we still try rather than failing outright.
+function orderEndpoints(endpoints, now) {
+  const start = rrCursor++ % endpoints.length
+  const rotated = [...endpoints.slice(start), ...endpoints.slice(0, start)]
+  const healthy = []
+  const benched = []
+  for (const url of rotated) {
+    ;((unhealthyUntil.get(url) || 0) > now ? benched : healthy).push(url)
+  }
+  return [...healthy, ...benched]
+}
+
 // --- ABI encoding (subset) -------------------------------------------------
 
 // Encode a string argument: offset(0x20) + length + right-padded utf8 data.
@@ -132,31 +199,51 @@ export async function ethCall(data, opts) {
   })
 
   let lastErr
-  for (const url of endpoints) {
-    try {
-      const controller = new AbortController()
-      const timer = setTimeout(() => controller.abort(), timeoutMs)
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body,
-        signal: controller.signal,
-      })
-      clearTimeout(timer)
-      const json = await res.json()
-      if (json.error) {
-        // The node answered — the call itself failed (a revert, a rate limit, an
-        // unsupported method). Still worth trying the next endpoint, but tag it:
-        // callers that probe for an optional function need to tell "this
-        // contract said no" apart from "no endpoint would talk to us".
-        lastErr = new Error(json.error?.message || 'rpc error')
-        lastErr.rpcError = true
-        continue
+  await acquire()
+  try {
+    for (const url of orderEndpoints(endpoints, Date.now())) {
+      try {
+        const controller = new AbortController()
+        const timer = setTimeout(() => controller.abort(), timeoutMs)
+        let res
+        try {
+          res = await fetch(url, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body,
+            signal: controller.signal,
+          })
+        } finally {
+          clearTimeout(timer)
+        }
+        if (!res.ok) {
+          // 429/5xx never carries a usable body — bench and move on.
+          unhealthyUntil.set(url, Date.now() + COOLDOWN_MS)
+          lastErr = new Error(`rpc http ${res.status}`)
+          continue
+        }
+        const json = await res.json()
+        if (json.error) {
+          // The node answered — the call itself failed (a revert, a rate limit,
+          // an unsupported method). Still worth trying the next endpoint, but
+          // tag it: callers probing for an optional function need to tell "this
+          // contract said no" apart from "no endpoint would talk to us".
+          const message = json.error?.message || 'rpc error'
+          if (isRateLimited(message)) unhealthyUntil.set(url, Date.now() + COOLDOWN_MS)
+          lastErr = new Error(message)
+          lastErr.rpcError = true
+          continue
+        }
+        unhealthyUntil.delete(url)
+        return json.result ?? '0x'
+      } catch (e) {
+        // Timeout or transport failure: the endpoint itself is the problem.
+        unhealthyUntil.set(url, Date.now() + COOLDOWN_MS)
+        lastErr = e
       }
-      return json.result ?? '0x'
-    } catch (e) {
-      lastErr = e
     }
+  } finally {
+    release()
   }
   throw lastErr || new Error('all RPC endpoints failed')
 }
