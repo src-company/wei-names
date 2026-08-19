@@ -985,6 +985,7 @@ const MAINNET = ethers.Network.from(1);
 let rpcProvider = null;   // ethers FallbackProvider spanning every endpoint below
 let readContract = null;
 let _rpcInit = null; // in-flight getRpc() promise — de-dupes concurrent cold-start callers
+let _rpcGeneration = 0; // bumped by invalidateRpc(); a build from an older generation must not cache
 
 // JsonRpcProviders are cached by URL so rebuilding the provider reuses live
 // connections. Each is built from a FetchRequest with retries DISABLED and a hard
@@ -1072,13 +1073,26 @@ async function withRpc(fn, { tries = 2 } = {}) {
   throw lastErr || new Error('All RPC endpoints failed');
 }
 
+// Drop the cached provider so the next getRpc() rebuilds from the current endpoint
+// list. Bumping the generation is the load-bearing part: a build started before the
+// change still resolves for its own caller, but it no longer installs itself — else a
+// slow public-RPC cold start could land after the rebuild and silently overwrite the
+// custom node the user just saved (exactly when they'd be saving one).
+function invalidateRpc() {
+  _rpcGeneration++;
+  rpcProvider = null;
+  readContract = null;
+  _rpcInit = null;
+}
+
 async function getRpc() {
   if (rpcProvider) return rpcProvider;
   // Coalesce concurrent cold-start callers (page load fires getRpc(), initPending,
   // and doCheckName near-simultaneously) so we build the provider once, not N times.
   if (_rpcInit) return _rpcInit;
 
-  _rpcInit = (async () => {
+  const gen = _rpcGeneration;
+  const init = (async () => {
     const provider = buildRpcProvider();
     // Verify at least one endpoint answers before caching, so a total outage still
     // rejects (callers/timers retry) rather than caching a dead provider.
@@ -1086,15 +1100,19 @@ async function getRpc() {
       provider.getBlockNumber(),
       new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 8000))
     ]);
+    if (gen !== _rpcGeneration) return provider; // superseded — serve this caller, don't cache
     rpcProvider = provider;
     readContract = new ethers.Contract(CONTRACT, ABI, provider);
     return provider;
   })();
+  _rpcInit = init;
 
   try {
-    return await _rpcInit;
+    return await init;
   } finally {
-    _rpcInit = null; // success caches rpcProvider; failure clears so the next call retries
+    // Clear only our own slot: invalidateRpc() or a later caller may already have put
+    // a newer build there, and nulling that would defeat the coalescing.
+    if (_rpcInit === init) _rpcInit = null;
   }
 }
 
@@ -1102,8 +1120,14 @@ async function getRpc() {
 getRpc().catch(() => {});
 
 // --- Custom RPC settings UI ---
+// The ?rpc= override, read defensively (a malformed location.search must not throw
+// inside the settings sheet).
+function urlRpc() {
+  try { return new URLSearchParams(location.search).get('rpc'); } catch (e) { return null; }
+}
+
 function openRpcSettings() {
-  const url = new URLSearchParams(location.search).get('rpc');
+  const url = urlRpc();
   let ls = ''; try { ls = localStorage.getItem('wns_rpc') || ''; } catch (e) {}
   $('rpcInput').value = ls || url || '';
   const msg = $('rpcTestMsg');
@@ -1141,9 +1165,12 @@ async function saveRpcSettings() {
   try {
     const bn = await testRpcUrl(raw);
     try { localStorage.setItem('wns_rpc', raw); } catch (e) {}
-    rpcProvider = null; readContract = null; _rpcInit = null; // force re-init on the new endpoint
+    invalidateRpc(); // force re-init on the new endpoint
     await getRpc();
-    msg.textContent = 'Connected ✓  (block ' + bn + ')';
+    // customRpcs() merges ?rpc= with the saved value rather than replacing it, so say
+    // so instead of implying the endpoint just saved is the only one in use.
+    msg.textContent = 'Connected ✓  (block ' + bn + ')' +
+      (urlRpc() ? ' — used alongside the ?rpc= endpoint from the URL.' : '');
     msg.className = 'rpc-test success';
     setTimeout(closeRpcSettings, 1000);
   } catch (e) {
@@ -1154,10 +1181,14 @@ async function saveRpcSettings() {
 
 function resetRpcSettings() {
   try { localStorage.removeItem('wns_rpc'); } catch (e) {}
-  rpcProvider = null; readContract = null; _rpcInit = null;
+  invalidateRpc();
   $('rpcInput').value = '';
   const msg = $('rpcTestMsg');
-  msg.textContent = 'Back to the built-in public RPCs.';
+  // Reset clears only the saved endpoint; a ?rpc= in the URL still overrides the
+  // public list, so don't announce a fallback that didn't happen.
+  msg.textContent = urlRpc()
+    ? 'Saved endpoint cleared — still using the ?rpc= endpoint from the URL.'
+    : 'Back to the built-in public RPCs.';
   msg.className = 'rpc-test';
   getRpc().catch(() => {});
 }
@@ -1567,12 +1598,16 @@ async function doCheckName() {
       const parentId = computeIdFull(parentName);
 
       // One round-trip: subdomain ownerOf + the parent's registrar config, owner
-      // and escrow. ownerOf(sub) decoding to null (reverted) means it's unminted.
+      // and escrow, plus the contract's own verdict on whether this subdomain can be
+      // created under that parent right now. ownerOf(sub) decoding to null (reverted)
+      // means it's unminted.
       const agg = await aggregate3([
         { target: CONTRACT, iface: ownerOfIface, fn: 'ownerOf', args: [tokenId] },
         { target: SUBDOMAIN_REGISTRAR, iface: regIface, fn: 'config', args: [parentId] },
         { target: CONTRACT, iface: ownerOfIface, fn: 'ownerOf', args: [parentId] },
-        { target: SUBDOMAIN_REGISTRAR, iface: regIface, fn: 'escrowedController', args: [parentId] }
+        { target: SUBDOMAIN_REGISTRAR, iface: regIface, fn: 'escrowedController', args: [parentId] },
+        { target: CONTRACT, iface: iface, fn: 'isAvailable', args: [subLabel, parentId] },
+        { target: CONTRACT, iface: iface, fn: 'records', args: [parentId] }
       ]);
       if (thisVersion !== checkVersion) return;
 
@@ -1588,12 +1623,27 @@ async function doCheckName() {
           const cfg = agg[1];
           const parentOwner = agg[2] ? agg[2][0] : null; // null => parent not registered
           const escrowedAddr = agg[3] ? agg[3][0] : ethers.ZeroAddress;
+          // isAvailable() already encodes _isActive(parent) (expiry + the whole
+          // ancestor chain) and the depth cap. ownerOf(parent) succeeds right through
+          // the 90-day grace, so without this both registration paths below would be
+          // offered for a parent that reverts: NameNFT.registerSubdomain checks
+          // _isActive directly, and SubdomainRegistrar.register checks isAvailable.
+          // A failed read decodes to null — stay permissive there rather than blocking
+          // a legitimate mint on a flaky RPC.
+          const parentUsable = agg[4] ? agg[4][0] : true;
+          const parentRecord = agg[5] || null;
+          const parentExpired = !!(parentRecord && parentRecord.parent === 0n &&
+            parentRecord.expiresAt && (Date.now() / 1000) > Number(parentRecord.expiresAt));
 
           if (!cfg || parentOwner === null) {
             // The parent name isn't registered yet, so its subdomains can't exist.
-            feeEl.textContent = escapeHtml(parentName) + '.wei is not registered yet';
+            feeEl.textContent = parentName + '.wei is not registered yet';
+          } else if (!parentUsable) {
+            feeEl.textContent = parentExpired
+              ? parentName + '.wei has expired — it must be renewed before subdomains can be registered'
+              : parentName + '.wei can\'t host new subdomains right now';
           } else {
-            const [cfgController, cfgEnabled, cfgFeeToken, cfgPrice] = cfg;
+            const [cfgController, cfgEnabled, cfgFeeToken, cfgPrice, cfgGateToken, cfgMinGate] = cfg;
 
             // Mirror contract's _controllerOf: escrow takes priority over ownerOf
             const currentController = escrowedAddr !== ethers.ZeroAddress ? escrowedAddr : parentOwner;
@@ -1628,7 +1678,7 @@ async function doCheckName() {
                 }
               }
 
-              pendingMintInfo = { parentId, subLabel, parentName, feeToken: cfgFeeToken, price: cfgPrice, decimals: tokenDecimals, symbol: tokenSymbol };
+              pendingMintInfo = { parentId, subLabel, parentName, feeToken: cfgFeeToken, price: cfgPrice, decimals: tokenDecimals, symbol: tokenSymbol, gateToken: cfgGateToken, minGateBalance: cfgMinGate };
               feeEl.innerHTML = 'Price: ' + escapeHtml(priceDisplay) +
                 '<br><button onclick="doMintSubdomain()" style="margin-top:8px;"' +
                 (!_signer ? ' disabled' : '') + '>Mint ' + escaped + '.wei</button>';
@@ -1720,8 +1770,12 @@ async function doCheckName() {
       // Re-read the pending live (not the value captured at function entry): a
       // doCheckName already in flight when the user commits must not re-enable
       // the button that displayPending just disabled.
+      // Gate on _signer too: while disconnected loadPending() reports the newest
+      // pending across ALL accounts, so one abandoned commitment anywhere in this
+      // browser would disable the button that says "Connect to commit" — dead-ending
+      // the connect path doCommit provides for exactly that case.
       commitBtn.style.display = '';
-      commitBtn.disabled = !!loadPending();
+      commitBtn.disabled = !!(_signer && loadPending());
       commitBtn.textContent = _signer ? 'Commit' : 'Connect to commit';
       hideManage();
 
@@ -1772,8 +1826,13 @@ async function doCommit() {
     const innerSecret = ethers.hexlify(ethers.randomBytes(32));
     const userAddr = await _signer.getAddress();
     const secret = ethers.keccak256(ethers.AbiCoder.defaultAbiCoder().encode(['bytes32', 'address'], [innerSecret, userAddr]));
-    const rc = readContract || contract;
-    const commitment = await rc.makeCommitment(name, ZROUTER, secret);
+    // makeCommitment is pure — keccak256(abi.encode(normalized, owner, secret)) — and
+    // `name` is already normalized to exactly what _validateAndNormalize would produce,
+    // so compute it locally instead of spending an RPC round-trip (and a failure mode)
+    // on the most sensitive step in the flow. Same reasoning as computeIdFull.
+    const commitment = ethers.keccak256(ethers.AbiCoder.defaultAbiCoder().encode(
+      ['bytes', 'address', 'bytes32'], [ethers.toUtf8Bytes(name), ZROUTER, secret]
+    ));
 
     // Save pending BEFORE tx to persist even if user leaves during confirmation
     const pending = {
@@ -2974,9 +3033,15 @@ function decodeContenthash(hex) {
     }
     let cidBytes = bytes.slice(offset);
     if (proto === 0xe3) {
-      // IPFS: CIDv1 version(1) + codec + multihash
-      if (cidBytes[0] === 0x01) return { ns: 'ipfs', id: 'b' + base32Encode(cidBytes) };
-      return null;
+      // IPFS: canonical form is a CIDv1 (version(1) + codec + multihash). Legacy
+      // encoders may store a bare CIDv0 multihash instead; wrap it as CIDv1 codec 0x70
+      // (dag-pb), mirroring what the ipns branch below already does. Only wrap a
+      // well-formed sha2-256 multihash, so junk renders nothing rather than a bogus CID.
+      if (cidBytes[0] !== 0x01) {
+        if (cidBytes[0] !== 0x12 || cidBytes[1] !== 0x20 || cidBytes.length !== 34) return null;
+        cidBytes = new Uint8Array([0x01, 0x70, ...cidBytes]);
+      }
+      return { ns: 'ipfs', id: 'b' + base32Encode(cidBytes) };
     }
     if (proto === 0xe5) {
       // IPNS: libp2p-key CIDv1. Legacy encoders may store a bare peer-id
@@ -3104,6 +3169,9 @@ async function doSetPrimary() {
     await waitForTx(tx);
     showStatus(currentTokenName + '.wei is now your display name!', 'success', tx.hash);
     $('walletBtn').textContent = currentTokenName + '.wei';
+    // Re-resolve through wallet.js so its wns_rev cache picks up the new primary name.
+    // Writing textContent alone leaves the previous name cached, to flash on next load.
+    if (typeof resolveWeiName === 'function') resolveWeiName(_connectedAddress);
   } catch (e) {
     handleError(e);
   } finally {
@@ -3217,7 +3285,7 @@ async function showSubSalesForm() {
     const isApproved = res[1] ? res[1][0] : false;
     const ethBal = res[2] ? res[2][0] : 0n;
 
-    const [cfgController, cfgEnabled, cfgFeeToken, cfgPrice, , , cfgPayout] = cfg;
+    const [cfgController, cfgEnabled, cfgFeeToken, cfgPrice, cfgGateToken, cfgMinGate, cfgPayout] = cfg;
 
     const isConfigured = cfgController !== ethers.ZeroAddress &&
                          cfgController.toLowerCase() === _connectedAddress.toLowerCase();
@@ -3239,6 +3307,7 @@ async function showSubSalesForm() {
         currentFeeType = 'erc20';
         currentTokenAddr = cfgFeeToken;
         try {
+          const rpc = await getRpc();
           const [dec, sym] = await Promise.all([
             getTokenDecimals(cfgFeeToken, rpc),
             getTokenSymbol(cfgFeeToken, rpc)
@@ -3273,6 +3342,14 @@ async function showSubSalesForm() {
 
     if (!isApproved) {
       statusHtml += '<div style="padding:10px;background:var(--status-warning);margin-bottom:12px;font-size:11px;">Approval required — the registrar needs permission to use your name for minting. Your name stays in your wallet.</div>';
+    }
+
+    // The gate isn't editable here, but it IS carried through on save — say so, so an
+    // owner who set one elsewhere can see it survived rather than assuming it was lost.
+    if (cfgGateToken !== ethers.ZeroAddress) {
+      statusHtml += '<div style="padding:10px;background:var(--surface);margin-bottom:12px;font-size:11px;">Token gate active — buyers need at least ' +
+        escapeHtml(cfgMinGate.toString()) + ' of ' + escapeHtml(cfgGateToken) +
+        '. Saving here keeps it; change it from the registrar contract.</div>';
     }
 
     if (ethBal > 0n) {
@@ -3347,13 +3424,19 @@ async function doConfigureSubSales() {
       return;
     }
 
-    // Check approval for flash mode
-    const rpc = await getRpc();
-    const approvedRes = await rpc.call({
-      to: CONTRACT,
-      data: approvalIface.encodeFunctionData('isApprovedForAll', [_connectedAddress, SUBDOMAIN_REGISTRAR])
-    });
-    const isApproved = approvalIface.decodeFunctionResult('isApprovedForAll', approvedRes)[0];
+    // One round-trip: the flash-mode approval state plus the CURRENT config. The gate
+    // has to be read back because configure() rewrites the whole Config struct — passing
+    // zeros would silently delete a gateToken/minGateBalance the owner set elsewhere,
+    // turning a restricted sale into an open one with no warning. Abort rather than
+    // guess if the read fails.
+    const [apprRes, liveCfg] = await aggregate3([
+      { target: CONTRACT, iface: approvalIface, fn: 'isApprovedForAll', args: [_connectedAddress, SUBDOMAIN_REGISTRAR] },
+      { target: SUBDOMAIN_REGISTRAR, iface: regIface, fn: 'config', args: [currentTokenId] }
+    ]);
+    if (!liveCfg) throw new Error('Could not read the current subdomain-sales config — try again');
+    const isApproved = apprRes ? apprRes[0] : false;
+    const gateToken = liveCfg[4];
+    const minGateBalance = liveCfg[5];
 
     if (!isApproved) {
       showStatus('Approving registrar...', '');
@@ -3371,7 +3454,7 @@ async function doConfigureSubSales() {
     showStatus('Configuring subdomain sales...', '');
     const registrar = new ethers.Contract(SUBDOMAIN_REGISTRAR, REGISTRAR_ABI, _signer);
     const tx = await wcTransaction(
-      registrar.configure(currentTokenId, payoutAddr, feeToken, price, true, ethers.ZeroAddress, 0),
+      registrar.configure(currentTokenId, payoutAddr, feeToken, price, true, gateToken, minGateBalance),
       'Approve configuration'
     );
     showStatus('Waiting for confirmation...', '', tx.hash);
@@ -3458,6 +3541,22 @@ async function registrarFlashApproved(parentId) {
   }
 }
 
+// The registrar can gate minting on an ERC20/ERC721 balance (Config.gateToken /
+// minGateBalance) and reverts with GateFailed when it isn't met. Mirror that check so a
+// gated parent doesn't hand out a Mint button that's guaranteed to revert. Returns true
+// on any read error — a flaky RPC must not block a legitimate mint.
+async function gateSatisfied(gateToken, minGateBalance) {
+  if (!gateToken || gateToken === ethers.ZeroAddress || !minGateBalance) return true;
+  try {
+    const rpc = await getRpc();
+    const balIface = new ethers.Interface(['function balanceOf(address) view returns (uint256)']);
+    const res = await rpc.call({ to: gateToken, data: balIface.encodeFunctionData('balanceOf', [_connectedAddress]) });
+    return balIface.decodeFunctionResult('balanceOf', res)[0] >= minGateBalance;
+  } catch (e) {
+    return true;
+  }
+}
+
 // Free subdomain minting for id.wei
 const ID_WEI_PARENT = 93476697939188154236260161789725673383255207760354288944172500327559511035582n;
 
@@ -3513,7 +3612,7 @@ async function doFreeMint() {
     const cfg = regIface.decodeFunctionResult('config', cfgRes);
     const parentOwner = ownerOfIface.decodeFunctionResult('ownerOf', parentOwnerRes)[0];
     const escrowedAddr = regIface.decodeFunctionResult('escrowedController', escrowRes)[0];
-    const [cfgController, cfgEnabled, cfgFeeToken, cfgPrice] = cfg;
+    const [cfgController, cfgEnabled, cfgFeeToken, cfgPrice, cfgGateToken, cfgMinGate] = cfg;
     const currentController = escrowedAddr !== ethers.ZeroAddress ? escrowedAddr : parentOwner;
 
     if (!cfgEnabled || cfgController.toLowerCase() !== currentController.toLowerCase()) {
@@ -3528,6 +3627,11 @@ async function doFreeMint() {
     }
     if (!(await registrarFlashApproved(ID_WEI_PARENT))) {
       showFreeStatus('Free minting is temporarily unavailable — please try again later', 'error');
+      btn.disabled = false;
+      return;
+    }
+    if (!(await gateSatisfied(cfgGateToken, cfgMinGate))) {
+      showFreeStatus('Free minting is token-gated — your wallet doesn\'t hold enough of the required token', 'error');
       btn.disabled = false;
       return;
     }
@@ -3572,7 +3676,7 @@ async function doFreeMint() {
 
 async function doMintSubdomain() {
   if (!_signer || !pendingMintInfo) return;
-  const { parentId, subLabel, feeToken, price, symbol } = pendingMintInfo;
+  const { parentId, subLabel, feeToken, price, symbol, gateToken, minGateBalance } = pendingMintInfo;
   const btn = (typeof event !== 'undefined' && event?.target) || null; if (btn) btn.disabled = true;
 
   try {
@@ -3592,6 +3696,13 @@ async function doMintSubdomain() {
     // Bail before spending gas if the seller revoked the registrar's approval.
     if (!(await registrarFlashApproved(parentId))) {
       showStatus("This name's owner hasn't approved the registrar — minting is temporarily unavailable", 'error');
+      if (btn) btn.disabled = false;
+      return;
+    }
+
+    // Same, for the optional token gate the seller can put on the sale.
+    if (!(await gateSatisfied(gateToken, minGateBalance))) {
+      showStatus('This name is token-gated — your wallet doesn\'t hold enough of the required token to mint', 'error');
       if (btn) btn.disabled = false;
       return;
     }
