@@ -34,3 +34,11 @@ main6 = "https://rpc.ankr.com/eth"
 main7 = "https://cloudflare-eth.com"
 main8 = "https://eth-mainnet.g.alchemy.com/v2/demo"
 main9 = "https://1rpc.io/eth"
+[profile.null]
+solc_version = "0.8.34"
+evm_version = "prague"
+optimizer = true
+optimizer_runs = 20
+via_ir = true
+bytecode_hash = "none"
+cbor_metadata = false
