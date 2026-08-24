@@ -67,8 +67,8 @@ interface IVRFV2PlusWrapper {
 /// ── Funding runs it ────────────────────────────────────────────────────────────────────
 /// Nothing runs on an empty pot. ETH arriving opens a {ROUND_LENGTH} entry window; {draw} then
 /// settles and pays the pot out in full, leaving nothing to run on until the next funding. A round
-/// that cannot settle — under two tickets, or too thin for the VRF fee — reopens rather than
-/// reverting, so entries are never shut with no way forward. No keeper, no schedule.
+/// that cannot settle — under two tickets, or too thin for the VRF fee — is abandoned and a fresh
+/// one opened, so entries are never shut with no way forward. No keeper, no schedule.
 ///
 /// ── Entries ────────────────────────────────────────────────────────────────────────────
 /// Token IDs are namehashes and NameNFT is not enumerable, so the set of holders does not exist
@@ -108,17 +108,13 @@ interface IVRFV2PlusWrapper {
 ///   withdrawal would otherwise strand the pot forever on one undelivered request — grindable
 ///   beats bricked. Residual: whoever controls fulfilment can withhold, or starve the callback of
 ///   gas, to force one fresh draw per {REQUEST_TIMEOUT}, each burning another fee from the pot.
-/// • Weight is snapshotted at {enter}, so it drifts down as runway burns — by one {ROUND_LENGTH}
-///   normally, but a round that keeps reopening carries its tickets, so the real bound is how long
-///   funding takes. A ticket whose name lapses meanwhile keeps its odds and cannot claim if drawn;
-///   the prize rolls over. Nobody profits, it just wastes a round.
+/// • Weight is snapshotted at {enter}, so it drifts down as runway burns — bounded by one
+///   {ROUND_LENGTH}, since no ticket outlives its round. Same treatment WeiDAO gives support.
 /// • Odds track the *current* fee schedule, which WeiDAO governs: raising a length tier lifts the
 ///   odds of everyone holding that length for free. WeiDAO carries the same caveat for votes.
 ///   Buying odds stays fairly priced, weight being linear in the fee you would pay today.
 /// • The boost costs only gas, so it confers no edge — it taxes the unengaged rather than
 ///   differentiating. That is the safe direction: a scarce boost would advantage whoever held it.
-/// • A prize belongs to the registration that bought the ticket. A lapsed name re-registered by
-///   someone else returns under the same tokenId, so {claim} checks the epoch, not just liveness.
 /// • A DAO position whose supported runway elapses is prunable by anyone, so a boosted winner in
 ///   that state must re-`support` before claiming.
 /// • Naming needs an active `roll.wei` held here; without one only the namespace stops. Renewal is
@@ -257,8 +253,7 @@ contract WeiRoll {
     struct Ticket {
         uint256 tokenId; //   The namehash, full width.
         uint128 cum; //     ┐ Cumulative weight through this ticket,
-        uint64 boostPid; //  │ proposal bonded to for the boost (0 = none),
-        uint64 epoch; //    ┘ the name's registration epoch when the ticket was bought.
+        uint128 boostPid; // ┘ proposal bonded to for the boost (0 = none).
     }
 
     /// @notice The round now accepting entries.
@@ -287,10 +282,6 @@ contract WeiRoll {
 
     /// @notice Proposal the winning ticket bonded to, re-checked at claim (0 = unboosted).
     mapping(uint256 => uint256) public winnerBoostOf;
-
-    /// @notice The winning name's registration epoch when its ticket was bought. A prize belongs
-    ///         to the registration that entered, not to whoever holds the name later.
-    mapping(uint256 => uint64) public winnerEpochOf;
 
     /// @notice How many times a round's VRF request was cleared and redrawn. Non-zero means
     ///         fulfilment failed or was withheld — the grinding surface, made visible.
@@ -369,14 +360,14 @@ contract WeiRoll {
         uint256 r = round;
         if (ticketOf[r][tokenId] != 0) revert AlreadyEntered();
 
-        (uint256 weight, uint64 epoch) = _snapshot(tokenId);
+        uint256 weight = weightOf(tokenId);
         if (weight == 0) revert NotLive();
 
         if (boostPid != 0) {
             // Bounded so the id checked here is the id re-checked at claim, with no silent
             // truncation between them. WeiDAO only lets a name back ids <= proposalCount, so a
             // larger one could never have been backed anyway.
-            if (boostPid > type(uint64).max) revert NotBacking();
+            if (boostPid > type(uint128).max) revert NotBacking();
             // Requiring the proposal to still be open keeps the boost about current governance:
             // support left on a long-settled one cannot buy odds forever.
             (,, bool executed, bool vetoed,,,,,) = dao.proposals(boostPid);
@@ -389,9 +380,7 @@ contract WeiRoll {
         uint256 cum = (t.length == 0 ? 0 : t[t.length - 1].cum) + weight;
         if (cum > type(uint128).max) revert WeightTooLarge();
 
-        t.push(
-            Ticket({tokenId: tokenId, cum: uint128(cum), boostPid: uint64(boostPid), epoch: epoch})
-        );
+        t.push(Ticket({tokenId: tokenId, cum: uint128(cum), boostPid: uint128(boostPid)}));
         ticketOf[r][tokenId] = t.length; // index + 1
 
         emit Entered(r, tokenId, msg.sender, weight, boostPid);
@@ -403,7 +392,7 @@ contract WeiRoll {
 
     /// @notice Close the round and ask Chainlink for a seed. Permissionless.
     /// @dev A round that cannot be drawn — under two tickets, a pot too thin for the VRF fee, or a
-    ///      wrapper that will not quote one — reopens for another {ROUND_LENGTH} instead of
+    ///      wrapper that will not quote one — is abandoned and a fresh one opened, rather than
     ///      reverting. Reverting here would wedge the contract: entries are already shut at
     ///      `roundEnd`, so nobody could act, and there is no owner to unstick it.
     function draw() external {
@@ -416,8 +405,15 @@ contract WeiRoll {
 
         // The +1 leaves at least a wei of prize behind, so a settled round is always claimable.
         if (!priced || _tickets[r].length < 2 || address(this).balance < reserved + price + 1) {
+            // Start a fresh round rather than carry this one's entries. Carrying them is what lets
+            // a ticket outlive the name that bought it: its weight snapshot drifts, and once the
+            // name lapses past its grace anyone may re-register it — returning under the very same
+            // tokenId, since IDs are namehashes — and inherit the prize. Abandoning the round ends
+            // that whole class of problem instead of checking for it. Re-entering is cheap: this
+            // branch only runs when the round had under two tickets or no money to pay out.
+            round = r + 1;
             roundEnd = block.timestamp + ROUND_LENGTH;
-            emit RoundOpened(r, roundEnd);
+            emit RoundOpened(r + 1, roundEnd);
             return;
         }
 
@@ -451,7 +447,6 @@ contract WeiRoll {
         uint256 prize = address(this).balance - reserved;
         winnerOf[r] = t[lo].tokenId;
         winnerBoostOf[r] = t[lo].boostPid;
-        winnerEpochOf[r] = t[lo].epoch;
         prizeOf[r] = prize;
         claimBy[r] = block.timestamp + CLAIM_WINDOW;
         reserved += prize;
@@ -496,12 +491,7 @@ contract WeiRoll {
         uint256 tokenId = winnerOf[r];
         if (nft.ownerOf(tokenId) != msg.sender) revert NotWinner();
 
-        // Not merely "still alive" but "still the same registration". Token IDs are namehashes, so
-        // a lapsed name that someone re-registers comes back under the very same id — and a round
-        // can stay open long enough for that to happen. Without the epoch check, a sniper could
-        // register an expired name and collect on the ticket its previous holder paid for.
-        (uint256 weight, uint64 epoch) = _snapshot(tokenId);
-        if (weight == 0 || epoch != winnerEpochOf[r]) revert NotLive();
+        if (weightOf(tokenId) == 0) revert NotLive();
 
         uint256 pid = winnerBoostOf[r];
         if (pid != 0 && dao.supportOf(pid, tokenId) == 0) revert NotBacking();
@@ -570,17 +560,10 @@ contract WeiRoll {
 
     /// @notice A name's ticket weight: WeiDAO's `weightOf`, the current cost to hold it for its
     ///         remaining runway. Active top-level names only; subdomains and expired names are 0.
-    function weightOf(uint256 tokenId) public view returns (uint256 weight) {
-        (weight,) = _snapshot(tokenId);
-    }
-
-    /// @dev A name's weight and its registration epoch, from one read. Weight 0 means the name is
-    ///     not an active top-level name; the epoch is then meaningless and returned as 0. A live
-    ///     name's epoch is never 0 — NameNFT starts it at 1 and bumps it on every re-registration.
-    function _snapshot(uint256 tokenId) internal view returns (uint256 weight, uint64 epoch) {
-        (string memory label, uint256 parent, uint64 exp, uint64 ep,) = nft.records(tokenId);
-        if (parent != 0 || bytes(label).length == 0 || block.timestamp >= exp) return (0, 0);
-        return (nft.getFee(bytes(label).length) * (exp - block.timestamp) / REGISTRATION_PERIOD, ep);
+    function weightOf(uint256 tokenId) public view returns (uint256) {
+        (string memory label, uint256 parent, uint64 exp,,) = nft.records(tokenId);
+        if (parent != 0 || bytes(label).length == 0 || block.timestamp >= exp) return 0;
+        return nft.getFee(bytes(label).length) * (exp - block.timestamp) / REGISTRATION_PERIOD;
     }
 
     /// @notice The id `<r>.roll.wei` has, whether or not the round was ever named. Naming is
@@ -665,8 +648,7 @@ contract WeiRoll {
         if (prizeOf[r] == 0 || block.timestamp > claimBy[r]) return false;
 
         uint256 tokenId = winnerOf[r];
-        (uint256 weight, uint64 epoch) = _snapshot(tokenId);
-        if (weight == 0 || epoch != winnerEpochOf[r]) return false;
+        if (weightOf(tokenId) == 0) return false;
         try nft.ownerOf(tokenId) returns (address holder) {
             if (holder != who) return false;
         } catch {

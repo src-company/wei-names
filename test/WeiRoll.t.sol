@@ -175,47 +175,34 @@ contract WeiRollTest is Test {
         roll.enter(big, 0);
     }
 
-    /// @dev The prize belongs to the registration that bought the ticket. Token IDs are namehashes,
-    ///      so a lapsed name comes back under the same id when someone re-registers it — and a
-    ///      round can stay open long enough for that. Without the epoch snapshot, a sniper could
-    ///      register an expired name and collect on the ticket its previous holder paid for.
-    function testASnipedReRegistrationCannotClaimTheOldTicket() public {
-        _renew(tBob); // a second entrant that outlives alice's name
-
+    /// @dev Token IDs are namehashes, so a lapsed name returns under the very same id when anyone
+    ///      re-registers it. That used to matter: a round that could not settle carried its
+    ///      entries, so a ticket could outlive the name that bought it and a re-registration would
+    ///      inherit the prize. An unsettleable round is abandoned now, so there is no ticket left
+    ///      to inherit — this pins that the entry really is gone, not merely unclaimable.
+    function testATicketNeverOutlivesTheNameThatBoughtIt() public {
         vm.prank(alice);
         roll.enter(tAlice, 0);
-        uint64 epochAtEntry = roll.ticketAt(0, 0).epoch;
-        assertEq(epochAtEntry, 1);
+        assertEq(roll.ticketCount(0), 1);
 
-        // One ticket, so every draw reopens the round. Carry it past alice's expiry, the 90-day
+        // One ticket, so the round is abandoned. Carry the clock past alice's expiry, her 90-day
         // grace and the 21-day premium decay, at which point anyone may register "ab" again.
         uint256 exp = nft.expiresAt(tAlice);
         _rollRoundsUntil(exp + 90 days + 21 days + 1);
-        assertEq(roll.ticketCount(0), 1, "the stale ticket is still in the round");
+
+        uint256 r = roll.round();
+        assertGt(r, 0, "the round advanced rather than reopening");
+        assertEq(roll.ticketCount(r), 0, "no stale entry survives");
+        assertEq(roll.ticketOf(0, tAlice), 1, "the abandoned round still records what happened");
 
         address sniper = makeAddr("sniper");
         assertEq(_register("ab", sniper), tAlice, "same namehash, new registration");
         (,,, uint64 epochNow,) = nft.records(tAlice);
-        assertEq(epochNow, 2, "epoch bumped");
-        assertEq(nft.ownerOf(tAlice), sniper);
+        assertEq(epochNow, 2, "epoch bumped -- a different registration, same id");
 
-        vm.prank(bob);
-        roll.enter(tBob, 0); // second ticket so the round can finally settle
-        vm.warp(roll.roundEnd());
-        roll.draw();
-        wrapper.fulfill(address(roll), roll.requestId(), 0); // seed 0 -> the stale ticket
-        assertEq(roll.winnerOf(0), tAlice);
-        assertEq(roll.winnerEpochOf(0), epochAtEntry);
-
-        assertFalse(roll.canClaim(0, sniper), "a re-registration must not inherit the ticket");
-        vm.prank(sniper);
-        vm.expectRevert(WeiRoll.NotLive.selector);
-        roll.claim(0);
-
-        // the prize is not burned, it funds the next round
-        vm.warp(roll.claimBy(0) + 1);
-        roll.rollOver(0);
-        assertGt(roll.pot(), 0);
+        // Nothing for the sniper to collect on: the live round has no tickets at all.
+        assertEq(roll.winnerOf(r), 0);
+        assertFalse(roll.canClaim(r, sniper));
     }
 
     /// @dev `boostPid` is stored narrowed, so the id checked at entry must be the id re-checked at
@@ -224,7 +211,7 @@ contract WeiRollTest is Test {
     function testABoostPidTooLargeToStoreIsRefused() public {
         vm.prank(alice);
         vm.expectRevert(WeiRoll.NotBacking.selector);
-        roll.enter(tAlice, uint256(type(uint64).max) + 1);
+        roll.enter(tAlice, uint256(type(uint128).max) + 1);
     }
 
     function testOneTicketPerNamePerRound() public {
@@ -324,19 +311,26 @@ contract WeiRollTest is Test {
         roll.draw();
     }
 
-    function testThinRoundRollsForwardInsteadOfBricking() public {
+    function testAThinRoundIsAbandonedNotBricked() public {
         vm.prank(alice);
         roll.enter(tAlice, 0);
         uint256 end = roll.roundEnd();
         vm.warp(end);
+
         vm.expectEmit(true, false, false, true, address(roll));
-        emit WeiRoll.RoundOpened(0, end + roll.ROUND_LENGTH());
-        roll.draw(); // only one ticket: no VRF request, entries reopen
+        emit WeiRoll.RoundOpened(1, end + roll.ROUND_LENGTH());
+        roll.draw(); // one ticket: no seed requested, a fresh round opens instead
+
         assertEq(roll.requestId(), 0);
-        assertEq(roll.round(), 0);
+        assertEq(roll.round(), 1, "the round advances rather than reopening");
+        assertEq(roll.ticketCount(1), 0, "the new round starts empty");
         assertEq(roll.roundEnd(), end + roll.ROUND_LENGTH());
+
+        vm.prank(alice);
+        roll.enter(tAlice, 0); // free to re-enter, at a freshly measured weight
         vm.prank(bob);
-        roll.enter(tBob, 0); // still open
+        roll.enter(tBob, 0);
+        assertEq(roll.ticketCount(1), 2);
     }
 
     /// @dev The wrapper prices a request off a LINK/ETH feed behind a staleness guard. If it ever
@@ -357,15 +351,17 @@ contract WeiRollTest is Test {
 
         roll.draw();
         assertEq(roll.requestId(), 0, "must not have requested a seed");
-        assertGt(roll.roundEnd(), block.timestamp, "entries reopened");
+        assertEq(roll.round(), 1, "abandoned, and a fresh round opened");
+        assertGt(roll.roundEnd(), block.timestamp);
 
         // and it picks straight back up once the wrapper answers again
         vm.clearMockedCalls();
+        _enterAll();
         vm.warp(roll.roundEnd());
         roll.draw();
         assertGt(roll.requestId(), 0);
         wrapper.fulfill(address(roll), roll.requestId(), 0);
-        assertEq(roll.winnerOf(0), tAlice);
+        assertEq(roll.winnerOf(1), tAlice);
     }
 
     function testCannotDrawTwiceWithARequestInFlight() public {
@@ -414,20 +410,19 @@ contract WeiRollTest is Test {
 
         roll.draw();
         assertEq(roll.requestId(), 0, "should not have requested a seed");
-        assertEq(roll.round(), 0);
         assertGt(roll.roundEnd(), block.timestamp, "entries should be open again");
+        assertEq(roll.round(), 1, "the round was abandoned, not reopened");
+        assertEq(roll.ticketCount(1), 0, "entries do not carry forward");
 
-        // tickets ride through the reopen rather than being discarded
-        assertEq(roll.ticketCount(0), 3, "entries should survive a reopen");
-
-        // funding it makes the same round drawable
+        // funding it and re-entering makes the next round drawable
         wrapper.setPrice(0.0001 ether);
         _fund(1 ether);
+        _enterAll();
         vm.warp(roll.roundEnd());
         roll.draw();
         assertGt(roll.requestId(), 0);
         wrapper.fulfill(address(roll), roll.requestId(), 0);
-        assertEq(roll.winnerOf(0), tAlice, "the carried tickets are the ones drawn");
+        assertEq(roll.winnerOf(1), tAlice);
     }
 
     function testOnlyWrapperCanFulfill() public {
@@ -1196,7 +1191,9 @@ contract WeiRollTest is Test {
         vm.expectRevert(WeiRoll.TooSoon.selector);
         roll.enter(tBob, 0);
 
-        roll.draw(); // reopens
+        roll.draw(); // abandons that round and opens a fresh one
+        vm.prank(alice);
+        roll.enter(tAlice, 0);
         vm.prank(bob);
         roll.enter(tBob, 0);
         vm.warp(roll.roundEnd());
