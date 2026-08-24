@@ -287,6 +287,35 @@ contract WeiRollTest is Test {
         roll.enter(tBob, 0); // still open
     }
 
+    /// @dev The wrapper prices a request off a LINK/ETH feed behind a staleness guard. If it ever
+    ///      declines to quote, draw must reopen the round, not revert — entries are already shut by
+    ///      then and there is no owner to unstick an ownerless contract.
+    function testAWrapperThatWillNotQuoteReopensRatherThanBricking() public {
+        _enterAll();
+        vm.warp(roll.roundEnd());
+        vm.mockCallRevert(
+            address(wrapper),
+            abi.encodeWithSignature("calculateRequestPriceNative(uint32,uint32)", 200_000, 1),
+            ""
+        );
+
+        assertEq(roll.drawPrice(), 0, "an unavailable quote reads as 0");
+        assertFalse(roll.drawSettles());
+        assertFalse(roll.state().drawSettles, "state must not revert either");
+
+        roll.draw();
+        assertEq(roll.requestId(), 0, "must not have requested a seed");
+        assertGt(roll.roundEnd(), block.timestamp, "entries reopened");
+
+        // and it picks straight back up once the wrapper answers again
+        vm.clearMockedCalls();
+        vm.warp(roll.roundEnd());
+        roll.draw();
+        assertGt(roll.requestId(), 0);
+        wrapper.fulfill(address(roll), roll.requestId(), 0);
+        assertEq(roll.winnerOf(0), tAlice);
+    }
+
     function testCannotDrawTwiceWithARequestInFlight() public {
         _enterAll();
         vm.warp(roll.roundEnd());
@@ -1182,6 +1211,10 @@ contract WeiRollTest is Test {
         page = roll.ticketsIn(0, 2, 10); // clamps to what is left
         assertEq(page.length, 1);
         assertEq(page[0].tokenId, tCarol);
+
+        page = roll.ticketsIn(0, 1, type(uint256).max); // "give me the rest" must not overflow
+        assertEq(page.length, 2);
+        assertEq(page[0].tokenId, tBob);
 
         assertEq(roll.ticketsIn(0, 3, 10).length, 0, "past the end is empty, not a revert");
         assertEq(roll.ticketsIn(99, 0, 10).length, 0, "an unused round is empty");

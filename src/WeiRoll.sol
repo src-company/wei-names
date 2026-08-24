@@ -382,19 +382,20 @@ contract WeiRoll {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Close the round and ask Chainlink for a seed. Permissionless.
-    /// @dev A round that cannot be drawn — under two tickets, or a pot too thin to cover the VRF
-    ///      fee — reopens for another {ROUND_LENGTH} instead of reverting. Reverting here would
-    ///      wedge the contract: entries are already shut, so nobody could act until it was funded.
+    /// @dev A round that cannot be drawn — under two tickets, a pot too thin for the VRF fee, or a
+    ///      wrapper that will not quote one — reopens for another {ROUND_LENGTH} instead of
+    ///      reverting. Reverting here would wedge the contract: entries are already shut at
+    ///      `roundEnd`, so nobody could act, and there is no owner to unstick it.
     function draw() external {
         if (roundEnd == 0) revert NotRunning();
         if (block.timestamp < roundEnd) revert TooSoon();
         if (requestId != 0) revert DrawPending();
 
         uint256 r = round;
-        uint256 price = wrapper.calculateRequestPriceNative(CALLBACK_GAS, 1);
+        (bool priced, uint256 price) = _quote();
 
         // The +1 leaves at least a wei of prize behind, so a settled round is always claimable.
-        if (_tickets[r].length < 2 || address(this).balance < reserved + price + 1) {
+        if (!priced || _tickets[r].length < 2 || address(this).balance < reserved + price + 1) {
             roundEnd = block.timestamp + ROUND_LENGTH;
             emit RoundOpened(r, roundEnd);
             return;
@@ -556,17 +557,19 @@ contract WeiRoll {
         return block.timestamp < roundEnd ? Phase.Open : Phase.Ready;
     }
 
-    /// @notice What the wrapper would charge for a seed right now, paid from the pot.
+    /// @notice What the wrapper would charge for a seed right now, paid from the pot. 0 if it
+    ///         will not quote one — read {drawSettles} for whether a draw would actually go ahead.
     /// @dev Priced off `tx.gasprice`, which is 0 in an `eth_call` — a frontend quoting this over
     ///      RPC should send a realistic gas price or treat the result as a floor.
-    function drawPrice() public view returns (uint256) {
-        return wrapper.calculateRequestPriceNative(CALLBACK_GAS, 1);
+    function drawPrice() public view returns (uint256 price) {
+        (, price) = _quote();
     }
 
     /// @notice Whether {draw} would settle the round rather than just reopen it.
     function drawSettles() public view returns (bool) {
         if (phase() != Phase.Ready) return false;
-        return _tickets[round].length > 1 && address(this).balance >= reserved + drawPrice() + 1;
+        (bool priced, uint256 price) = _quote();
+        return priced && _tickets[round].length > 1 && address(this).balance >= reserved + price + 1;
     }
 
     /// @notice The whole contract state in one call.
@@ -640,8 +643,9 @@ contract WeiRoll {
         Ticket[] storage t = _tickets[r];
         uint256 n = t.length;
         if (offset >= n) return page;
-        uint256 end = offset + limit;
-        if (end > n) end = n;
+        // `offset + limit` would overflow on a `limit` of type(uint256).max — a natural way to ask
+        // for "the rest" — and a view that reverts breaks the page asking the question.
+        uint256 end = n - offset < limit ? n : offset + limit;
         page = new Ticket[](end - offset);
         for (uint256 i; i < page.length; ++i) {
             page[i] = t[offset + i];
@@ -662,6 +666,18 @@ contract WeiRoll {
     function totalWeight(uint256 r) public view returns (uint256) {
         Ticket[] storage t = _tickets[r];
         return t.length == 0 ? 0 : t[t.length - 1].cum;
+    }
+
+    /// @dev The wrapper's price for one word, and whether it would quote at all. Its native
+    ///      pricing reads a LINK/ETH feed behind a staleness guard, so a quote is not something an
+    ///      ownerless contract should assume always answers: a refusal must degrade to "cannot draw
+    ///      yet", never to a revert that leaves the pot stranded with entries shut.
+    function _quote() internal view returns (bool ok, uint256 price) {
+        try wrapper.calculateRequestPriceNative(CALLBACK_GAS, 1) returns (uint256 p) {
+            return (true, p);
+        } catch {
+            return (false, 0);
+        }
     }
 
     /// @dev Whether `roll.wei` is held here, i.e. whether naming can happen at all. `ownerOf`
