@@ -463,6 +463,7 @@ contract WeiRollTest is Test {
         assertLt(exp, roll.claimBy(r));
 
         vm.warp(exp + 1);
+        assertFalse(roll.canClaim(r, alice), "a lapsed winner cannot claim");
         vm.prank(alice);
         vm.expectRevert(WeiRoll.NotLive.selector);
         roll.claim(r);
@@ -803,6 +804,22 @@ contract WeiRollTest is Test {
         );
     }
 
+    /// @dev `ownerOf` reverts on a name that was never registered, so a bare check here would make
+    ///      every claim revert on a chain without `roll.wei` — prizes stranded, no owner to rescue.
+    function testClaimSurvivesRollWeiNotExistingAtAll() public {
+        uint256 prize = _drawWith(0);
+        vm.mockCallRevert(
+            address(nft), abi.encodeWithSignature("ownerOf(uint256)", roll.PARENT()), ""
+        );
+
+        assertFalse(roll.state().naming, "naming should report unavailable");
+        uint256 before = alice.balance;
+        vm.prank(alice);
+        roll.claim(0);
+        assertEq(alice.balance - before, prize, "an absent parent must not block the prize");
+        assertEq(roll.trophyOf(0), 0);
+    }
+
     function testNameWinnerIsSelfCallOnly() public {
         _drawWith(0);
         vm.prank(alice);
@@ -996,6 +1013,186 @@ contract WeiRollTest is Test {
 
         assertEq(roll.round(), 3);
         assertEq(roll.reserved(), 0, "nothing should be left owed");
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                                 VIEWS
+    //////////////////////////////////////////////////////////////*/
+
+    function testPhaseTracksTheLifecycle() public {
+        WeiRoll fresh = new WeiRoll(address(nft), address(dao), address(wrapper));
+        assertTrue(fresh.phase() == WeiRoll.Phase.Idle);
+
+        assertTrue(roll.phase() == WeiRoll.Phase.Open);
+        _enterAll();
+        vm.warp(roll.roundEnd());
+        assertTrue(roll.phase() == WeiRoll.Phase.Ready);
+
+        roll.draw();
+        assertTrue(roll.phase() == WeiRoll.Phase.Drawing);
+
+        wrapper.fulfill(address(roll), roll.requestId(), 0);
+        assertTrue(roll.phase() == WeiRoll.Phase.Idle, "pot paid out, back to idle");
+    }
+
+    function testStateIsEnoughToDriveAFrontend() public {
+        _enterAll();
+        WeiRoll.State memory st = roll.state();
+
+        assertTrue(st.phase == WeiRoll.Phase.Open);
+        assertEq(st.round, 0);
+        assertEq(st.roundEnd, roll.roundEnd());
+        assertEq(st.pot, 10 ether);
+        assertEq(st.reserved, 0);
+        assertEq(st.tickets, 3);
+        assertEq(st.totalWeight, roll.totalWeight(0));
+        assertEq(st.requestId, 0);
+        assertEq(st.resetAt, 0);
+        assertEq(st.drawPrice, wrapper.price());
+        assertFalse(st.drawSettles, "not drawable until the window closes");
+        assertTrue(st.naming);
+
+        vm.warp(roll.roundEnd());
+        assertTrue(roll.state().drawSettles);
+
+        roll.draw();
+        st = roll.state();
+        assertTrue(st.phase == WeiRoll.Phase.Drawing);
+        assertEq(st.resetAt, block.timestamp + roll.REQUEST_TIMEOUT());
+        assertFalse(st.drawSettles);
+    }
+
+    function testDrawSettlesIsFalseWhenTheRoundCannotSettle() public {
+        vm.prank(alice);
+        roll.enter(tAlice, 0); // one ticket
+        vm.warp(roll.roundEnd());
+        assertFalse(roll.drawSettles(), "one ticket cannot settle");
+
+        vm.prank(bob);
+        vm.expectRevert(WeiRoll.TooSoon.selector);
+        roll.enter(tBob, 0);
+
+        roll.draw(); // reopens
+        vm.prank(bob);
+        roll.enter(tBob, 0);
+        vm.warp(roll.roundEnd());
+        assertTrue(roll.drawSettles());
+
+        vm.deal(address(roll), 0);
+        assertFalse(roll.drawSettles(), "an empty pot cannot settle");
+    }
+
+    function testRoundInfoCoversTheWholeLifecycle() public {
+        WeiRoll.Round memory info = roll.roundInfo(0);
+        assertFalse(info.settled);
+        assertEq(info.roundName, nft.computeId("0.roll.wei"), "name is known before it is minted");
+
+        uint256 prize = _drawWith(0);
+        info = roll.roundInfo(0);
+        assertTrue(info.settled);
+        assertFalse(info.resolved);
+        assertEq(info.tickets, 3);
+        assertEq(info.winner, tAlice);
+        assertEq(info.prize, prize);
+        assertEq(info.claimBy, roll.claimBy(0));
+        assertEq(info.trophy, 0, "not named until claimed");
+
+        vm.prank(alice);
+        roll.claim(0);
+        info = roll.roundInfo(0);
+        assertTrue(info.resolved);
+        assertEq(info.prize, 0);
+        assertEq(info.trophy, nft.computeId("ab.0.roll.wei"));
+    }
+
+    function testWeightInGivesAHoldersOdds() public {
+        _enterAll();
+        assertEq(roll.weightIn(0, tAlice), roll.weightOf(tAlice));
+        assertEq(roll.weightIn(0, tBob), roll.weightOf(tBob));
+        assertEq(roll.weightIn(0, tCarol), roll.weightOf(tCarol));
+        assertEq(roll.weightIn(0, tRoll), 0, "not entered");
+
+        assertEq(
+            roll.weightIn(0, tAlice) + roll.weightIn(0, tBob) + roll.weightIn(0, tCarol),
+            roll.totalWeight(0),
+            "the parts must sum to the whole"
+        );
+    }
+
+    function testWeightInReflectsTheBoost() public {
+        uint256 pid = _proposal();
+        vm.startPrank(alice);
+        dao.support(pid, tAlice);
+        roll.enter(tAlice, pid);
+        vm.stopPrank();
+        assertEq(roll.weightIn(0, tAlice), roll.weightOf(tAlice) * 2);
+    }
+
+    function testCanClaimMirrorsClaim() public {
+        _drawWith(0);
+        assertTrue(roll.canClaim(0, alice));
+        assertFalse(roll.canClaim(0, bob), "not the holder");
+        assertFalse(roll.canClaim(1, alice), "unsettled round");
+
+        vm.prank(alice);
+        roll.claim(0);
+        assertFalse(roll.canClaim(0, alice), "already claimed");
+    }
+
+    /// @dev `ownerOf` reverts on a name that no longer exists; a view that reverts breaks the
+    ///      frontend that calls it, so this one answers false instead.
+    function testCanClaimIsFalseNotRevertingWhenTheNameIsGone() public {
+        _drawWith(0);
+        assertTrue(roll.canClaim(0, alice));
+        vm.mockCallRevert(address(nft), abi.encodeWithSignature("ownerOf(uint256)", tAlice), "");
+        assertFalse(roll.canClaim(0, alice));
+    }
+
+    function testCanClaimGoesFalseWhenTheWindowShuts() public {
+        _drawWith(0);
+        vm.warp(roll.claimBy(0) + 1);
+        assertFalse(roll.canClaim(0, alice));
+    }
+
+    function testCanClaimTracksTheBoostBond() public {
+        uint256 pid = _proposal();
+        vm.startPrank(alice);
+        dao.support(pid, tAlice);
+        roll.enter(tAlice, pid);
+        vm.stopPrank();
+        vm.prank(bob);
+        roll.enter(tBob, 0);
+        vm.warp(roll.roundEnd());
+        roll.draw();
+        wrapper.fulfill(address(roll), roll.requestId(), 0);
+
+        assertTrue(roll.canClaim(0, alice));
+        vm.prank(alice);
+        dao.unsupport(pid, tAlice);
+        assertFalse(roll.canClaim(0, alice), "bond dropped");
+    }
+
+    function testTicketsInPages() public {
+        _enterAll();
+        WeiRoll.Ticket[] memory page = roll.ticketsIn(0, 0, 2);
+        assertEq(page.length, 2);
+        assertEq(page[0].tokenId, tAlice);
+        assertEq(page[1].tokenId, tBob);
+
+        page = roll.ticketsIn(0, 2, 10); // clamps to what is left
+        assertEq(page.length, 1);
+        assertEq(page[0].tokenId, tCarol);
+
+        assertEq(roll.ticketsIn(0, 3, 10).length, 0, "past the end is empty, not a revert");
+        assertEq(roll.ticketsIn(99, 0, 10).length, 0, "an unused round is empty");
+    }
+
+    function testTicketOfIndexesEntries() public {
+        assertEq(roll.ticketOf(0, tAlice), 0);
+        _enterAll();
+        assertEq(roll.ticketOf(0, tAlice), 1);
+        assertEq(roll.ticketOf(0, tCarol), 3);
+        assertEq(roll.ticketAt(0, roll.ticketOf(0, tCarol) - 1).tokenId, tCarol);
     }
 
     /*//////////////////////////////////////////////////////////////

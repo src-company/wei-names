@@ -763,6 +763,23 @@ Against Chainlink's [VRF security checklist](https://docs.chain.link/vrf/v2-5/se
 
 **One documented deviation.** Chainlink states that *any* re-request of randomness is incorrect use, because it lets someone discard a result they dislike. `resetRequest` re-requests after `REQUEST_TIMEOUT` (3 days). It's kept because this contract is ownerless with no withdrawal: an undelivered request with no retry would strand the pot **permanently**. Nothing can be discarded — the reset only fires when no result was ever delivered and no participant has seen one. The residual is that whoever controls fulfilment could withhold, or starve the callback of gas, to force a fresh draw: one roll per three days, each burning another VRF fee from the pot. That takes a malicious DON, which is the same adversary that would otherwise brick the contract outright. A grindable lottery beats a bricked one.
 
+### Reading it from a dapp
+
+Every stage is drivable from views alone — no event indexing needed for the live screen.
+
+| Call | Gives you |
+|---|---|
+| `state()` | one struct: `phase`, `round`, `roundEnd`, `pot`, `reserved`, `tickets`, `totalWeight`, `requestId`, `resetAt`, `drawPrice`, `drawSettles`, `naming` |
+| `phase()` | `Idle` (waiting on funding) · `Open` (entries) · `Ready` (`draw` callable) · `Drawing` (seed in flight) |
+| `roundInfo(r)` | one struct per round: tickets, weight, winner, boost, prize, `claimBy`, `roundName`, `trophy`, `settled`, `resolved` |
+| `weightIn(r, tokenId)` | a name's own ticket weight — over `totalWeight(r)` for its odds |
+| `canClaim(r, who)` | whether `claim` would succeed right now, for the button's enabled state |
+| `ticketsIn(r, offset, limit)` | a page of the field, clamped rather than reverting past the end |
+| `drawSettles()` | whether `draw` would settle or merely reopen the round |
+| `roundName(r)` | the id `<r>.roll.wei` will have, computable before it is minted |
+
+`drawPrice()` is quoted off `tx.gasprice`, which is `0` in an `eth_call` — send a realistic gas price or treat it as a floor. `resolved` covers both a claim and a forfeit; the `Claimed` and `RolledOver` events tell them apart. Views never revert on missing names: `canClaim` answers `false` and `state().naming` reports whether `roll.wei` is held.
+
 ### Setup
 
 Constructor: `WeiRoll(nameNFT, weiDAO, vrfWrapper)`, `payable`. Pre-approve the address the deploy will land at for `roll.wei` and the constructor **pulls it in and sets its primary name**, so the contract reverse-resolves to `roll.wei` — the same handover trick WeiDAO uses for `dao.wei`. Send ETH with the deploy and the first round opens in the same transaction. Unlike WeiDAO, **none of it is load-bearing**: with no approval the deploy still succeeds and the name can be transferred in later, and the lottery runs without it — only naming stops. Runbook: [ops/ROLL.md](ops/ROLL.md).

@@ -61,99 +61,84 @@ interface IVRFV2PlusWrapper {
 
 /// @title WeiRoll
 /// @notice Ownerless ETH lottery for WNS name holders, drawn with Chainlink VRF.
-/// @dev Funded by WeiDAO sending ETH here. There is no owner and no withdrawal: value leaves only
-///      as a prize to a drawn winner or as the VRF fee.
+/// @dev No owner, no admin, no withdrawal: value leaves only as a prize or the VRF fee. Full
+///      write-up, including the VRF footgun review, is in the README under "Lottery (WeiRoll)".
 ///
-/// ── Rounds run on funding, not a calendar ──────────────────────────────────────────────
-/// Nothing runs while the pot is empty. ETH arriving opens a {ROUND_LENGTH} entry window; at the
-/// end of it {draw} settles, paying out the entire pot, which leaves nothing to run on until the
-/// next funding opens the next window. A round that cannot settle — under two tickets, or a pot
-/// too thin to cover the VRF fee — reopens rather than reverting, so the contract is never wedged
-/// with entries shut and no way forward. No keeper, no schedule, no admin: fund it and it runs.
+/// ── Funding runs it ────────────────────────────────────────────────────────────────────
+/// Nothing runs on an empty pot. ETH arriving opens a {ROUND_LENGTH} entry window; {draw} then
+/// settles and pays the pot out in full, leaving nothing to run on until the next funding. A round
+/// that cannot settle — under two tickets, or too thin for the VRF fee — reopens rather than
+/// reverting, so entries are never shut with no way forward. No keeper, no schedule.
 ///
 /// ── Entries ────────────────────────────────────────────────────────────────────────────
-/// WNS token IDs are namehashes and NameNFT is not enumerable, so the set of holders does not
-/// exist on-chain to index into. Holders opt in per round with {enter}, which checks ownership and
-/// eligibility live. That registry is the candidate set — no snapshot, no root, no indexer.
+/// Token IDs are namehashes and NameNFT is not enumerable, so the set of holders does not exist
+/// on-chain to index into. Holders opt into each round with {enter}, and that registry is the
+/// candidate set: no snapshot, no root, no indexer.
 ///
 /// ── Odds ───────────────────────────────────────────────────────────────────────────────
-/// Ticket weight is WeiDAO's `weightOf`: `getFee(byteLength) · (expiresAt − now) / 365d`, the ETH
-/// it would currently cost to hold the name for its remaining runway. Odds are proportional to it,
-/// making this EV-equivalent to a pro-rata airdrop paid in one transfer instead of N. Flat
-/// one-name-one-ticket is not viable: at the 0.001 ETH default fee, odds would cost 0.001 ETH
-/// each. Subdomains are free to mint, weigh 0, and are excluded, as in governance.
+/// Ticket weight is WeiDAO's `weightOf` — `getFee(byteLength) · (expiresAt − now) / 365d`, the ETH
+/// it would cost today to hold the name for its remaining runway. Odds are proportional to it, so
+/// a draw is EV-equivalent to a pro-rata airdrop paid in one transfer instead of N. Flat
+/// one-name-one-ticket would put odds on sale at the 0.001 ETH default fee. Subdomains are free to
+/// mint, weigh 0, and are excluded, as in governance.
 ///
 /// ── Boost ──────────────────────────────────────────────────────────────────────────────
-/// {enter} takes an optional `boostPid`. If the name backs that proposal and the proposal is still
-/// open, the ticket weighs {BOOST_BPS} more. {claim} re-checks the backing, so the boost is a bond
-/// rather than a snapshot: support, enter, unsupport wins better odds on an unclaimable prize.
-/// Only the backing is re-checked, not the proposal's state — a boosted entrant is never punished
-/// for their proposal passing.
+/// {enter} takes an optional `boostPid`: back an open proposal with the name and the ticket weighs
+/// {BOOST_BPS} more. {claim} re-checks the backing, making it a bond rather than a snapshot, so
+/// support-enter-unsupport buys better odds on an unclaimable prize. Only the backing is
+/// re-checked, never the proposal's state — nobody is punished for what they backed passing.
 ///
 /// ── Winners hold names, not addresses ──────────────────────────────────────────────────
-/// A draw records a tokenId. {claim} pays whoever holds that name, while it is still active, so
-/// selling or lapsing forfeits the prize to the next round. NameNFT's 90-day grace period exceeds
-/// {CLAIM_WINDOW}, so a name that lapses mid-window cannot be re-registered by someone else in
-/// time to claim off the previous holder.
+/// A draw records a tokenId, so {claim} pays whoever holds that name while it is still active and
+/// selling or lapsing forfeits to the next round. NameNFT's 90-day grace exceeds {CLAIM_WINDOW},
+/// so a name that lapses mid-window cannot be re-registered in time to claim off its old holder.
 ///
 /// ── Rounds are names ───────────────────────────────────────────────────────────────────
-/// The lottery runs forever, and while this contract holds `roll.wei` it writes its whole history
-/// into that namespace. Claiming round 7 mints `7.roll.wei` to this contract — resolving to the
-/// winner, with the winning label and prize in its text records — and then mints the winner's own
-/// label beneath it: `alice.wei` wins round 7, `alice.7.roll.wei` goes to the claimer. So the
-/// history browses as `roll.wei` → `7.roll.wei` → `alice.7.roll.wei`, the way WeiDAO's proposals
-/// browse under `dao.wei`, and a repeat winner collects a badge per round because each round is
-/// its own parent. Naming is a swallowed self-call and can never block a payout; a round whose
-/// prize is left unclaimed is simply never named.
+/// While this contract holds `roll.wei` it writes its history into that namespace. Claiming round 7
+/// mints `7.roll.wei` here — resolving to the winner, prize and label in its text records — then
+/// mints the winner's label beneath it, so the history browses as
+/// `roll.wei` → `7.roll.wei` → `alice.7.roll.wei`, as WeiDAO's proposals browse under `dao.wei`.
+/// Each round parenting its own badge is what lets a repeat winner collect one per round. Naming
+/// is a swallowed self-call and can never block a payout; an unclaimed round is never named.
 ///
 /// ── Caveats ────────────────────────────────────────────────────────────────────────────
-/// • Weight is snapshotted at {enter} and drifts down as runway burns — normally by at most one
-///   {ROUND_LENGTH}, but a round that keeps reopening for want of tickets or funding carries its
-///   tickets with it, so the drift is only bounded by how long funding takes to arrive. A ticket
-///   whose name lapses in the meantime keeps its odds and cannot claim if drawn, and the prize
-///   rolls to the next round. Nobody profits from that, but it wastes a round.
-/// • Odds track the *current* fee schedule, which WeiDAO governs. Raising a length tier lifts the
-///   odds of everyone already holding that length, without their paying anything — the same
-///   caveat WeiDAO carries for voting weight. Buying odds is still priced fairly: weight is
-///   linear in the fee you would pay today, so registering or renewing never beats its cost.
-/// • The boost is available to anyone willing to open or back a proposal and pay the gas, so it
-///   confers no edge over other entrants — it does not differentiate so much as tax the
-///   unengaged. That is the safe failure mode: a boost that were hard to come by would hand an
-///   edge to whoever could get it.
-/// • {resetRequest} is a deliberate departure from Chainlink's guidance that "any re-request or
-///   cancellation of randomness is an incorrect use of VRF". That rule exists to stop anyone
-///   discarding a result they dislike; here nothing can be discarded, because the reset only fires
-///   when no result was ever delivered and no participant has seen one. It is kept because this
-///   contract is ownerless with no withdrawal: an undelivered request with no way to retry would
-///   strand the pot permanently, and a lottery that can be ground is better than one that can be
-///   bricked. The residual is that whoever controls fulfilment can withhold, or starve the
-///   callback of gas, to force a fresh draw — one roll per {REQUEST_TIMEOUT}, each paying another
-///   VRF fee out of the pot. That takes a malicious DON, which is the same adversary that would
-///   otherwise brick it outright.
-/// • A name whose supported runway elapses makes its DAO position prunable by anyone; a boosted
-///   winner in that state must re-`support` before claiming.
-/// • Naming needs an active `roll.wei` held here. Without one, draws and payouts are unchanged and
-///   only the namespace stops growing. Keeping it renewed is left outside this contract because
-///   `NameNFT.renew` is permissionless — anyone may pay the fee for a name they do not own — and
-///   badge holders are motivated to: NameNFT blocks transfers of inactive names, so a lapsed
-///   `roll.wei` freezes every badge under it.
-/// • {draw} is permissionless and pays the VRF fee from the pot. There is no keeper reward, but
-///   every entrant has one waiting for them.
+/// • {resetRequest} departs from Chainlink's rule that any re-request of randomness is incorrect
+///   use. That rule stops results being discarded; nothing can be discarded here, since the reset
+///   only fires when none was delivered. It is kept because an ownerless contract with no
+///   withdrawal would otherwise strand the pot forever on one undelivered request — grindable
+///   beats bricked. Residual: whoever controls fulfilment can withhold, or starve the callback of
+///   gas, to force one fresh draw per {REQUEST_TIMEOUT}, each burning another fee from the pot.
+/// • Weight is snapshotted at {enter}, so it drifts down as runway burns — by one {ROUND_LENGTH}
+///   normally, but a round that keeps reopening carries its tickets, so the real bound is how long
+///   funding takes. A ticket whose name lapses meanwhile keeps its odds and cannot claim if drawn;
+///   the prize rolls over. Nobody profits, it just wastes a round.
+/// • Odds track the *current* fee schedule, which WeiDAO governs: raising a length tier lifts the
+///   odds of everyone holding that length for free. WeiDAO carries the same caveat for votes.
+///   Buying odds stays fairly priced, weight being linear in the fee you would pay today.
+/// • The boost costs only gas, so it confers no edge — it taxes the unengaged rather than
+///   differentiating. That is the safe direction: a scarce boost would advantage whoever held it.
+/// • A DAO position whose supported runway elapses is prunable by anyone, so a boosted winner in
+///   that state must re-`support` before claiming.
+/// • Naming needs an active `roll.wei` held here; without one only the namespace stops. Renewal is
+///   left outside because `NameNFT.renew` is permissionless and badge holders are motivated —
+///   NameNFT blocks transfers of inactive names, so a lapsed parent freezes every badge under it.
+/// • {draw} is permissionless and pays the VRF fee from the pot. No keeper reward, but every
+///   entrant has one waiting for them.
 contract WeiRoll {
-    error TooSoon();
-    error NotRunning();
     error NotLive();
+    error TooSoon();
     error NotOwner();
     error NoRequest();
     error NotWinner();
     error NotBacking();
+    error NotRunning();
     error DrawPending();
+    error AlreadyNamed();
     error Unauthorized();
     error AlreadyEntered();
-    error AlreadyNamed();
     error WeightTooLarge();
-    error ClaimWindowOver();
     error ClaimWindowOpen();
+    error ClaimWindowOver();
 
     event Entered(
         uint256 indexed round,
@@ -191,9 +176,8 @@ contract WeiRoll {
     uint256 public constant BOOST_BPS = 10_000;
 
     /// @notice After this long with no VRF callback, anyone may clear the request and redraw.
-    /// @dev Also the grinding period — see the re-request caveat. Honest fulfilment takes about a
-    ///      minute, so this is generous for liveness while keeping forced re-rolls to one per
-    ///      three days, each burning another VRF fee from the pot.
+    /// @dev Also the grinding period (see caveats). Honest fulfilment takes about a minute, so
+    ///      this is generous for liveness while keeping forced re-rolls slow and costly.
     uint256 public constant REQUEST_TIMEOUT = 3 days;
 
     /// @notice `namehash("roll.wei")` — the parent every trophy is minted under.
@@ -202,11 +186,10 @@ contract WeiRoll {
 
     uint32 internal constant CALLBACK_GAS = 200_000;
 
-    /// @dev Blocks the VRF node waits before deriving the seed from the request block. Chainlink's
-    ///      floor is 3 and it advises raising it with the value at stake, because a reorg that
-    ///      moves the request into a different block re-rolls the result. Two epochs is Ethereum's
-    ///      finality bound, so past it no reorg can change the seed at all. It costs about thirteen
-    ///      minutes on a thirty-day round and nothing in fees — confirmations are not priced.
+    /// @dev Blocks the node waits before deriving the seed from the request block. Chainlink's
+    ///      floor is 3, raised with the value at stake, because a reorg that moves the request to
+    ///      another block re-rolls the result. Two epochs is finality, past which no reorg can:
+    ///      ~13 minutes on a 30-day round, and free — confirmations are not priced.
     uint16 internal constant CONFIRMATIONS = 64;
 
     /// @dev `VRFV2PlusClient._argsToBytes(ExtraArgsV1({nativePayment: true}))`: the tag
@@ -222,6 +205,46 @@ contract WeiRoll {
     /*//////////////////////////////////////////////////////////////
                                  STORAGE
     //////////////////////////////////////////////////////////////*/
+
+    /// @notice Where the contract is right now. `Idle` waits on funding, `Open` accepts entries,
+    ///         `Ready` means {draw} is callable, `Drawing` means a seed is in flight.
+    enum Phase {
+        Idle,
+        Open,
+        Ready,
+        Drawing
+    }
+
+    /// @dev Everything a frontend needs for its main screen, in one call.
+    struct State {
+        Phase phase;
+        uint256 round;
+        uint256 roundEnd;
+        uint256 pot;
+        uint256 reserved;
+        uint256 tickets;
+        uint256 totalWeight;
+        uint256 requestId;
+        uint256 resetAt;
+        uint256 drawPrice;
+        bool drawSettles;
+        bool naming;
+    }
+
+    /// @dev Everything a frontend needs about one round. `resolved` covers both a claim and a
+    ///      forfeit — the `Claimed` and `RolledOver` events tell those apart.
+    struct Round {
+        uint256 tickets;
+        uint256 totalWeight;
+        uint256 winner;
+        uint256 boostPid;
+        uint256 prize;
+        uint256 claimBy;
+        uint256 roundName;
+        uint256 trophy;
+        bool settled;
+        bool resolved;
+    }
 
     /// @dev One entry. `cum` is the running weight total through this ticket, so the winner is the
     ///      first ticket whose `cum` exceeds a uniform draw over the round's total — a binary
@@ -249,8 +272,9 @@ contract WeiRoll {
 
     mapping(uint256 => Ticket[]) internal _tickets;
 
-    /// @notice Whether a name already holds a ticket in a round.
-    mapping(uint256 => mapping(uint256 => bool)) public entered;
+    /// @notice A name's ticket index in a round, plus one (0 = not entered). Doubles as the
+    ///         one-entry-per-round guard and as an O(1) handle for {weightIn}.
+    mapping(uint256 => mapping(uint256 => uint256)) public ticketOf;
 
     /// @notice Winning tokenId of a settled round (0 = not settled).
     mapping(uint256 => uint256) public winnerOf;
@@ -267,12 +291,10 @@ contract WeiRoll {
     /// @notice `<label>.<r>.roll.wei`, the winner's badge for a round (0 = never named).
     mapping(uint256 => uint256) public trophyOf;
 
-    /// @dev Send ETH with the deploy to open the first round immediately, and pre-approve this
-    ///      (deterministic, e.g. CREATE3) address for `roll.wei` to hand the namespace over in the
-    ///      same transaction. Both are optional and everything here is best-effort: with no
-    ///      approval the deploy still succeeds and the name can be transferred in later, and unlike
-    ///      WeiDAO — which refuses to launch a treasury without its veto backstop — nothing this
-    ///      constructor does is load-bearing. Naming is decoration; the lottery runs without it.
+    /// @dev Send ETH to open the first round on the spot, and pre-approve this (deterministic)
+    ///      address for `roll.wei` to hand the namespace over in the same transaction. Both are
+    ///      optional and everything here is swallowed: unlike WeiDAO, which will not launch a
+    ///      treasury without its veto backstop, nothing here is load-bearing. See ops/ROLL.md.
     constructor(address _nft, address _dao, address _wrapper) payable {
         nft = INameNFT(_nft);
         dao = IWeiDAO(_dao);
@@ -324,21 +346,21 @@ contract WeiRoll {
     ///        0 for none. Passing one the name does not back reverts rather than silently entering
     ///        unboosted. Re-checked in {claim}, so dropping support before claiming forfeits.
     function enter(uint256 tokenId, uint256 boostPid) external {
-        // Entries close at `roundEnd` and {draw} cannot run before it, so the ticket set is always
-        // frozen before a seed is requested. No separate in-flight guard is needed here.
+        // Entries close at `roundEnd` and {draw} cannot run before it, so the ticket set is frozen
+        // before any seed is requested; no separate in-flight guard is needed.
         if (roundEnd == 0) revert NotRunning();
         if (block.timestamp >= roundEnd) revert TooSoon();
         if (nft.ownerOf(tokenId) != msg.sender) revert NotOwner();
 
         uint256 r = round;
-        if (entered[r][tokenId]) revert AlreadyEntered();
+        if (ticketOf[r][tokenId] != 0) revert AlreadyEntered();
 
         uint256 weight = weightOf(tokenId);
         if (weight == 0) revert NotLive();
 
         if (boostPid != 0) {
-            // Requiring the proposal to still be open is what keeps the boost about current
-            // governance: support left on a long-settled proposal cannot buy odds forever.
+            // Requiring the proposal to still be open keeps the boost about current governance:
+            // support left on a long-settled one cannot buy odds forever.
             (,, bool executed, bool vetoed,,,,,) = dao.proposals(boostPid);
             if (executed || vetoed) revert NotLive();
             if (dao.supportOf(boostPid, tokenId) == 0) revert NotBacking();
@@ -349,8 +371,8 @@ contract WeiRoll {
         uint256 cum = (t.length == 0 ? 0 : t[t.length - 1].cum) + weight;
         if (cum > type(uint128).max) revert WeightTooLarge();
 
-        entered[r][tokenId] = true;
         t.push(Ticket({tokenId: tokenId, cum: uint128(cum), boostPid: uint128(boostPid)}));
+        ticketOf[r][tokenId] = t.length; // index + 1
 
         emit Entered(r, tokenId, msg.sender, weight, boostPid);
     }
@@ -396,18 +418,18 @@ contract WeiRoll {
         Ticket[] storage t = _tickets[r];
 
         // Uniform over total weight, then the first ticket whose cumulative weight exceeds it.
-        uint256 target = _randomWords[0] % uint256(t[t.length - 1].cum);
+        uint256 target = _randomWords[0] % t[t.length - 1].cum;
         uint256 lo;
         uint256 hi = t.length - 1;
         while (lo < hi) {
             uint256 mid = (lo + hi) >> 1;
-            if (uint256(t[mid].cum) > target) hi = mid;
+            if (t[mid].cum > target) hi = mid;
             else lo = mid + 1;
         }
 
         uint256 prize = address(this).balance - reserved;
         winnerOf[r] = t[lo].tokenId;
-        winnerBoostOf[r] = uint256(t[lo].boostPid);
+        winnerBoostOf[r] = t[lo].boostPid;
         prizeOf[r] = prize;
         claimBy[r] = block.timestamp + CLAIM_WINDOW;
         reserved += prize;
@@ -453,9 +475,9 @@ contract WeiRoll {
         reserved -= prize;
         emit Claimed(r, tokenId, msg.sender, prize);
 
-        // Best-effort naming, wrapped the way WeiDAO wraps its proposal naming: a self-call so the
-        // mints and the resolver writes fail together and are swallowed together.
-        if (nft.ownerOf(PARENT) == address(this)) {
+        // Best-effort, as WeiDAO wraps its proposal naming: a self-call so the mints and the
+        // resolver writes fail together and are swallowed together.
+        if (_holdsParent()) {
             try this.nameWinner(r, tokenId, msg.sender, prize) {} catch {}
         }
 
@@ -480,15 +502,13 @@ contract WeiRoll {
     /// @notice Record a claimed round in the namespace: mint `<r>.roll.wei` here, point it at the
     ///         winner, and mint `<label>.<r>.roll.wei` to them.
     /// @dev External only so {claim} can wrap it in try/catch; callable by this contract alone.
-    ///      The round name is minted to this contract because NameNFT's resolver writes require
-    ///      ownership and because it must stay owned to parent the badge. Labels come out of
-    ///      NameNFT already normalised, so there is nothing here to validate.
+    ///      The round name is kept here because resolver writes need ownership and because it must
+    ///      stay owned to parent the badge. Labels leave NameNFT normalised, so none is validated.
     ///
-    ///      Giving every round its own parent is what makes repeat wins work: `alice.7.roll.wei`
-    ///      and `alice.12.roll.wei` never collide, so nothing is ever overwritten. That matters —
-    ///      NameNFT lets a parent owner re-register its own subdomains, burning an NFT the holder
-    ///      already has. This contract keeps every round name forever and has no code path that
-    ///      re-enters a settled round, so it never uses that power on a badge it handed out.
+    ///      Per-round parents are what make repeat wins work: `alice.7.roll.wei` and
+    ///      `alice.12.roll.wei` cannot collide, so nothing is overwritten. That matters, because
+    ///      NameNFT lets a parent owner re-register its own subdomains — burning an NFT its holder
+    ///      already has. No path here re-enters a settled round, so that power is never used.
     function nameWinner(uint256 r, uint256 tokenId, address to, uint256 prize) external {
         if (msg.sender != address(this)) revert Unauthorized();
 
@@ -529,6 +549,105 @@ contract WeiRoll {
         );
     }
 
+    /// @notice Where the contract is right now.
+    function phase() public view returns (Phase) {
+        if (requestId != 0) return Phase.Drawing;
+        if (roundEnd == 0) return Phase.Idle;
+        return block.timestamp < roundEnd ? Phase.Open : Phase.Ready;
+    }
+
+    /// @notice What the wrapper would charge for a seed right now, paid from the pot.
+    /// @dev Priced off `tx.gasprice`, which is 0 in an `eth_call` — a frontend quoting this over
+    ///      RPC should send a realistic gas price or treat the result as a floor.
+    function drawPrice() public view returns (uint256) {
+        return wrapper.calculateRequestPriceNative(CALLBACK_GAS, 1);
+    }
+
+    /// @notice Whether {draw} would settle the round rather than just reopen it.
+    function drawSettles() public view returns (bool) {
+        if (phase() != Phase.Ready) return false;
+        return _tickets[round].length > 1 && address(this).balance >= reserved + drawPrice() + 1;
+    }
+
+    /// @notice The whole contract state in one call.
+    function state() external view returns (State memory) {
+        uint256 r = round;
+        return State({
+            phase: phase(),
+            round: r,
+            roundEnd: roundEnd,
+            pot: address(this).balance - reserved,
+            reserved: reserved,
+            tickets: _tickets[r].length,
+            totalWeight: totalWeight(r),
+            requestId: requestId,
+            resetAt: requestId == 0 ? 0 : requestedAt + REQUEST_TIMEOUT,
+            drawPrice: drawPrice(),
+            drawSettles: drawSettles(),
+            naming: _holdsParent()
+        });
+    }
+
+    /// @notice Everything about round `r` in one call. Safe to call for a round that has not run.
+    function roundInfo(uint256 r) external view returns (Round memory) {
+        uint256 winner = winnerOf[r];
+        return Round({
+            tickets: _tickets[r].length,
+            totalWeight: totalWeight(r),
+            winner: winner,
+            boostPid: winnerBoostOf[r],
+            prize: prizeOf[r],
+            claimBy: claimBy[r],
+            roundName: roundName(r),
+            trophy: trophyOf[r],
+            settled: winner != 0,
+            resolved: winner != 0 && prizeOf[r] == 0
+        });
+    }
+
+    /// @notice A name's own ticket weight in round `r` (0 = not entered). Divide by {totalWeight}
+    ///         for its odds.
+    function weightIn(uint256 r, uint256 tokenId) public view returns (uint256) {
+        uint256 i = ticketOf[r][tokenId];
+        if (i == 0) return 0;
+        Ticket[] storage t = _tickets[r];
+        return i == 1 ? t[0].cum : t[i - 1].cum - t[i - 2].cum;
+    }
+
+    /// @notice Whether {claim} would succeed for `who` on round `r` right now.
+    function canClaim(uint256 r, address who) external view returns (bool) {
+        if (prizeOf[r] == 0 || block.timestamp > claimBy[r]) return false;
+
+        uint256 tokenId = winnerOf[r];
+        if (weightOf(tokenId) == 0) return false;
+        try nft.ownerOf(tokenId) returns (address holder) {
+            if (holder != who) return false;
+        } catch {
+            return false;
+        }
+
+        uint256 pid = winnerBoostOf[r];
+        return pid == 0 || dao.supportOf(pid, tokenId) != 0;
+    }
+
+    /// @notice A page of round `r`'s tickets, so a frontend can render the field without one call
+    ///         per entry. Returns fewer than `limit` at the end.
+    function ticketsIn(uint256 r, uint256 offset, uint256 limit)
+        external
+        view
+        returns (Ticket[] memory page)
+    {
+        Ticket[] storage t = _tickets[r];
+        uint256 n = t.length;
+        if (offset >= n) return page;
+        uint256 end = offset + limit;
+        if (end > n) end = n;
+        page = new Ticket[](end - offset);
+        for (uint256 i; i < page.length; ++i) {
+            page[i] = t[offset + i];
+        }
+    }
+
     /// @notice Number of tickets in round `r`.
     function ticketCount(uint256 r) external view returns (uint256) {
         return _tickets[r].length;
@@ -542,7 +661,17 @@ contract WeiRoll {
     /// @notice Total weight entered in round `r` — the denominator of every ticket's odds.
     function totalWeight(uint256 r) public view returns (uint256) {
         Ticket[] storage t = _tickets[r];
-        return t.length == 0 ? 0 : uint256(t[t.length - 1].cum);
+        return t.length == 0 ? 0 : t[t.length - 1].cum;
+    }
+
+    /// @dev Whether `roll.wei` is held here, i.e. whether naming can happen at all. `ownerOf`
+    ///      reverts on an unregistered name, so this cannot be a bare comparison.
+    function _holdsParent() internal view returns (bool) {
+        try nft.ownerOf(PARENT) returns (address holder) {
+            return holder == address(this);
+        } catch {
+            return false;
+        }
     }
 
     /// @notice What a draw settled now would pay out, net of prizes already spoken for.
