@@ -3829,8 +3829,13 @@ async function doFreeMint() {
 }
 
 async function doMintSubdomain() {
-  if (!_signer || !pendingMintInfo) return;
+  // Guard on isProcessing like every other write action. Disabling the button alone
+  // isn't enough: a doCheckName() landing mid-flight repaints #feeDisplay, which is
+  // where this button lives — the new one arrives enabled, so a second click could
+  // submit a second paid mint for a name the first is already buying.
+  if (isProcessing || !_signer || !pendingMintInfo) return;
   const { parentId, subLabel, feeToken, price, symbol, gateToken, minGateBalance } = pendingMintInfo;
+  isProcessing = true;
   const btn = (typeof event !== 'undefined' && event?.target) || null; if (btn) btn.disabled = true;
 
   try {
@@ -3929,6 +3934,7 @@ async function doMintSubdomain() {
   } catch (e) {
     handleError(e);
   } finally {
+    isProcessing = false;
     if (btn) btn.disabled = false;
   }
 }
@@ -4142,32 +4148,46 @@ function doVerify() {
   verifyDebounce = setTimeout(doVerifyNow, 300);
 }
 
-// Parse tokenId from various formats (raw number, hex, OpenSea URL, Etherscan URL)
+// One token-id candidate, or null. A 42-char 0x string is the collection address
+// in every OpenSea/Etherscan NFT URL, never the token id — and a .wei id is a
+// namehash, so a real one below 2^160 is a ~2^-96 event. Skip them.
+function tokenIdCandidate(part) {
+  try {
+    if (/^0x[0-9a-fA-F]+$/.test(part)) return part.length === 42 ? null : BigInt(part);
+    if (/^\d+$/.test(part)) return BigInt(part);
+  } catch {}
+  return null;
+}
+
+// Parse tokenId from various formats (raw number, hex, OpenSea URL, Etherscan URL).
+//
+// Candidates are taken from whole path/query segments, never by scanning the raw
+// string. Scanning used to scrape digits out of the collection address itself:
+// ".../0x0000000000696760E15f265e828DB644A0c242EB/0x4c30…" matched the address with
+// the leading /0x[0-9a-fA-F]+/, skipped it for being 42 chars, then fell through to
+// the digit scraper — which happily matched `0000000000696760` INSIDE that address
+// and returned 81799099653. That's non-null, so the verifier went on to answer about
+// a token the user never asked about. For an anti-spoof tool that's the worst
+// failure it has, so the id can only ever come from a segment that is entirely a
+// number or entirely a 0x-hex word.
 function parseTokenId(input) {
   const s = input.trim();
   if (!s) return null;
 
-  // Try direct BigInt (decimal or hex)
-  try {
-    if (s.startsWith('0x')) return BigInt(s);
-    if (/^\d+$/.test(s)) return BigInt(s);
-  } catch {}
+  // Whole input is already an id (decimal or hex)
+  const direct = tokenIdCandidate(s);
+  if (direct !== null) return direct;
 
-  // Extract from URL - look for last numeric sequence or hex.
-  // Skip 42-char (0x + 40 hex) strings: in OpenSea/Etherscan NFT URLs that's
-  // the collection contract address, not the token id (which is decimal).
-  const hexMatch = s.match(/0x[0-9a-fA-F]+/);
-  if (hexMatch && hexMatch[0].length !== 42) {
-    try { return BigInt(hexMatch[0]); } catch {}
+  // Otherwise pick the largest candidate across the segments. A namehash is ~2^255,
+  // so it dominates anything else a URL carries (chain ids, query params, ports)
+  // without depending on where in the URL the id happens to sit.
+  let best = null;
+  for (const part of s.split(/[^0-9a-zA-Z]+/)) {
+    if (!part) continue;
+    const v = tokenIdCandidate(part);
+    if (v !== null && (best === null || v > best)) best = v;
   }
-
-  // Extract last run of digits (common in OpenSea/Etherscan URLs)
-  const numMatch = s.match(/(\d{10,})(?!.*\d{10,})/); // At least 10 digits to avoid false positives
-  if (numMatch) {
-    try { return BigInt(numMatch[1]); } catch {}
-  }
-
-  return null;
+  return best;
 }
 
 async function doVerifyNow() {
@@ -4280,7 +4300,15 @@ initPending();
 // Supports both top-level (wei.domains/#name) and subdomains (wei.domains/#sub.name)
 function initFromHash() {
   const hash = window.location.hash.slice(1); // Remove #
-  if (!hash) return;
+  if (!hash) {
+    // Back-navigating from #name to the bare URL fires hashchange with an empty
+    // hash. Returning here left the previous name in the box with its result panel
+    // still showing, so Back appeared to do nothing. (updateHash() uses
+    // replaceState, which fires no event, so this only ever runs on real
+    // navigation — and on first load the box is already empty.)
+    if ($('nameInput').value) { $('nameInput').value = ''; checkName(); }
+    return;
+  }
   // decodeURIComponent throws URIError on a malformed escape (a bare '%', a
   // truncated '%E0%A4%A'). This runs at top level BEFORE walletInit(), so an
   // unguarded throw aborted the rest of the inline script: no hashchange
@@ -4337,8 +4365,83 @@ window.addEventListener('hashchange', initFromHash);
 // own errors, so nothing here can affect the rest of the dapp.
 const ROLL_PHASE = ['Idle', 'Open', 'Ready', 'Drawing'];
 let _rollTimer = null;
+const rollIface = new ethers.Interface(LOTTERY_ABI);
+
+// What the user has typed into the entry box, kept outside the DOM because
+// renderRoll() replaces the whole panel — including that input — every refresh.
+let _rollNameDraft = '';
+// A "Connect & enter" click that is waiting on the wallet modal: { name, at }.
+// Time-bounded so a dismissed modal can't turn some later, unrelated connect into
+// a surprise lottery transaction.
+let _rollPendingEnter = null;
+const ROLL_ENTER_RESUME_MS = 120000;
 
 function rollRead(p) { return new ethers.Contract(LOTTERY, LOTTERY_ABI, p); }
+
+function rollPanelOpen() {
+  const p = $('rollPanel');
+  return !!p && p.classList.contains('show');
+}
+
+// Resolve what's in the entry box to a tokenId using the SAME ENSIP-15
+// normalization as the rest of the app. A bare toLowerCase() hashes any name
+// needing NFC normalization (emoji, non-ASCII — which this dapp goes out of its
+// way to support) to the wrong id, so the holder of such a name was told their
+// own name wasn't active and, if they entered anyway, got an opaque revert from
+// nft.ownerOf() inside enter().
+function rollTokenFor(raw) {
+  const name = normalizeFullName(raw || '');
+  if (!name) return null;
+  return { name, id: computeIdFull(name) };
+}
+
+// Gas-aware drawPrice() quote.
+//
+// The seed price is purely linear in tx.gasprice: WeiRoll._quote() ->
+// VRFV2PlusWrapper.calculateRequestPriceNative(200k, 1), measured on mainnet at
+// exactly 373,539 gas-equivalent with NO flat component. tx.gasprice is 0 in a bare
+// eth_call, and the wrapper returns 0 there rather than reverting — so _quote()
+// answers (priced: true, price: 0) and drawPrice() over RPC is ALWAYS exactly 0.
+//
+// That broke both halves of the draw UI. The panel rendered "≈ 0 ETH at current
+// gas", advertising a free draw; and because the `quote > 0` branch could never be
+// taken, the code fell through to a hardcoded 0.01 ETH. Below ~27 gwei that asks
+// the wallet for up to 100x the real fee (refunded, but it is what the user is
+// shown leaving their account); above ~27 gwei 0.01 ETH is less than the price
+// draw() recomputes at the real gas price, and the call reverts Underpaid.
+//
+// So quote with a live gas price, exactly as the contract's own natspec asks. When
+// a node won't run a priced eth_call (publicnode and merkle both refuse one),
+// reconstruct the gas term client-side instead of falling back to a constant.
+const ROLL_DRAW_GAS = 600000n; // covers the measured 373,539 with room for the wrapper to change
+
+async function rollDrawQuote(p) {
+  const data = rollIface.encodeFunctionData('drawPrice');
+  let gasPrice = 0n;
+  try {
+    const fd = await p.getFeeData();
+    gasPrice = fd.maxFeePerGas || fd.gasPrice || 0n;
+  } catch (_) {}
+
+  if (gasPrice > 0n) {
+    try {
+      const res = await p.call({ to: LOTTERY, data, gasPrice });
+      const price = rollIface.decodeFunctionResult('drawPrice', res)[0];
+      if (price > 0n) return { price, gasPrice, priced: true };
+    } catch (_) {}
+  }
+
+  const res = await p.call({ to: LOTTERY, data });
+  const floor = rollIface.decodeFunctionResult('drawPrice', res)[0];
+  return { price: floor + gasPrice * ROLL_DRAW_GAS, gasPrice, priced: false };
+}
+
+// What to actually send with draw(). Excess is refunded on-chain, so err high:
+// under-sending reverts and burns the gas, over-sending costs nothing.
+function rollDrawValue(quote) {
+  const base = quote && quote.price > 0n ? quote.price : 0n;
+  return base > 0n ? (base * 3n) / 2n : ethers.parseEther('0.01');
+}
 
 // Until the contract is deployed (LOTTERY unset) the whole section stays hidden,
 // so nothing about the live dapp changes. Pasting the address is the only switch.
@@ -4400,29 +4503,41 @@ async function refreshRoll() {
   }
   const me = window._connectedAddress || null;
   try {
+    // Every read here fans out. Walking the rounds sequentially meant ~20 chained
+    // round-trips against the shared public FallbackProvider — and because withRpc
+    // retries the whole closure, one flaky response re-ran all of them.
     const data = await withRpc(async (p) => {
       const c = rollRead(p);
       const st = await c.state();
       const round = Number(st.round);
       // Recent settled rounds for the winners list, and claimable rounds for me.
       const from = Math.max(0, round - 6);
-      const infos = [];
-      for (let r = round - 1; r >= from; r--) infos.push([r, await c.roundInfo(r)]);
-      let claimable = [];
-      if (me) {
-        for (let r = round; r >= from; r--) {
-          if (await c.canClaim(r, me)) claimable.push(r);
-        }
-      }
+      const rounds = [];
+      for (let r = round - 1; r >= from; r--) rounds.push(r);
+      const claimRounds = [];
+      for (let r = round; r >= from; r--) claimRounds.push(r);
+
+      const [infoList, claimFlags, draw] = await Promise.all([
+        Promise.all(rounds.map(r => c.roundInfo(r))),
+        me ? Promise.all(claimRounds.map(r => c.canClaim(r, me))) : Promise.resolve([]),
+        // Only worth a quote when a draw is actually on offer.
+        Number(st.phase) === 2 && st.drawSettles
+          ? rollDrawQuote(p).catch(() => null)
+          : Promise.resolve(null)
+      ]);
+
+      const infos = rounds.map((r, i) => [r, infoList[i]]);
+      const claimable = claimRounds.filter((_, i) => claimFlags[i]);
+
       // Resolve winner names via NameNFT.
       const nft = new ethers.Contract(CONTRACT, ABI, p);
       const names = {};
-      for (const [r, info] of infos) {
+      await Promise.all(infos.map(async ([r, info]) => {
         if (info.settled && info.winner !== 0n) {
           try { names[r] = await nft.getFullName(info.winner); } catch (_) { names[r] = null; }
         }
-      }
-      return { st, round, infos, claimable, names };
+      }));
+      return { st, round, infos, claimable, names, draw };
     });
     renderRoll(body, data, me);
   } catch (e) {
@@ -4437,7 +4552,7 @@ function renderRoll(body, d, me) {
   const now = Math.floor(Date.now() / 1000);
   let h = '';
 
-  h += '<div class="roll-phase">' + ROLL_PHASE[phase] + ' · round ' + d.round + '</div>';
+  h += '<div class="roll-phase">' + (ROLL_PHASE[phase] || '—') + ' · round ' + d.round + '</div>';
   h += '<div class="roll-pot">'
      + '<div class="roll-pot-label">Pot</div>'
      + '<div class="roll-pot-amount">' + fmtEth(st.pot) + '</div>'
@@ -4466,15 +4581,22 @@ function renderRoll(body, d, me) {
     h += '<div class="roll-note">No round is running. The next funding of the pot opens one automatically.</div>';
   } else if (phase === 1) {
     h += '<label style="margin-top:4px;">Enter a name you hold</label>'
-       + '<div class="input-wrap"><input type="text" id="rollNameInput" placeholder="yourname" autocomplete="off" autocapitalize="none" spellcheck="false" oninput="rollPreviewWeight()"><span class="suffix">.wei</span></div>'
+       + '<div class="input-wrap"><input type="text" id="rollNameInput" placeholder="yourname" autocomplete="off" autocapitalize="none" spellcheck="false" value="'
+       + escapeHtml(_rollNameDraft) + '" oninput="rollNameChanged()"><span class="suffix">.wei</span></div>'
        + '<div id="rollWeightPreview" style="font-size:12px;opacity:0.6;margin:-4px 0 12px;min-height:16px;"></div>'
-       + '<button onclick="rollEnter()"' + (me ? '' : '') + '>' + (me ? 'Enter round ' + d.round : 'Connect & enter') + '</button>'
+       + '<button onclick="rollEnter()">' + (me ? 'Enter round ' + d.round : 'Connect & enter') + '</button>'
        + '<div class="roll-note">Odds are proportional to what your name costs to hold for its remaining term. One ticket per name. You keep the name; winning pays whoever holds it at claim time.</div>';
   } else if (phase === 2) {
     if (st.drawSettles) {
-      const fee = st.drawPrice > 0n ? fmtEth(st.drawPrice, 5) : '~0.01';
+      // st.drawPrice comes from state(), i.e. an eth_call at tx.gasprice 0, where the
+      // VRF wrapper prices a seed at exactly 0 — so this rendered "≈ 0 ETH at current
+      // gas" while the wallet was asked for a hardcoded 0.01. d.draw is the gas-aware
+      // quote, and it shows the value actually sent; say nothing if we couldn't get one.
+      const fee = d.draw && d.draw.price > 0n
+        ? ' (≈ ' + fmtEth(rollDrawValue(d.draw), 4) + ' ETH at current gas, any excess refunded)'
+        : ' (any excess is refunded)';
       h += '<button onclick="rollDraw()">Draw the winner</button>'
-         + '<div class="roll-note">Entries are closed. Anyone can trigger the draw. You pay the Chainlink VRF fee (≈ ' + fee + ' ETH at current gas; any excess is refunded), the pot stays whole.</div>';
+         + '<div class="roll-note">Entries are closed. Anyone can trigger the draw. You pay the Chainlink VRF fee' + fee + ', the pot stays whole.</div>';
     } else {
       h += '<div class="roll-note">This round had too few entries to draw, so calling draw will simply start a fresh one.</div>'
          + '<button class="secondary" onclick="rollDraw()">Start next round</button>';
@@ -4500,38 +4622,90 @@ function renderRoll(body, d, me) {
   rollPreviewWeight();
 }
 
-async function rollPreviewWeight() {
+// oninput for the entry box: keep the draft (renderRoll repaints the input away)
+// and kick the debounced weight preview.
+function rollNameChanged() {
   const inp = document.getElementById('rollNameInput');
+  _rollNameDraft = inp ? inp.value : '';
+  rollPreviewWeight();
+}
+
+let rollPreviewDebounce = null;
+let rollPreviewVersion = 0;
+
+// Debounced + versioned like every other preview in this file. Firing per keystroke
+// with no stale guard meant a slow answer for "vitali" could land after the one for
+// "vitalik" and tell a holder their own name couldn't enter.
+function rollPreviewWeight() {
   const out = document.getElementById('rollWeightPreview');
-  if (!inp || !out) return;
-  const name = inp.value.trim().toLowerCase().replace(/\.wei$/, '');
-  if (!name) { out.textContent = ''; return; }
-  try {
-    const id = computeIdFull(name);
-    const w = await withRpc((p) => rollRead(p).weightOf(id));
-    out.textContent = w > 0n
-      ? 'This name’s weight: ' + fmtEth(w, 5) + ' (its share of the odds)'
-      : 'Not an active top-level name — subdomains and expired names can’t enter.';
-  } catch (_) { out.textContent = ''; }
+  if (!out) return;
+  const thisVersion = ++rollPreviewVersion;
+  clearTimeout(rollPreviewDebounce);
+
+  const target = rollTokenFor(_rollNameDraft);
+  if (!_rollNameDraft.trim()) { out.textContent = ''; return; }
+  if (!target) { out.textContent = 'Not a valid .wei name.'; return; }
+
+  rollPreviewDebounce = setTimeout(async () => {
+    let text = '';
+    try {
+      const w = await withRpc((p) => rollRead(p).weightOf(target.id));
+      text = w > 0n
+        ? 'This name’s weight: ' + fmtEth(w, 5) + ' (its share of the odds)'
+        : 'Not an active top-level name — subdomains and expired names can’t enter.';
+    } catch (_) { text = ''; }
+    if (thisVersion !== rollPreviewVersion) return; // superseded by a newer keystroke
+    const el = document.getElementById('rollWeightPreview');
+    if (el) el.textContent = text;
+  }, 300);
 }
 
 async function rollEnter() {
   if (isProcessing) return;
-  if (!window._signer) { toggleWallet(); return; }
   const inp = document.getElementById('rollNameInput');
-  const name = inp ? inp.value.trim().toLowerCase().replace(/\.wei$/, '') : '';
-  if (!name) { showStatus('Enter a name you hold', 'error'); return; }
+  if (inp) _rollNameDraft = inp.value;
+
+  // "Connect & enter" has to actually enter. It used to open the wallet modal and
+  // return; connecting then fired onConnect -> refreshRoll -> renderRoll, which
+  // replaced the panel's innerHTML — so the typed name was wiped and the entry the
+  // button promised never happened. Remember the intent and resume after connect.
+  if (!window._signer) {
+    _rollPendingEnter = { name: _rollNameDraft, at: Date.now() };
+    toggleWallet();
+    return;
+  }
+
+  const target = rollTokenFor(_rollNameDraft);
+  if (!target) { showStatus('Enter a name you hold', 'error'); return; }
   isProcessing = true;
   try {
-    const id = computeIdFull(name);
     const c = new ethers.Contract(LOTTERY, LOTTERY_ABI, window._signer);
-    const tx = await wcTransaction(c.enter(id, 0), 'Confirm lottery entry');
-    showStatus('Entering ' + name + '.wei…', '', tx.hash);
+    const tx = await wcTransaction(c.enter(target.id, 0), 'Confirm lottery entry');
+    showStatus('Entering ' + target.name + '.wei…', '', tx.hash);
     await waitForTx(tx);
-    showStatus('Entered ' + name + '.wei into the round', 'success', tx.hash);
+    showStatus('Entered ' + target.name + '.wei into the round', 'success', tx.hash);
+    _rollNameDraft = '';
     refreshRoll();
   } catch (e) { handleError(e); }
   finally { isProcessing = false; }
+}
+
+// Wallet just connected: repaint the panel, then finish a "Connect & enter" the
+// user started before the modal. Time-bounded so a dismissed modal can't make some
+// later, unrelated connect pop a lottery transaction.
+function rollOnConnect() {
+  const resume = _rollPendingEnter;
+  _rollPendingEnter = null;
+  try { if (rollPanelOpen()) refreshRoll(); } catch (_) {}
+  if (resume && Date.now() - resume.at < ROLL_ENTER_RESUME_MS && resume.name.trim()) {
+    _rollNameDraft = resume.name;
+    try { rollEnter(); } catch (_) {}
+  }
+}
+
+function rollOnDisconnect() {
+  _rollPendingEnter = null;
+  try { if (rollPanelOpen()) refreshRoll(); } catch (_) {}
 }
 
 async function rollDraw() {
@@ -4539,11 +4713,14 @@ async function rollDraw() {
   if (!window._signer) { toggleWallet(); return; }
   isProcessing = true;
   try {
-    // drawPrice via eth_call can under-read (it depends on tx gas price), and the
-    // contract refunds any excess, so send a generous buffer over the quote.
-    let quote = 0n;
-    try { quote = await withRpc((p) => rollRead(p).drawPrice()); } catch (_) {}
-    const value = quote > 0n ? (quote * 3n) / 2n : ethers.parseEther('0.01');
+    // Re-quote at click time so the value tracks the gas price the tx is actually
+    // priced at, rather than whatever it was when the panel last refreshed.
+    // rollDrawQuote() prices the eth_call (a bare one always reads 0 — see its
+    // comment); rollDrawValue() adds the buffer. Excess is refunded on-chain,
+    // under-sending reverts Underpaid, so the buffer errs high.
+    let quote = null;
+    try { quote = await withRpc((p) => rollDrawQuote(p)); } catch (_) {}
+    const value = rollDrawValue(quote);
     const c = new ethers.Contract(LOTTERY, LOTTERY_ABI, window._signer);
     const tx = await wcTransaction(c.draw({ value }), 'Confirm draw (VRF fee, excess refunded)');
     showStatus('Requesting the random draw…', '', tx.hash);
@@ -4572,8 +4749,8 @@ async function rollClaim(r) {
 
 walletInit({
   appName: 'zFi Domains',
-  onConnect: [() => { contract = new ethers.Contract(CONTRACT, ABI, _signer); }, initPending, doCheckName, () => { try { refreshRoll(); } catch (_) {} }],
-  onDisconnect: [() => { contract = null; $('commitBtn').disabled = true; }, hideManage, doCheckName, () => { try { refreshRoll(); } catch (_) {} }]
+  onConnect: [() => { contract = new ethers.Contract(CONTRACT, ABI, _signer); }, initPending, doCheckName, rollOnConnect],
+  onDisconnect: [() => { contract = null; $('commitBtn').disabled = true; }, hideManage, doCheckName, rollOnDisconnect]
 });
 
 </script>

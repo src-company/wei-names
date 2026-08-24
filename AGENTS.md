@@ -37,6 +37,13 @@ node server.js                # run locally (GET/HEAD only)
 ```
 
 **Dapp**: no build — open `dapp/index.html` (or serve the folder). It's static.
+```bash
+npm run test:dapp    # wallet connect paths + roll.wei panel / token-id parsing
+```
+Both suites lift functions straight out of the shipping source (`index.html`,
+`wallet.js`) into a `vm` sandbox with a DOM shim — no network, no chain, no deps
+beyond the vendored ethers. Rename a function they cover and they fail loudly
+rather than silently testing nothing.
 
 ## Conventions
 
