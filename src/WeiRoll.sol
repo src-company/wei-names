@@ -107,8 +107,19 @@ interface IVRFV2PlusWrapper {
 /// prize is left unclaimed is simply never named.
 ///
 /// ── Caveats ────────────────────────────────────────────────────────────────────────────
-/// • Weight is snapshotted at {enter} and drifts down over the round as runway burns, bounded by
-///   {ROUND_LENGTH}. Same treatment WeiDAO gives support weight.
+/// • Weight is snapshotted at {enter} and drifts down as runway burns — normally by at most one
+///   {ROUND_LENGTH}, but a round that keeps reopening for want of tickets or funding carries its
+///   tickets with it, so the drift is only bounded by how long funding takes to arrive. A ticket
+///   whose name lapses in the meantime keeps its odds and cannot claim if drawn, and the prize
+///   rolls to the next round. Nobody profits from that, but it wastes a round.
+/// • Odds track the *current* fee schedule, which WeiDAO governs. Raising a length tier lifts the
+///   odds of everyone already holding that length, without their paying anything — the same
+///   caveat WeiDAO carries for voting weight. Buying odds is still priced fairly: weight is
+///   linear in the fee you would pay today, so registering or renewing never beats its cost.
+/// • The boost is available to anyone willing to open or back a proposal and pay the gas, so it
+///   confers no edge over other entrants — it does not differentiate so much as tax the
+///   unengaged. That is the safe failure mode: a boost that were hard to come by would hand an
+///   edge to whoever could get it.
 /// • {resetRequest} is a deliberate departure from Chainlink's guidance that "any re-request or
 ///   cancellation of randomness is an incorrect use of VRF". That rule exists to stop anyone
 ///   discarding a result they dislike; here nothing can be discarded, because the reset only fires

@@ -313,12 +313,17 @@ contract WeiRollTest is Test {
         assertEq(roll.round(), 0);
         assertGt(roll.roundEnd(), block.timestamp, "entries should be open again");
 
+        // tickets ride through the reopen rather than being discarded
+        assertEq(roll.ticketCount(0), 3, "entries should survive a reopen");
+
         // funding it makes the same round drawable
         wrapper.setPrice(0.0001 ether);
         _fund(1 ether);
         vm.warp(roll.roundEnd());
         roll.draw();
         assertGt(roll.requestId(), 0);
+        wrapper.fulfill(address(roll), roll.requestId(), 0);
+        assertEq(roll.winnerOf(0), tAlice, "the carried tickets are the ones drawn");
     }
 
     function testOnlyWrapperCanFulfill() public {
