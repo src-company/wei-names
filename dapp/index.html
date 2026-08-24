@@ -994,7 +994,7 @@ const ABI = [
 // Ownerless stETH lottery for .wei holders. Set LOTTERY to the deployed
 // address to light the panel up; while empty the whole feature stays inert
 // (the toggle shows a "coming soon" note and no chain reads are made).
-const LOTTERY = ''; // TODO: WeiRoll mainnet address once deployed
+const LOTTERY = '0x0000C82AA4D72871568eF3859D2b0E7CF37e45f2'; // WeiRoll (verified)
 const LIDO_STETH = '0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84';
 const LOTTERY_ABI = [
   'function state() view returns ((uint8 phase, uint256 round, uint256 roundEnd, uint256 pot, uint256 reserved, uint256 tickets, uint256 totalWeight, uint256 requestId, uint256 resetAt, uint256 drawPrice, uint256 resets, bool drawSettles, bool naming))',
