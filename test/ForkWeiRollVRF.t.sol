@@ -116,7 +116,7 @@ contract ForkWeiRollVRF is Test {
         assertEq(address(roll).balance, 0);
 
         // roll.wei -> 0.roll.wei -> <winning label>.0.roll.wei, against the real registry.
-        uint256 roundName = roll.roundNameOf(0);
+        uint256 roundName = roll.roundName(0);
         uint256 badge = roll.trophyOf(0);
         assertGt(badge, 0, "no badge minted");
         (string memory label,,,,) = IWNS(NFT).records(winner);

@@ -122,7 +122,7 @@ contract WeiRollTest is Test {
         vm.prank(z);
         nft.transferFrom(z, address(roll), tRoll);
 
-        vm.deal(address(roll), 10 ether);
+        _fund(10 ether);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -278,7 +278,7 @@ contract WeiRollTest is Test {
         uint256 end = roll.roundEnd();
         vm.warp(end);
         vm.expectEmit(true, false, false, true, address(roll));
-        emit WeiRoll.RoundExtended(0, end + roll.ROUND_LENGTH());
+        emit WeiRoll.RoundOpened(0, end + roll.ROUND_LENGTH());
         roll.draw(); // only one ticket: no VRF request, entries reopen
         assertEq(roll.requestId(), 0);
         assertEq(roll.round(), 0);
@@ -300,13 +300,25 @@ contract WeiRollTest is Test {
         roll.resetRequest();
     }
 
-    function testDrawRevertsIfPotCannotCoverTheFee() public {
+    /// @dev Reverting here would wedge the contract: entries are already shut at `roundEnd`, so
+    ///      nobody could enter and nobody could draw until someone funded it.
+    function testAPotTooThinForTheFeeReopensInsteadOfWedging() public {
         _enterAll();
         vm.deal(address(roll), 0);
         wrapper.setPrice(1 ether);
         vm.warp(roll.roundEnd());
-        vm.expectRevert(WeiRoll.EmptyPot.selector);
+
         roll.draw();
+        assertEq(roll.requestId(), 0, "should not have requested a seed");
+        assertEq(roll.round(), 0);
+        assertGt(roll.roundEnd(), block.timestamp, "entries should be open again");
+
+        // funding it makes the same round drawable
+        wrapper.setPrice(0.0001 ether);
+        _fund(1 ether);
+        vm.warp(roll.roundEnd());
+        roll.draw();
+        assertGt(roll.requestId(), 0);
     }
 
     function testOnlyWrapperCanFulfill() public {
@@ -368,7 +380,7 @@ contract WeiRollTest is Test {
                                  PRIZE
     //////////////////////////////////////////////////////////////*/
 
-    function testFullPotIsPaidAndNextRoundOpens() public {
+    function testSettlingPaysTheWholePotAndStopsUntilRefunded() public {
         _enterAll();
         vm.warp(roll.roundEnd());
         uint256 potBefore = roll.pot();
@@ -381,6 +393,7 @@ contract WeiRollTest is Test {
         assertEq(roll.pot(), 0);
         assertEq(roll.round(), 1);
         assertEq(roll.requestId(), 0);
+        assertEq(roll.roundEnd(), 0, "nothing left to run on");
     }
 
     function testWinnerClaims() public {
@@ -630,7 +643,7 @@ contract WeiRollTest is Test {
         // roll.wei -> 0.roll.wei -> ab.0.roll.wei
         uint256 roundName = nft.computeId("0.roll.wei");
         uint256 badge = nft.computeId("ab.0.roll.wei");
-        assertEq(roll.roundNameOf(0), roundName);
+        assertEq(roll.roundName(0), roundName, "roundName must match the minted name");
         assertEq(roll.trophyOf(0), badge);
 
         assertEq(
@@ -680,7 +693,7 @@ contract WeiRollTest is Test {
         vm.prank(alice);
         nft.setText(first, "note", "mine"); // anything she writes must survive the next win
 
-        vm.deal(address(roll), 5 ether); // refill: round 0 paid the whole pot out
+        _fund(5 ether); // refill: round 0 paid the whole pot out
         _enterAll();
         vm.warp(roll.roundEnd());
         roll.draw();
@@ -711,7 +724,7 @@ contract WeiRollTest is Test {
 
         assertEq(nft.ownerOf(tRoll), address(roll), "parent should still be held");
         assertGt(roll.weightOf(tAlice), 0, "players should still be active");
-        vm.deal(address(roll), 10 ether);
+        _fund(10 ether);
 
         vm.prank(alice);
         roll.enter(tAlice, 0);
@@ -742,7 +755,7 @@ contract WeiRollTest is Test {
         vm.prank(alice);
         nft.transferFrom(alice, collector, badge);
 
-        vm.deal(address(roll), 5 ether);
+        _fund(5 ether);
         _enterAll();
         vm.warp(roll.roundEnd());
         roll.draw();
@@ -770,7 +783,7 @@ contract WeiRollTest is Test {
         vm.prank(z2);
         nft.transferFrom(z2, address(roll), tRoll2);
 
-        vm.deal(address(roll), 5 ether);
+        _fund(5 ether);
         uint256 r = roll.round();
         _enterAll();
         vm.warp(roll.roundEnd());
@@ -792,62 +805,107 @@ contract WeiRollTest is Test {
         roll.nameWinner(0, tAlice, alice, 1 ether);
     }
 
+    /// @dev `NameNFT.renew` takes no ownership check, so keeping `roll.wei` alive needs no code
+    ///      here: anyone can pay its fee, and badge holders have reason to.
+    function testAnyoneCanRenewRollWeiDirectly() public {
+        uint256 exp = nft.expiresAt(tRoll);
+        uint256 fee = nft.getFee(4); // "roll"
+        address stranger = makeAddr("stranger");
+        vm.deal(stranger, fee);
+
+        vm.prank(stranger);
+        nft.renew{value: fee}(tRoll);
+
+        assertEq(nft.expiresAt(tRoll), exp + 365 days);
+        assertEq(nft.ownerOf(tRoll), address(roll), "renewing must not move the name");
+        assertEq(roll.pot(), 10 ether, "the pot should not have paid for it");
+    }
+
     /*//////////////////////////////////////////////////////////////
-                            PARENT RENEWAL
+                            FUNDING RUNS IT
     //////////////////////////////////////////////////////////////*/
 
-    function testRenewParentOnlyInsideTheWindow() public {
-        vm.expectRevert(WeiRoll.TooSoon.selector);
-        roll.renewParent();
+    function testNothingRunsUntilItIsFunded() public {
+        WeiRoll fresh = new WeiRoll(address(nft), address(dao), address(wrapper));
+        assertEq(fresh.roundEnd(), 0);
+        assertEq(fresh.pot(), 0);
+
+        vm.prank(alice);
+        vm.expectRevert(WeiRoll.NotRunning.selector);
+        fresh.enter(tAlice, 0);
+
+        vm.expectRevert(WeiRoll.NotRunning.selector);
+        fresh.draw();
     }
 
-    function testRenewParentExtendsAndCannotBeSpammed() public {
-        uint256 exp = nft.expiresAt(tRoll);
-        vm.warp(exp - roll.RENEW_WINDOW() + 1);
+    function testFundingOpensARound() public {
+        WeiRoll fresh = new WeiRoll(address(nft), address(dao), address(wrapper));
+        vm.deal(address(this), 1 ether);
 
-        uint256 potBefore = roll.pot();
-        uint256 fee = nft.getFee(4); // "roll"
-        roll.renewParent();
+        vm.expectEmit(true, false, false, true, address(fresh));
+        emit WeiRoll.RoundOpened(0, block.timestamp + fresh.ROUND_LENGTH());
+        (bool ok,) = address(fresh).call{value: 1 ether}("");
+        assertTrue(ok);
 
-        assertEq(nft.expiresAt(tRoll), exp + 365 days, "not extended");
-        assertEq(roll.pot(), potBefore - fee, "fee not taken from the pot");
-
-        // a year of runway now, so the window is shut again: one renewal per year, max
-        vm.expectRevert(WeiRoll.TooSoon.selector);
-        roll.renewParent();
+        assertEq(fresh.roundEnd(), block.timestamp + fresh.ROUND_LENGTH());
+        vm.prank(alice);
+        fresh.enter(tAlice, 0); // open for business, no admin touched it
     }
 
-    function testRenewParentCannotSpendReservedPrizes() public {
-        _drawWith(0); // whole pot becomes a reserved prize
+    /// @dev Deploying with value is funding too.
+    function testDeployingWithValueOpensTheFirstRound() public {
+        vm.deal(address(this), 1 ether);
+        WeiRoll fresh = new WeiRoll{value: 1 ether}(address(nft), address(dao), address(wrapper));
+        assertEq(fresh.roundEnd(), block.timestamp + fresh.ROUND_LENGTH());
+        assertEq(fresh.pot(), 1 ether);
+    }
+
+    function testTopUpsDoNotRestartTheWindow() public {
+        uint256 end = roll.roundEnd();
+        vm.warp(block.timestamp + 5 days);
+        _fund(1 ether);
+        assertEq(roll.roundEnd(), end, "a top-up must not extend the round");
+        assertEq(roll.pot(), 11 ether);
+    }
+
+    /// @dev The whole cycle with no keeper and no schedule: fund, run, pay out, stop, fund again.
+    function testItStopsWhenDrainedAndRestartsWhenRefunded() public {
+        _drawWith(0);
+        vm.prank(alice);
+        roll.claim(0);
+
         assertEq(roll.pot(), 0);
-        vm.warp(nft.expiresAt(tRoll) - roll.RENEW_WINDOW() + 1);
-        vm.expectRevert(WeiRoll.EmptyPot.selector);
-        roll.renewParent();
+        assertEq(roll.roundEnd(), 0, "should be idle with an empty pot");
+        vm.prank(bob);
+        vm.expectRevert(WeiRoll.NotRunning.selector);
+        roll.enter(tBob, 0);
+
+        _fund(2 ether);
+        assertEq(roll.roundEnd(), block.timestamp + roll.ROUND_LENGTH());
+        assertEq(roll.round(), 1, "should pick up where it left off");
+        vm.prank(bob);
+        roll.enter(tBob, 0);
     }
 
-    /// @dev A renewal spends from the pot without touching `reserved`, so left unguarded it could
-    ///      shrink a pot between the seed request and the callback that hands it to a winner.
-    function testRenewParentIsBarredWhileADrawIsPending() public {
+    /// @dev A forfeited prize is funding like any other: it restarts an idle contract and becomes
+    ///      the next round's prize rather than being stranded.
+    function testAForfeitedPrizeRestartsItAndBecomesTheNextPot() public {
+        uint256 prize0 = _drawWith(0);
+        assertEq(roll.roundEnd(), 0);
+
+        vm.warp(roll.claimBy(0) + 1);
+        roll.rollOver(0);
+        assertEq(roll.pot(), prize0);
+        assertEq(
+            roll.roundEnd(), block.timestamp + roll.ROUND_LENGTH(), "forfeit should restart it"
+        );
+
         _enterAll();
         vm.warp(roll.roundEnd());
         roll.draw();
-        vm.warp(nft.expiresAt(tRoll) - roll.RENEW_WINDOW() + 1);
-
-        vm.expectRevert(WeiRoll.DrawPending.selector);
-        roll.renewParent();
-
-        // the pot the callback settles is exactly the pot the draw committed to
-        uint256 potAtDraw = roll.pot();
+        uint256 fee = wrapper.price();
         wrapper.fulfill(address(roll), roll.requestId(), 0);
-        assertEq(roll.prizeOf(0), potAtDraw);
-    }
-
-    function testRenewParentRequiresHoldingIt() public {
-        vm.prank(address(roll));
-        nft.transferFrom(address(roll), bob, tRoll);
-        vm.warp(nft.expiresAt(tRoll) - roll.RENEW_WINDOW() + 1);
-        vm.expectRevert(WeiRoll.NotParent.selector);
-        roll.renewParent();
+        assertEq(roll.prizeOf(1), prize0 - fee, "forfeited pot did not carry forward");
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -855,15 +913,15 @@ contract WeiRollTest is Test {
     //////////////////////////////////////////////////////////////*/
 
     /// @dev Nothing about a round is one-shot: the counter, the ticket set, the entry flags, the
-    ///      window and the namespace all advance, and the contract keeps drawing as long as it is
-    ///      funded. Three rounds back to back, each with a different winner.
+    ///      window and the namespace all advance, and it keeps drawing as long as it is funded.
+    ///      Three rounds back to back, each with a different winner.
     function testItKeepsRollingRoundAfterRound() public {
         uint256[3] memory expected = [tAlice, tBob, tCarol];
         address[3] memory holders = [alice, bob, carol];
         string[3] memory labels = ["ab", "bobby", "carols"];
 
         for (uint256 r; r < 3; ++r) {
-            vm.deal(address(roll), 3 ether);
+            if (r != 0) _fund(3 ether); // each settle empties the pot
             assertEq(roll.round(), r, "round counter did not advance");
             _enterAll(); // the same three names re-enter every round
             assertEq(roll.ticketCount(r), 3);
@@ -880,9 +938,7 @@ contract WeiRollTest is Test {
             roll.claim(r);
             assertEq(holders[r].balance - before, prize);
 
-            assertEq(
-                nft.getFullName(roll.roundNameOf(r)), string.concat(vm.toString(r), ".roll.wei")
-            );
+            assertEq(nft.getFullName(roll.roundName(r)), string.concat(vm.toString(r), ".roll.wei"));
             assertEq(
                 nft.getFullName(roll.trophyOf(r)),
                 string.concat(labels[r], ".", vm.toString(r), ".roll.wei")
@@ -892,23 +948,6 @@ contract WeiRollTest is Test {
 
         assertEq(roll.round(), 3);
         assertEq(roll.reserved(), 0, "nothing should be left owed");
-    }
-
-    /// @dev An unclaimed prize is not lost to the round that won it: it funds the next one.
-    function testAForfeitedPrizeBecomesTheNextRoundsPot() public {
-        uint256 prize0 = _drawWith(0);
-        vm.warp(roll.claimBy(0) + 1);
-        roll.rollOver(0);
-        assertEq(roll.pot(), prize0);
-
-        // the warp past the claim deadline also closed round 1's window; an empty round reopens it
-        roll.draw();
-        _enterAll();
-        vm.warp(roll.roundEnd());
-        roll.draw();
-        uint256 fee = wrapper.price();
-        wrapper.fulfill(address(roll), roll.requestId(), 0);
-        assertEq(roll.prizeOf(1), prize0 - fee, "forfeited pot did not carry forward");
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -967,6 +1006,13 @@ contract WeiRollTest is Test {
             roll.draw();
         }
         vm.warp(ts);
+    }
+
+    /// @dev Real transfer, not `vm.deal`: funding is what opens a round.
+    function _fund(uint256 amount) internal {
+        vm.deal(address(this), amount);
+        (bool ok,) = address(roll).call{value: amount}("");
+        assertTrue(ok, "funding failed");
     }
 
     function _enterAll() internal {

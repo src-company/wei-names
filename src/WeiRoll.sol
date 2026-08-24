@@ -22,7 +22,6 @@ interface INameNFT {
     function setAddr(uint256 tokenId, address addr) external;
     function setText(uint256 tokenId, string memory key, string memory value) external;
     function transferFrom(address from, address to, uint256 tokenId) external;
-    function renew(uint256 tokenId) external payable;
 }
 
 /// @dev WeiDAO surface used here. `proposals` is the public getter for its Proposal struct.
@@ -62,7 +61,14 @@ interface IVRFV2PlusWrapper {
 /// @title WeiRoll
 /// @notice Ownerless ETH lottery for WNS name holders, drawn with Chainlink VRF.
 /// @dev Funded by WeiDAO sending ETH here. There is no owner and no withdrawal: value leaves only
-///      as a prize to a drawn winner, as the VRF fee, or as a `roll.wei` renewal.
+///      as a prize to a drawn winner or as the VRF fee.
+///
+/// ── Rounds run on funding, not a calendar ──────────────────────────────────────────────
+/// Nothing runs while the pot is empty. ETH arriving opens a {ROUND_LENGTH} entry window; at the
+/// end of it {draw} settles, paying out the entire pot, which leaves nothing to run on until the
+/// next funding opens the next window. A round that cannot settle — under two tickets, or a pot
+/// too thin to cover the VRF fee — reopens rather than reverting, so the contract is never wedged
+/// with entries shut and no way forward. No keeper, no schedule, no admin: fund it and it runs.
 ///
 /// ── Entries ────────────────────────────────────────────────────────────────────────────
 /// WNS token IDs are namehashes and NameNFT is not enumerable, so the set of holders does not
@@ -106,19 +112,21 @@ interface IVRFV2PlusWrapper {
 ///   the permissionless {resetRequest} after {REQUEST_TIMEOUT} and the draw retried.
 /// • A name whose supported runway elapses makes its DAO position prunable by anyone; a boosted
 ///   winner in that state must re-`support` before claiming.
-/// • Naming needs an active `roll.wei` held here. Without one, draws and payouts are unchanged
-///   and only the namespace stops growing. Note NameNFT blocks transfers of inactive names, so a
-///   lapsed `roll.wei` also freezes every badge already handed out — hence {renewParent}.
-/// • {draw} is permissionless and pays the VRF fee from the pot. There is no keeper reward.
+/// • Naming needs an active `roll.wei` held here. Without one, draws and payouts are unchanged and
+///   only the namespace stops growing. Keeping it renewed is left outside this contract because
+///   `NameNFT.renew` is permissionless — anyone may pay the fee for a name they do not own — and
+///   badge holders are motivated to: NameNFT blocks transfers of inactive names, so a lapsed
+///   `roll.wei` freezes every badge under it.
+/// • {draw} is permissionless and pays the VRF fee from the pot. There is no keeper reward, but
+///   every entrant has one waiting for them.
 contract WeiRoll {
     error TooSoon();
-    error EmptyPot();
+    error NotRunning();
     error NotLive();
     error NotOwner();
     error NoRequest();
     error NotWinner();
     error NotBacking();
-    error NotParent();
     error DrawPending();
     error Unauthorized();
     error AlreadyEntered();
@@ -135,7 +143,7 @@ contract WeiRoll {
         uint256 boostPid
     );
     event Drawn(uint256 indexed round, uint256 requestId);
-    event RoundExtended(uint256 indexed round, uint256 roundEnd);
+    event RoundOpened(uint256 indexed round, uint256 roundEnd);
     event Won(uint256 indexed round, uint256 indexed tokenId, uint256 prize);
     event Claimed(
         uint256 indexed round, uint256 indexed tokenId, address indexed to, uint256 prize
@@ -145,7 +153,6 @@ contract WeiRoll {
     event Named(
         uint256 indexed round, uint256 indexed tokenId, uint256 indexed trophyId, address to
     );
-    event ParentRenewed(uint256 expiresAt, uint256 fee);
 
     /*//////////////////////////////////////////////////////////////
                                 CONSTANTS
@@ -165,9 +172,6 @@ contract WeiRoll {
 
     /// @notice After this long with no VRF callback, anyone may clear the request and redraw.
     uint256 public constant REQUEST_TIMEOUT = 1 days;
-
-    /// @notice How close to expiry `roll.wei` must be before {renewParent} will spend from the pot.
-    uint256 public constant RENEW_WINDOW = 90 days;
 
     /// @notice `namehash("roll.wei")` — the parent every trophy is minted under.
     uint256 public constant PARENT =
@@ -231,9 +235,6 @@ contract WeiRoll {
     /// @notice Claim deadline of a settled round.
     mapping(uint256 => uint256) public claimBy;
 
-    /// @notice `<r>.roll.wei`, this round's record (0 = never named).
-    mapping(uint256 => uint256) public roundNameOf;
-
     /// @notice `<label>.<r>.roll.wei`, the winner's badge for a round (0 = never named).
     mapping(uint256 => uint256) public trophyOf;
 
@@ -241,12 +242,23 @@ contract WeiRoll {
         nft = INameNFT(_nft);
         dao = IWeiDAO(_dao);
         wrapper = IVRFV2PlusWrapper(_wrapper);
-        roundEnd = block.timestamp + ROUND_LENGTH;
+        _open();
     }
 
-    /// @notice Fund the pot. WeiDAO does this with a proposal targeting this address.
+    /// @notice Fund the pot, starting a round if none is running. WeiDAO does this with a proposal
+    ///         targeting this address; anyone else may top it up the same way.
     receive() external payable {
         emit Funded(msg.sender, msg.value);
+        _open();
+    }
+
+    /// @dev Open an entry window if the contract holds unspoken-for ETH and is idle. Every path
+    ///      that can leave money in the pot calls this, so funding is the only trigger needed.
+    function _open() internal {
+        if (roundEnd == 0 && address(this).balance > reserved) {
+            roundEnd = block.timestamp + ROUND_LENGTH;
+            emit RoundOpened(round, roundEnd);
+        }
     }
 
     /// @dev So `roll.wei` can be handed over with `safeTransferFrom`.
@@ -269,6 +281,7 @@ contract WeiRoll {
     function enter(uint256 tokenId, uint256 boostPid) external {
         // Entries close at `roundEnd` and {draw} cannot run before it, so the ticket set is always
         // frozen before a seed is requested. No separate in-flight guard is needed here.
+        if (roundEnd == 0) revert NotRunning();
         if (block.timestamp >= roundEnd) revert TooSoon();
         if (nft.ownerOf(tokenId) != msg.sender) revert NotOwner();
 
@@ -302,29 +315,29 @@ contract WeiRoll {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Close the round and ask Chainlink for a seed. Permissionless.
-    /// @dev Under two tickets there is nothing to draw, so entries reopen for another
-    ///      {ROUND_LENGTH} instead of the contract wedging.
+    /// @dev A round that cannot be drawn — under two tickets, or a pot too thin to cover the VRF
+    ///      fee — reopens for another {ROUND_LENGTH} instead of reverting. Reverting here would
+    ///      wedge the contract: entries are already shut, so nobody could act until it was funded.
     function draw() external {
+        if (roundEnd == 0) revert NotRunning();
         if (block.timestamp < roundEnd) revert TooSoon();
         if (requestId != 0) revert DrawPending();
 
         uint256 r = round;
-        if (_tickets[r].length < 2) {
+        uint256 price = wrapper.calculateRequestPriceNative(CALLBACK_GAS, 1);
+
+        // The +1 leaves at least a wei of prize behind, so a settled round is always claimable.
+        if (_tickets[r].length < 2 || address(this).balance < reserved + price + 1) {
             roundEnd = block.timestamp + ROUND_LENGTH;
-            emit RoundExtended(r, roundEnd);
+            emit RoundOpened(r, roundEnd);
             return;
         }
 
-        uint256 price = wrapper.calculateRequestPriceNative(CALLBACK_GAS, 1);
-        // Leave at least a wei of prize behind, so a settled round is always claimable.
-        if (address(this).balance < reserved + price + 1) revert EmptyPot();
-
-        uint256 id = wrapper.requestRandomWordsInNative{value: price}(
+        requestId = wrapper.requestRandomWordsInNative{value: price}(
             CALLBACK_GAS, CONFIRMATIONS, 1, EXTRA_ARGS
         );
-        requestId = id;
         requestedAt = block.timestamp;
-        emit Drawn(r, id);
+        emit Drawn(r, requestId);
     }
 
     /// @notice Chainlink's callback. Picks the winner and opens the next round.
@@ -357,7 +370,8 @@ contract WeiRoll {
         requestId = 0;
         requestedAt = 0;
         round = r + 1;
-        roundEnd = block.timestamp + ROUND_LENGTH;
+        // The prize was the entire pot, so nothing is left to run on: the next funding reopens.
+        roundEnd = 0;
 
         emit Won(r, t[lo].tokenId, prize);
     }
@@ -411,6 +425,7 @@ contract WeiRoll {
         prizeOf[r] = 0;
         reserved -= prize;
         emit RolledOver(r, prize);
+        _open(); // a forfeited prize is funding like any other
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -434,38 +449,19 @@ contract WeiRoll {
 
         string memory roundLabel = LibString.toString(r);
         if (!nft.isAvailable(roundLabel, PARENT)) revert AlreadyNamed();
-        uint256 roundName = nft.registerSubdomain(roundLabel, PARENT);
+        uint256 roundId = nft.registerSubdomain(roundLabel, PARENT);
 
         (string memory label,,,,) = nft.records(tokenId);
-        uint256 badge = nft.registerSubdomain(label, roundName);
+        uint256 badge = nft.registerSubdomain(label, roundId);
         nft.setAddr(badge, to);
         nft.transferFrom(address(this), to, badge);
 
-        nft.setAddr(roundName, to);
-        nft.setText(roundName, "winner", label);
-        nft.setText(roundName, "prize", LibString.toString(prize));
+        nft.setAddr(roundId, to);
+        nft.setText(roundId, "winner", label);
+        nft.setText(roundId, "prize", LibString.toString(prize));
 
-        roundNameOf[r] = roundName;
         trophyOf[r] = badge;
         emit Named(r, tokenId, badge, to);
-    }
-
-    /// @notice Renew `roll.wei` from the pot so the namespace stays live. Permissionless.
-    /// @dev The window bounds this to one year of fees per year: `NameNFT.renew` has no expiry cap,
-    ///      so without it anyone could spend the treasury on a millennium of registration. Barred
-    ///      while a draw is pending, so it cannot shrink a pot that has already been committed to.
-    function renewParent() external {
-        if (requestId != 0) revert DrawPending();
-        if (nft.ownerOf(PARENT) != address(this)) revert NotParent();
-
-        (string memory label,, uint64 exp,,) = nft.records(PARENT);
-        if (exp > block.timestamp + RENEW_WINDOW) revert TooSoon();
-
-        uint256 fee = nft.getFee(bytes(label).length);
-        if (address(this).balance < reserved + fee) revert EmptyPot();
-
-        nft.renew{value: fee}(PARENT);
-        emit ParentRenewed(exp + REGISTRATION_PERIOD, fee);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -478,6 +474,14 @@ contract WeiRoll {
         (string memory label, uint256 parent, uint64 exp,,) = nft.records(tokenId);
         if (parent != 0 || bytes(label).length == 0 || block.timestamp >= exp) return 0;
         return nft.getFee(bytes(label).length) * (exp - block.timestamp) / REGISTRATION_PERIOD;
+    }
+
+    /// @notice The id `<r>.roll.wei` has, whether or not the round was ever named. Naming is
+    ///         best-effort, so read {trophyOf} to tell whether it actually happened.
+    function roundName(uint256 r) public pure returns (uint256) {
+        return uint256(
+            keccak256(abi.encodePacked(bytes32(PARENT), keccak256(bytes(LibString.toString(r)))))
+        );
     }
 
     /// @notice Number of tickets in round `r`.
