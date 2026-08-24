@@ -17,7 +17,11 @@
   transition:opacity 0.15s, color 0.15s;
 }
 .wallet button:hover { opacity:1; background:none; }
-.wallet button.connected { opacity:0.85; font-weight:600; text-transform:none; }
+.wallet button.connected,
+/* Auto-connect paints the last account's cached .wei name before the wallet
+   has actually answered. It needs the same text treatment, but must NOT wear
+   .connected — that class means "there is a signer" and nothing else. */
+.wallet button.reconnecting { opacity:0.85; font-weight:600; text-transform:none; }
 
 /* Wallet modal */
 .wallet-modal-overlay {

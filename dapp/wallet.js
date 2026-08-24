@@ -32,6 +32,20 @@ window.eip6963Providers = new Map();
 window._connectedWalletProvider = null;
 let _walletConnectProvider = null;
 let _isConnecting = false;
+let _silentConnecting = false; // the in-flight attempt is a silent auto-connect
+let _connectSeq = 0;           // invalidates a superseded (abandoned) attempt
+
+// Bound a wallet RPC that has no business hanging. Only ever applied to the
+// SILENT auto-connect path: a user-initiated connect legitimately blocks for as
+// long as the person takes to approve (or to scan a WalletConnect QR), so it
+// must never be raced against a clock.
+function _withTimeout(p, ms, label) {
+  let t;
+  return Promise.race([
+    Promise.resolve(p).finally(() => clearTimeout(t)),
+    new Promise((_, reject) => { t = setTimeout(() => reject(new Error((label || 'wallet') + ' timed out')), ms); })
+  ]);
+}
 let _walletEventHandlers = null;
 let _onConnectCallbacks = [];
 let _onDisconnectCallbacks = [];
@@ -153,12 +167,24 @@ function readWalletConnectRedirect(metadata) {
 
 // --- Connect ---
 async function connectWithWallet(walletKey, options = {}) {
-  if (_isConnecting) return;
+  const silent = !!options.silent;
+  // Never let an in-flight auto-connect block the user. _isConnecting used to be
+  // an unconditional gate, so a silent attempt that hung — WalletConnect's
+  // enable() with no session to restore never settles, and a wallet that stops
+  // answering eth_accounts/eth_chainId does the same — latched it true forever.
+  // From then on every click on a wallet in the modal returned here immediately
+  // and did nothing, while the optimistic label left the corner reading
+  // "connected". Result: connected-looking UI, _connectedAddress still null, and
+  // names the user owns rendering "Connect as owner to manage".
+  // A manual connect now supersedes a silent one; only a manual attempt blocks.
+  if (_isConnecting && (silent || !_silentConnecting)) return;
   // A silent auto-connect must never override a wallet the user connected
   // manually while we were waiting for the saved provider to announce.
-  if (options.silent && _connectedAddress) return;
+  if (silent && _connectedAddress) return;
+  const seq = ++_connectSeq;
+  const superseded = () => seq !== _connectSeq;
   _isConnecting = true;
-  const silent = !!options.silent;
+  _silentConnecting = silent;
   try {
     closeWalletModal();
     let walletProvider;
@@ -177,7 +203,10 @@ async function connectWithWallet(walletKey, options = {}) {
       const _wcEnd = () => { if (_isWalletConnect && _connectedAddress) { try { window.disconnectWallet(); } catch (e) {} } };
       _walletConnectProvider.on('disconnect', _wcEnd);
       _walletConnectProvider.on('session_delete', _wcEnd);
-      await _walletConnectProvider.enable();
+      // enable() never settles when there is no session to restore, so the silent
+      // path must not await it bare (see the _isConnecting note above).
+      if (silent) await _withTimeout(_walletConnectProvider.enable(), 10000, 'walletconnect');
+      else await _walletConnectProvider.enable();
       walletProvider = _walletConnectProvider;
       _isWalletConnect = true;
       _wcDeepLink = readWalletConnectRedirect(_walletConnectProvider.session?.peer?.metadata);
@@ -220,27 +249,36 @@ async function connectWithWallet(walletKey, options = {}) {
         // hasn't already authorized this origin, this returns []; aborting here
         // avoids MetaMask's native "connect to this site?" popup firing on
         // every page load from stale localStorage state.
-        const accounts = await walletProvider.request({ method: 'eth_accounts' }).catch(() => []);
+        const accounts = await _withTimeout(walletProvider.request({ method: 'eth_accounts' }), 8000, 'eth_accounts').catch(() => []);
         if (!accounts || accounts.length === 0) throw new Error('not authorized');
       } else {
         await walletProvider.request({ method: 'eth_requestAccounts' });
       }
     }
-    const chainId = await walletProvider.request({ method: 'eth_chainId' });
+    const chainId = silent
+      ? await _withTimeout(walletProvider.request({ method: 'eth_chainId' }), 8000, 'eth_chainId')
+      : await walletProvider.request({ method: 'eth_chainId' });
     if (BigInt(chainId) !== 1n) {
       // A silent auto-connect must not pop a wallet chain-switch dialog on page
       // load — that defeats the whole point of the no-prompt reconnect. Abort
       // quietly and let the user connect manually (which does prompt).
       if (silent) throw new Error('wrong chain');
       try { await walletProvider.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: '0x1' }] }); const nc = await walletProvider.request({ method: 'eth_chainId' }); if (BigInt(nc) !== 1n) throw new Error('Chain switch failed'); }
-      catch (switchErr) { console.error('Chain switch failed:', switchErr); const wb = document.getElementById('walletBtn'); wb.textContent = 'connect'; wb.classList.remove('connected'); if (typeof showStatus === 'function') showStatus('Please switch to Ethereum mainnet in your wallet.', 'error'); if (walletKey === 'walletconnect') { try { Promise.resolve(_walletConnectProvider?.disconnect()).catch(() => {}); } catch (e) {} _walletConnectProvider = null; } _isWalletConnect = false; _wcDeepLink = null; return; }
+      catch (switchErr) { console.error('Chain switch failed:', switchErr); const wb = document.getElementById('walletBtn'); wb.textContent = 'connect'; wb.classList.remove('connected'); wb.classList.remove('reconnecting'); if (typeof showStatus === 'function') showStatus('Please switch to Ethereum mainnet in your wallet.', 'error'); if (walletKey === 'walletconnect') { try { Promise.resolve(_walletConnectProvider?.disconnect()).catch(() => {}); } catch (e) {} _walletConnectProvider = null; } _isWalletConnect = false; _wcDeepLink = null; return; }
     }
-    _walletProvider = new ethers.BrowserProvider(walletProvider);
-    _signer = await _walletProvider.getSigner();
-    _connectedAddress = await _signer.getAddress();
+    const bp = new ethers.BrowserProvider(walletProvider);
+    const sg = silent ? await _withTimeout(bp.getSigner(), 8000, 'getSigner') : await bp.getSigner();
+    const addr = silent ? await _withTimeout(sg.getAddress(), 8000, 'getAddress') : await sg.getAddress();
+    // A manual connect started while this silent one was still resolving owns the
+    // wallet state now — drop this result rather than overwriting theirs.
+    if (superseded()) return;
+    _walletProvider = bp;
+    _signer = sg;
+    _connectedAddress = addr;
     const oldWP = _connectedWalletProvider;
     _connectedWalletProvider = walletProvider;
     setWalletLabel(_connectedAddress);
+    document.getElementById('walletBtn').classList.remove('reconnecting');
     document.getElementById('walletBtn').classList.add('connected');
     resolveWeiName(_connectedAddress);
     updateWcBanner();
@@ -315,14 +353,21 @@ async function connectWithWallet(walletKey, options = {}) {
     else console.error('Wallet connect error:', error);
     // Reset the button fully (an auto-connect may have optimistically shown the
     // last account's cached .wei name + connected styling before failing).
-    if (!_connectedAddress) {
+    // Don't reset the button on behalf of a superseded silent attempt — the
+    // manual connect that replaced it may already have painted a live wallet.
+    if (!superseded() && !_connectedAddress) {
       const wb = document.getElementById('walletBtn');
       wb.textContent = 'connect';
       wb.classList.remove('connected');
+      wb.classList.remove('reconnecting');
     }
     if (silent) {
       // Auto-connect failed silently — clean up WC provider if applicable
       if (_walletConnectProvider) { try { Promise.resolve(_walletConnectProvider.disconnect()).catch(() => {}); } catch (_) {} _walletConnectProvider = null; }
+      // A WC auto-connect sets _isWalletConnect before enable() resolves; leaving
+      // it true after a failed/timed-out restore makes wcTransaction() deep-link
+      // into a wallet app that was never connected.
+      if (!_connectedAddress) { _isWalletConnect = false; _wcDeepLink = null; updateWcBanner(); }
       // Only clear saved wallet for permanent failures (wallet not found),
       // not transient ones (provider not ready, RPC timeout)
       const errMsg = error?.message || '';
@@ -337,7 +382,11 @@ async function connectWithWallet(walletKey, options = {}) {
         showStatus('Wallet connection failed. Please try again.', 'error');
       }
     }
-  } finally { _isConnecting = false; }
+  } finally {
+    // Only the newest attempt owns the flag; a superseded silent one must not
+    // clear it out from under the manual connect that replaced it.
+    if (!superseded()) { _isConnecting = false; _silentConnecting = false; }
+  }
 }
 
 window.disconnectWallet = function() {
@@ -347,6 +396,7 @@ window.disconnectWallet = function() {
   _walletProvider = null; _signer = null; _connectedAddress = null; _connectedWalletProvider = null; _isWalletConnect = false; _wcDeepLink = null; _walletSendCalls = false;
   document.getElementById('walletBtn').textContent = 'connect';
   document.getElementById('walletBtn').classList.remove('connected');
+  document.getElementById('walletBtn').classList.remove('reconnecting');
   updateWcBanner();
   closeWalletModal();
   try { localStorage.removeItem('zfi_wallet'); localStorage.removeItem('zfi_wallet_name'); } catch (e) {}
@@ -465,7 +515,7 @@ async function tryAutoConnect() {
     let last = null; try { last = localStorage.getItem('wns_last'); } catch (_) {}
     const cached = last && _cachedWeiName(last);
     btn.textContent = cached || '...';
-    if (cached) btn.classList.add('connected');
+    if (cached) btn.classList.add('reconnecting');
   }
   setTimeout(async () => {
     try {
@@ -497,7 +547,7 @@ async function tryAutoConnect() {
       // provider) skips its own reset. A button that claims to be connected while
       // _connectedAddress is null makes the whole app look broken: names the user
       // owns render "Connect as owner to manage" with no way to tell why.
-      if (btn && !_connectedAddress) { btn.textContent = 'connect'; btn.classList.remove('connected'); }
+      if (btn && !_connectedAddress && !_isConnecting) { btn.textContent = 'connect'; btn.classList.remove('connected'); btn.classList.remove('reconnecting'); }
     }
   }, 50);
 }
