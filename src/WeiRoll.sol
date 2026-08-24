@@ -2,6 +2,7 @@
 pragma solidity ^0.8.30;
 
 import {LibString} from "solady/utils/LibString.sol";
+import {ReentrancyGuard} from "soledge/utils/ReentrancyGuard.sol";
 
 /// @dev NameNFT surface used here. `records` is the public getter for its NameRecord struct.
 interface INameNFT {
@@ -97,9 +98,11 @@ interface IVRFV2PlusWrapper {
 /// would instead put odds on sale at the 0.001 ETH default fee.
 ///
 /// ── Winners hold names, not addresses ──────────────────────────────────────────────────
-/// A draw records a tokenId, so {claim} pays whoever holds that name while it is still active, and
-/// selling or lapsing forfeits. NameNFT's 90-day grace exceeds {CLAIM_WINDOW}, so a name lapsing
-/// mid-window cannot be re-registered in time to claim off its old holder.
+/// A draw records a tokenId, so {claim} pays whoever *holds* that name — nothing more. Selling it
+/// forfeits to the buyer, by design. Letting it lapse does not: NameNFT freezes an inactive name's
+/// transfers, so a winner whose name drifts into grace still holds it and still claims, and its
+/// 90-day grace exceeds {CLAIM_WINDOW}, so no one can re-register it inside the window to claim in
+/// their place. Holding is the whole test.
 ///
 /// ── Rounds are names ───────────────────────────────────────────────────────────────────
 /// While this contract holds `roll.wei`, claiming round 7 mints `7.roll.wei` here and the winner's
@@ -115,13 +118,17 @@ interface IVRFV2PlusWrapper {
 ///   odds of everyone already holding that length. WeiDAO carries the same caveat for votes.
 /// • The boost costs only gas, so it confers no edge — it taxes the unengaged rather than
 ///   differentiating. A scarce boost would be the dangerous direction.
-/// • Lido is a dependency this contract cannot be rescued from, and the prize is stETH rather than
-///   ETH: it traded near 0.94 in June 2022, so a prize can lose ETH value between draw and claim.
+/// • The prize is stETH, not ETH: it traded near 0.94 in June 2022, so a prize can lose ETH value
+///   between draw and claim. Denominating in shares at least keeps it earning while it waits.
+/// • Two hardcoded dependencies could strand the pot if permanently deprecated. For the VRF
+///   wrapper, {rescue} is the backstop: a year with no draw returns the unreserved pot to WeiDAO.
+///   For Lido there is no backstop — if `transferShares` ever permanently fails, prizes cannot be
+///   paid and the pot cannot be swept. That half is an accepted, unrescuable risk.
 /// • Naming needs an active `roll.wei` held here; without one only the namespace stops. Renewal is
 ///   left outside: `NameNFT.renew` is permissionless, and a lapsed parent freezes every badge
 ///   under it, so holders are motivated.
 /// • Weight is snapshotted at {enter}, drifting down over at most one {ROUND_LENGTH}.
-contract WeiRoll {
+contract WeiRoll is ReentrancyGuard {
     error NotLive();
     error TooSoon();
     error NoConfig();
@@ -138,6 +145,7 @@ contract WeiRoll {
     error WeightTooLarge();
     error ClaimWindowOpen();
     error ClaimWindowOver();
+    error NotStuck();
 
     event Entered(
         uint256 indexed round,
@@ -149,7 +157,7 @@ contract WeiRoll {
     event Drawn(uint256 indexed round, uint256 requestId);
     event RequestReset(uint256 indexed round, uint256 requestId, uint256 resets);
     event RoundOpened(uint256 indexed round, uint256 roundEnd);
-    event Won(uint256 indexed round, uint256 indexed tokenId, uint256 prize);
+    event Won(uint256 indexed round, uint256 indexed tokenId, uint256 shares);
     event Claimed(
         uint256 indexed round, uint256 indexed tokenId, address indexed to, uint256 prize
     );
@@ -158,6 +166,7 @@ contract WeiRoll {
     event Named(
         uint256 indexed round, uint256 indexed tokenId, uint256 indexed trophyId, address to
     );
+    event Rescued(uint256 shares);
 
     /*//////////////////////////////////////////////////////////////
                                 CONSTANTS
@@ -169,7 +178,11 @@ contract WeiRoll {
     uint256 public constant ROUND_LENGTH = 30 days;
 
     /// @notice How long a winner has to claim before the prize rolls into the next round.
-    /// @dev Must stay under NameNFT's 90-day grace period. See "Winners hold names, not addresses".
+    /// @dev INVARIANT: must stay below NameNFT's 90-day GRACE_PERIOD. A name active at entry cannot
+    ///      be re-registered until `expiresAt + 90d > entry + 90d > claimEnd`, so no stranger can
+    ///      ever take a winning name inside its claim window. Raising this past 90d would break that
+    ///      and reopen a theft-by-re-registration window. Not machine-checkable here — NameNFT does
+    ///      not expose the constant — so it is enforced by this note and the fork test.
     uint256 public constant CLAIM_WINDOW = 30 days;
 
     /// @notice Extra weight for a ticket backing an open proposal, in basis points.
@@ -179,6 +192,10 @@ contract WeiRoll {
     /// @dev Also the grinding period (see caveats). Honest fulfilment takes about a minute, so
     ///      this is generous for liveness while keeping forced re-rolls slow and costly.
     uint256 public constant REQUEST_TIMEOUT = 3 days;
+
+    /// @notice If no draw has been *requested* for this long, the unreserved pot may be swept back
+    ///         to WeiDAO. The one escape from an otherwise permanent lock — see {rescue}.
+    uint256 public constant RESCUE_TIMEOUT = 365 days;
 
     /// @notice `namehash("roll.wei")` — the parent every trophy is minted under.
     uint256 public constant PARENT =
@@ -239,7 +256,6 @@ contract WeiRoll {
         uint256 tickets;
         uint256 totalWeight;
         uint256 winner;
-        uint256 boostPid;
         uint256 prize;
         uint256 claimBy;
         uint256 roundName;
@@ -270,6 +286,10 @@ contract WeiRoll {
     /// @notice When that request was made, for {resetRequest}.
     uint256 public requestedAt;
 
+    /// @notice When a draw was last successfully *requested* — proof the wrapper is answering.
+    ///         {rescue} unlocks {RESCUE_TIMEOUT} after this. Seeded at deploy.
+    uint256 public lastRequest;
+
     /// @notice Shares spoken for by drawn-but-unclaimed rounds. Never part of a new pot.
     uint256 public reservedShares;
 
@@ -281,9 +301,6 @@ contract WeiRoll {
 
     /// @notice Winning tokenId of a settled round (0 = not settled).
     mapping(uint256 => uint256) public winnerOf;
-
-    /// @notice Proposal the winning ticket bonded to, re-checked at claim (0 = unboosted).
-    mapping(uint256 => uint256) public winnerBoostOf;
 
     /// @notice How many times a round's VRF request was cleared and redrawn. Non-zero means
     ///         fulfilment failed or was withheld — the grinding surface, made visible.
@@ -321,6 +338,8 @@ contract WeiRoll {
             ISTETH(_steth).submit{value: address(this).balance}(address(0));
         }
 
+        lastRequest = block.timestamp;
+
         if (_nft.code.length != 0) {
             try nft.ownerOf(PARENT) returns (address holder) {
                 try nft.transferFrom(holder, address(this), PARENT) {
@@ -350,7 +369,7 @@ contract WeiRoll {
     /// @dev {receive} stakes on arrival, but ETH can still arrive without it — a forced
     ///      `selfdestruct` transfer runs no code. Since the pot is counted in shares, that ETH
     ///      would otherwise be stranded; this turns it into prize money.
-    function stake() external {
+    function stake() external nonReentrant {
         uint256 amount = address(this).balance;
         if (amount == 0) return;
         steth.submit{value: amount}(address(0));
@@ -383,7 +402,7 @@ contract WeiRoll {
     /// @param boostPid An open proposal `tokenId` currently backs, for {BOOST_BPS} extra weight, or
     ///        0 for none. Passing one the name does not back reverts rather than silently entering
     ///        unboosted. Re-checked in {claim}, so dropping support before claiming forfeits.
-    function enter(uint256 tokenId, uint256 boostPid) external {
+    function enter(uint256 tokenId, uint256 boostPid) external nonReentrant {
         // Entries shut at `roundEnd` and {draw} cannot run before it, so the ticket set is frozen
         // before any seed exists; no in-flight guard is needed here.
         if (roundEnd == 0) revert NotRunning();
@@ -429,7 +448,7 @@ contract WeiRoll {
     ///      payer; every entrant has a prize waiting on it. The pot is now entirely prize money.
     ///
     ///      An undrawable round is abandoned for a fresh one rather than reverting; see the header.
-    function draw() external payable {
+    function draw() external payable nonReentrant {
         if (roundEnd == 0) revert NotRunning();
         if (block.timestamp < roundEnd) revert TooSoon();
         if (requestId != 0) revert DrawPending();
@@ -456,6 +475,7 @@ contract WeiRoll {
             CALLBACK_GAS, CONFIRMATIONS, 1, EXTRA_ARGS
         );
         requestedAt = block.timestamp;
+        lastRequest = block.timestamp; // the wrapper answered: the rescue clock resets
         emit Drawn(r, requestId);
 
         // Refunded rather than staked: keeping {draw} independent of Lido means a paused or
@@ -487,7 +507,6 @@ contract WeiRoll {
         // what makes a prize survive a rebase: it keeps earning while it waits to be claimed.
         uint256 shares = steth.sharesOf(address(this)) - reservedShares;
         winnerOf[r] = t[lo].tokenId;
-        winnerBoostOf[r] = t[lo].boostPid;
         prizeSharesOf[r] = shares;
         claimBy[r] = block.timestamp + CLAIM_WINDOW;
         reservedShares += shares;
@@ -498,7 +517,9 @@ contract WeiRoll {
         // The prize was the entire pot, so nothing is left to run on: the next funding reopens.
         roundEnd = 0;
 
-        emit Won(r, t[lo].tokenId, steth.getPooledEthByShares(shares));
+        // Emitted in shares, not stETH: keeps the one gas-capped path off a Lido call. Convert
+        // with {getPooledEthByShares} off-chain; {prizeOf} exposes the stETH figure on demand.
+        emit Won(r, t[lo].tokenId, shares);
     }
 
     /// @notice Clear a request that was never fulfilled, so {draw} can retry. Permissionless.
@@ -517,24 +538,47 @@ contract WeiRoll {
         emit RequestReset(round, id, n);
     }
 
+    /// @notice Sweep the unreserved pot back to WeiDAO if no draw has been requested for
+    ///         {RESCUE_TIMEOUT}. Permissionless. The one escape from an otherwise permanent lock.
+    /// @dev If the VRF wrapper is ever deprecated at its hardcoded address, draws stop and
+    ///      {lastRequest} stops advancing; after a year anyone may return the stranded pot to the
+    ///      DAO that funded it — owned by the same .wei holders — instead of leaving it locked. Only
+    ///      the unreserved pot moves; a settled winner's reserved prize stays claimable while Lido
+    ///      works. Not terminal: fresh funding reopens a round and a recovered wrapper resumes as
+    ///      normal. It cannot fire in ordinary use — any successful draw resets the clock, and a
+    ///      funded round with entrants is always drawable by someone with a prize waiting. If Lido
+    ///      itself is what failed, nothing can move and this cannot help; that half stays a
+    ///      documented, unrescuable risk.
+    function rescue() external nonReentrant {
+        if (block.timestamp < lastRequest + RESCUE_TIMEOUT) revert NotStuck();
+        uint256 shares = steth.sharesOf(address(this)) - reservedShares;
+        if (shares == 0) return;
+        lastRequest = block.timestamp; // restart the clock so fresh funds get a full window
+        steth.transferShares(address(dao), shares);
+        emit Rescued(shares);
+    }
+
     /*//////////////////////////////////////////////////////////////
                                  CLAIM
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Collect the prize for a settled round. The caller must still own the winning name,
     ///         it must still be active, and any boost bonded at entry must still be in place.
-    function claim(uint256 r) external {
+    function claim(uint256 r) external nonReentrant {
         uint256 shares = prizeSharesOf[r];
         if (shares == 0) revert NotWinner();
         if (block.timestamp > claimBy[r]) revert ClaimWindowOver();
 
+        // The only surviving check: you must still hold the winning name. NameNFT freezes an
+        // inactive name's transfers, so a winner whose name lapses into grace still holds it and
+        // can still claim (M-2) — and no one can re-register it inside the window (grace > window),
+        // so ownership cannot move to a stranger. Selling forfeits to the buyer, by design.
+        //
+        // The boost is not re-checked: it weighted the draw, which is already over, so re-checking
+        // could only forfeit a prize already won — through ordinary governance (unsupporting) or a
+        // permissionless prune after a renewal. It buys no integrity (M-1).
         uint256 tokenId = winnerOf[r];
         if (nft.ownerOf(tokenId) != msg.sender) revert NotWinner();
-
-        if (weightOf(tokenId) == 0) revert NotLive();
-
-        uint256 pid = winnerBoostOf[r];
-        if (pid != 0 && dao.supportOf(pid, tokenId) == 0) revert NotBacking();
 
         prizeSharesOf[r] = 0;
         reservedShares -= shares;
@@ -550,7 +594,7 @@ contract WeiRoll {
     }
 
     /// @notice Return an unclaimed prize to the pot once its window closes. Permissionless.
-    function rollOver(uint256 r) external {
+    function rollOver(uint256 r) external nonReentrant {
         uint256 shares = prizeSharesOf[r];
         if (shares == 0) revert NotWinner();
         if (block.timestamp <= claimBy[r]) revert ClaimWindowOpen();
@@ -664,7 +708,6 @@ contract WeiRoll {
             tickets: _tickets[r].length,
             totalWeight: totalWeight(r),
             winner: winner,
-            boostPid: winnerBoostOf[r],
             prize: prizeOf(r),
             claimBy: claimBy[r],
             roundName: roundName(r),
@@ -689,15 +732,11 @@ contract WeiRoll {
         if (prizeSharesOf[r] == 0 || block.timestamp > claimBy[r]) return false;
 
         uint256 tokenId = winnerOf[r];
-        if (weightOf(tokenId) == 0) return false;
         try nft.ownerOf(tokenId) returns (address holder) {
-            if (holder != who) return false;
+            return holder == who;
         } catch {
             return false;
         }
-
-        uint256 pid = winnerBoostOf[r];
-        return pid == 0 || dao.supportOf(pid, tokenId) != 0;
     }
 
     /// @notice A page of round `r`'s tickets, so a frontend can render the field without one call

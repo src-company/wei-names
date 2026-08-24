@@ -758,7 +758,7 @@ roll.wei  →  7.roll.wei  →  alice.7.roll.wei
 
 ### Winners hold names, not addresses
 
-A draw records a **tokenId**. `claim` pays whoever holds that name, while it's still active — selling or lapsing forfeits the prize to the next round. `NameNFT`'s 90-day grace period exceeds the 30-day claim window, so a name that lapses mid-window can't be re-registered by someone else in time to claim off the previous holder.
+A draw records a **tokenId**. `claim` pays whoever *holds* that name — that's the whole test. **Selling** it forfeits to the buyer, by design. **Lapsing** doesn't: `NameNFT` freezes an inactive name's transfers, so a winner whose name drifts into grace still holds it and still claims, and the 90-day grace exceeds the 30-day claim window, so no one can re-register it in time to claim in their place.
 
 ### The DAO boost is a bond, not a snapshot
 
@@ -825,7 +825,7 @@ AI-assisted audits performed on the codebase:
 
 **Zellic V12** reported two findings on SubdomainRegistrar, both self-invalidated: flash mode `transferFrom` does not trigger `onERC721Received` (incorrect premise), and `tx.origin` in constructor is intentional for CREATE2/CREATE3 deployment.
 
-**WeiRoll** has had two AI-assisted review passes and no formal audit. The second raised the NameNFT integration surface as the highest-value place to look, and following that pointer found a real bug: a round that could not settle used to carry its entries forward, so a ticket could outlive the name that bought it. Once that name lapsed past its 90-day grace, anyone could re-register it — returning under the very same tokenId, since IDs are namehashes — and claim on the ticket its previous holder had paid for. The fix was to delete the cause rather than check for it: an unsettleable round is now abandoned and a fresh one opened, so no ticket outlives its round.
+**WeiRoll** has had three AI-assisted review passes ([ops-style writeup](audit/weiroll.md)) and no formal audit. The second raised the NameNFT integration surface as the highest-value place to look, and following that pointer found a real bug: a round that could not settle used to carry its entries forward, so a ticket could outlive the name that bought it. Once that name lapsed past its 90-day grace, anyone could re-register it — returning under the very same tokenId, since IDs are namehashes — and claim on the ticket its previous holder had paid for. The fix was to delete the cause rather than check for it: an unsettleable round is now abandoned and a fresh one opened, so no ticket outlives its round.
 
 That bug was in WeiRoll, not NameNFT — NameNFT behaved as designed. The lesson generalises: NameNFT's own audits do not cover WeiRoll's *assumptions about* it, so each one is pinned by a test — the namehash identity against `computeId`, the `records` decode against `WeiDAO.weightOf`, the epoch bump on re-registration, grace exceeding the claim window, subdomains weighing zero, a parent's power to overwrite its own subdomains, `ownerOf` reverting on unregistered names, permissionless `renew`, and inactive names being untransferable. Its VRF integration is exercised end-to-end against the live mainnet wrapper in [test/ForkWeiRollVRF.t.sol](test/ForkWeiRollVRF.t.sol), which makes a real paid request and settles through the genuine coordinator→wrapper→callback path under the real gas limit. Start the pot small regardless.
 

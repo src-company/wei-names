@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.30;
 
-import {Test} from "@forge/Test.sol";
+import {Test, Vm} from "@forge/Test.sol";
 import {NameNFT} from "../src/NameNFT.sol";
 import {WeiDAO} from "../src/WeiDAO.sol";
 import {WeiRoll} from "../src/WeiRoll.sol";
@@ -587,6 +587,30 @@ contract WeiRollTest is Test {
                                  PRIZE
     //////////////////////////////////////////////////////////////*/
 
+    /// @dev M-3: Won carries shares, not a Lido-converted ETH figure, keeping the gas-capped
+    ///      callback off an avoidable Lido call.
+    function testWonEmitsSharesNotStEth() public {
+        steth.rebase(2 ether); // now 1 share > 1 stETH, so shares and stETH diverge
+        _enterAll();
+        vm.warp(roll.roundEnd());
+        _draw();
+        uint256 id = roll.requestId();
+        vm.recordLogs();
+        wrapper.fulfill(address(roll), id, 0);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bytes32 sig = keccak256("Won(uint256,uint256,uint256)");
+        bool seen;
+        for (uint256 i; i < logs.length; ++i) {
+            if (logs[i].topics[0] == sig) {
+                uint256 emitted = abi.decode(logs[i].data, (uint256));
+                assertEq(emitted, roll.prizeSharesOf(0), "Won should carry shares");
+                assertTrue(emitted != roll.prizeOf(0), "shares differ from stETH after any rebase");
+                seen = true;
+            }
+        }
+        assertTrue(seen, "no Won event");
+    }
+
     function testSettlingPaysTheWholePotAndStopsUntilRefunded() public {
         _enterAll();
         vm.warp(roll.roundEnd());
@@ -647,9 +671,9 @@ contract WeiRollTest is Test {
         assertEq(steth.balanceOf(bob) - before, prize);
     }
 
-    function testLettingTheNameLapseForfeitsThePrize() public {
-        // Advance whole rounds until the next one is the last that ends before alice's name
-        // expires, so the expiry falls strictly inside that round's claim window.
+    /// @dev M-2: a winning name that drifts into grace mid-window is still *held* (NameNFT freezes
+    ///      inactive-name transfers), so the winner still claims. Only selling forfeits.
+    function testAWinnerInGraceCanStillClaim() public {
         uint256 exp = nft.expiresAt(tAlice);
         while (roll.roundEnd() + roll.ROUND_LENGTH() < exp) {
             vm.warp(roll.roundEnd());
@@ -663,21 +687,32 @@ contract WeiRollTest is Test {
         assertEq(roll.winnerOf(r), tAlice);
         assertLt(exp, roll.claimBy(r));
 
+        // Into grace: inactive (weightOf 0) but still owned, and un-re-registerable in the window.
         vm.warp(exp + 1);
-        assertFalse(roll.canClaim(r, alice), "a lapsed winner cannot claim");
+        assertEq(roll.weightOf(tAlice), 0, "name is inactive");
+        assertEq(nft.ownerOf(tAlice), alice, "but still held");
+        assertFalse(nft.isAvailable("ab", 0), "and un-snipable in grace");
+
+        assertTrue(roll.canClaim(r, alice), "a held name in grace can still claim");
+        uint256 prize = roll.prizeOf(r);
+        uint256 before = steth.balanceOf(alice);
         vm.prank(alice);
-        vm.expectRevert(WeiRoll.NotLive.selector);
         roll.claim(r);
+        assertEq(steth.balanceOf(alice) - before, prize, "winner paid despite grace");
+    }
 
-        // Load-bearing: NameNFT's 90-day grace exceeds CLAIM_WINDOW, so nobody can re-register the
-        // lapsed name inside the window and claim the prize out from under the previous holder.
-        vm.warp(roll.claimBy(r));
-        assertFalse(nft.isAvailable("ab", 0), "lapsed winner could be sniped inside the window");
-
-        // and the forfeited prize goes back to the pot for everyone else
-        vm.warp(roll.claimBy(r) + 1);
-        roll.rollOver(r);
-        assertGt(roll.pot(), 0);
+    /// @dev Selling the winning name forfeits to the buyer — holding is the whole test.
+    function testSellingForfeitsToTheBuyerNotTheSeller() public {
+        _drawWith(0); // alice wins
+        vm.prank(alice);
+        nft.transferFrom(alice, bob, tAlice);
+        assertFalse(roll.canClaim(0, alice), "seller cannot claim");
+        assertTrue(roll.canClaim(0, bob), "buyer can");
+        vm.prank(alice);
+        vm.expectRevert(WeiRoll.NotWinner.selector);
+        roll.claim(0);
+        vm.prank(bob);
+        roll.claim(0);
     }
 
     function testUnclaimedPrizeRollsIntoTheNextPot() public {
@@ -750,12 +785,15 @@ contract WeiRollTest is Test {
     }
 
     /// @dev The bond. Boosted odds, support dropped before claiming -> prize is unclaimable.
-    function testDroppingSupportForfeitsTheBoostedPrize() public {
+    /// @dev M-1: the boost weights the draw and nothing after it. Dropping support once entered
+    ///      (ordinary governance) must not forfeit a prize already won.
+    function testDroppingSupportAfterEntryDoesNotForfeit() public {
         uint256 pid = _proposal();
         vm.startPrank(alice);
         dao.support(pid, tAlice);
-        roll.enter(tAlice, pid);
+        roll.enter(tAlice, pid); // 2x weight locked into the ticket
         vm.stopPrank();
+        assertEq(uint256(roll.ticketAt(0, 0).boostPid), pid);
         vm.prank(bob);
         roll.enter(tBob, 0);
 
@@ -765,17 +803,14 @@ contract WeiRollTest is Test {
         assertEq(roll.winnerOf(0), tAlice);
 
         vm.prank(alice);
-        dao.unsupport(pid, tAlice);
+        dao.unsupport(pid, tAlice); // redirect conviction — normal, must not cost the prize
 
+        assertTrue(roll.canClaim(0, alice));
+        uint256 before = steth.balanceOf(alice);
+        uint256 prize = roll.prizeOf(0);
         vm.prank(alice);
-        vm.expectRevert(WeiRoll.NotBacking.selector);
         roll.claim(0);
-
-        // re-backing restores the claim
-        vm.startPrank(alice);
-        dao.support(pid, tAlice);
-        roll.claim(0);
-        vm.stopPrank();
+        assertEq(steth.balanceOf(alice) - before, prize, "boosted winner paid after unsupporting");
     }
 
     function testBoostRejectsAVetoedProposal() public {
@@ -835,7 +870,6 @@ contract WeiRollTest is Test {
 
     function testUnboostedWinnerNeedsNoDAOPosition() public {
         _drawWith(0);
-        assertEq(roll.winnerBoostOf(0), 0);
         vm.prank(alice);
         roll.claim(0); // no DAO interaction required
     }
@@ -1510,7 +1544,8 @@ contract WeiRollTest is Test {
         assertFalse(roll.canClaim(0, alice));
     }
 
-    function testCanClaimTracksTheBoostBond() public {
+    /// @dev M-1: canClaim mirrors claim — it must not gate on a boost that is already spent.
+    function testCanClaimIgnoresBoostAfterEntry() public {
         uint256 pid = _proposal();
         vm.startPrank(alice);
         dao.support(pid, tAlice);
@@ -1525,7 +1560,7 @@ contract WeiRollTest is Test {
         assertTrue(roll.canClaim(0, alice));
         vm.prank(alice);
         dao.unsupport(pid, tAlice);
-        assertFalse(roll.canClaim(0, alice), "bond dropped");
+        assertTrue(roll.canClaim(0, alice), "boost is spent at the draw, not gated at claim");
     }
 
     function testTicketsInPages() public {
@@ -1553,6 +1588,83 @@ contract WeiRollTest is Test {
         assertEq(roll.ticketOf(0, tAlice), 1);
         assertEq(roll.ticketOf(0, tCarol), 3);
         assertEq(roll.ticketAt(0, roll.ticketOf(0, tCarol) - 1).tokenId, tCarol);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                                 RESCUE
+    //////////////////////////////////////////////////////////////*/
+
+    /// @dev H-1: if the VRF wrapper is permanently dead, draws stop and lastRequest freezes; after
+    ///      RESCUE_TIMEOUT anyone returns the stranded pot to WeiDAO rather than lock it forever.
+    function testRescueReturnsAStuckPotToTheDao() public {
+        assertEq(roll.pot(), 10 ether);
+        uint256 daoBefore = steth.balanceOf(address(dao));
+
+        vm.expectRevert(WeiRoll.NotStuck.selector);
+        roll.rescue(); // clock is fresh
+
+        vm.warp(block.timestamp + roll.RESCUE_TIMEOUT());
+        roll.rescue();
+
+        assertEq(roll.pot(), 0, "pot swept");
+        assertEq(steth.balanceOf(address(dao)) - daoBefore, 10 ether, "returned to the funder");
+    }
+
+    /// @dev A successful draw proves the wrapper works and resets the year.
+    function testASuccessfulDrawResetsTheRescueClock() public {
+        vm.warp(block.timestamp + roll.RESCUE_TIMEOUT() - 1 days);
+        _draw(); // the stale initial round is empty -> abandoned, a fresh one opens now
+        uint256 r = roll.round();
+        _enterAll();
+        vm.warp(roll.roundEnd());
+        _draw(); // requests a seed -> lastRequest = now
+        wrapper.fulfill(address(roll), roll.requestId(), 0);
+        vm.prank(alice);
+        roll.claim(r);
+
+        _fund(2 ether);
+        // the earlier near-timeout must not carry over
+        vm.expectRevert(WeiRoll.NotStuck.selector);
+        roll.rescue();
+    }
+
+    /// @dev A settled winner's reserved prize is never swept — only the unreserved pot.
+    function testRescueLeavesReservedPrizesAlone() public {
+        uint256 prize = _drawWith(0); // whole pot reserved to alice
+        assertEq(roll.pot(), 0);
+        _fund(3 ether); // fresh unreserved pot
+
+        uint256 reservedBefore = roll.prizeSharesOf(0);
+        vm.warp(block.timestamp + roll.RESCUE_TIMEOUT());
+        roll.rescue();
+
+        assertEq(roll.pot(), 0, "only the unreserved pot went");
+        assertEq(roll.prizeSharesOf(0), reservedBefore, "alice's reserved prize untouched");
+        assertApproxEqAbs(roll.prizeOf(0), prize, 2);
+
+        // and it can still be rolled back once its (long-passed) window closes
+        roll.rollOver(0);
+        assertGt(roll.pot(), 0, "the reserved prize returns to the pot, not lost to rescue");
+    }
+
+    /// @dev With the whole pot reserved to a winner, rescue finds nothing unreserved and no-ops.
+    function testRescueIsANoOpWhenNothingIsUnreserved() public {
+        _drawWith(0); // entire pot reserved to alice
+        assertEq(roll.pot(), 0);
+        uint256 daoBefore = steth.balanceOf(address(dao));
+        vm.warp(block.timestamp + roll.RESCUE_TIMEOUT());
+        roll.rescue(); // returns without transferring
+        assertEq(steth.balanceOf(address(dao)), daoBefore, "nothing swept");
+        assertGt(roll.prizeSharesOf(0), 0, "reserved prize intact");
+    }
+
+    /// @dev After a rescue the clock restarts, so fresh funding gets a full window before it can go.
+    function testRescueRestartsTheClock() public {
+        vm.warp(block.timestamp + roll.RESCUE_TIMEOUT());
+        roll.rescue();
+        _fund(1 ether);
+        vm.expectRevert(WeiRoll.NotStuck.selector);
+        roll.rescue();
     }
 
     /*//////////////////////////////////////////////////////////////

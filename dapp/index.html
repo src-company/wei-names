@@ -998,7 +998,7 @@ const LOTTERY = ''; // TODO: WeiRoll mainnet address once deployed
 const LIDO_STETH = '0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84';
 const LOTTERY_ABI = [
   'function state() view returns ((uint8 phase, uint256 round, uint256 roundEnd, uint256 pot, uint256 reserved, uint256 tickets, uint256 totalWeight, uint256 requestId, uint256 resetAt, uint256 drawPrice, uint256 resets, bool drawSettles, bool naming))',
-  'function roundInfo(uint256 r) view returns ((uint256 tickets, uint256 totalWeight, uint256 winner, uint256 boostPid, uint256 prize, uint256 claimBy, uint256 roundName, uint256 trophy, uint256 resets, bool settled, bool resolved))',
+  'function roundInfo(uint256 r) view returns ((uint256 tickets, uint256 totalWeight, uint256 winner, uint256 prize, uint256 claimBy, uint256 roundName, uint256 trophy, uint256 resets, bool settled, bool resolved))',
   'function weightOf(uint256 tokenId) view returns (uint256)',
   'function weightIn(uint256 r, uint256 tokenId) view returns (uint256)',
   'function drawPrice() view returns (uint256)',
