@@ -175,6 +175,58 @@ contract WeiRollTest is Test {
         roll.enter(big, 0);
     }
 
+    /// @dev The prize belongs to the registration that bought the ticket. Token IDs are namehashes,
+    ///      so a lapsed name comes back under the same id when someone re-registers it — and a
+    ///      round can stay open long enough for that. Without the epoch snapshot, a sniper could
+    ///      register an expired name and collect on the ticket its previous holder paid for.
+    function testASnipedReRegistrationCannotClaimTheOldTicket() public {
+        _renew(tBob); // a second entrant that outlives alice's name
+
+        vm.prank(alice);
+        roll.enter(tAlice, 0);
+        uint64 epochAtEntry = roll.ticketAt(0, 0).epoch;
+        assertEq(epochAtEntry, 1);
+
+        // One ticket, so every draw reopens the round. Carry it past alice's expiry, the 90-day
+        // grace and the 21-day premium decay, at which point anyone may register "ab" again.
+        uint256 exp = nft.expiresAt(tAlice);
+        _rollRoundsUntil(exp + 90 days + 21 days + 1);
+        assertEq(roll.ticketCount(0), 1, "the stale ticket is still in the round");
+
+        address sniper = makeAddr("sniper");
+        assertEq(_register("ab", sniper), tAlice, "same namehash, new registration");
+        (,,, uint64 epochNow,) = nft.records(tAlice);
+        assertEq(epochNow, 2, "epoch bumped");
+        assertEq(nft.ownerOf(tAlice), sniper);
+
+        vm.prank(bob);
+        roll.enter(tBob, 0); // second ticket so the round can finally settle
+        vm.warp(roll.roundEnd());
+        roll.draw();
+        wrapper.fulfill(address(roll), roll.requestId(), 0); // seed 0 -> the stale ticket
+        assertEq(roll.winnerOf(0), tAlice);
+        assertEq(roll.winnerEpochOf(0), epochAtEntry);
+
+        assertFalse(roll.canClaim(0, sniper), "a re-registration must not inherit the ticket");
+        vm.prank(sniper);
+        vm.expectRevert(WeiRoll.NotLive.selector);
+        roll.claim(0);
+
+        // the prize is not burned, it funds the next round
+        vm.warp(roll.claimBy(0) + 1);
+        roll.rollOver(0);
+        assertGt(roll.pot(), 0);
+    }
+
+    /// @dev `boostPid` is stored narrowed, so the id checked at entry must be the id re-checked at
+    ///      claim. WeiDAO only lets a name back ids <= proposalCount, so this is unreachable in
+    ///      practice — the guard is there so no reviewer has to prove that again.
+    function testABoostPidTooLargeToStoreIsRefused() public {
+        vm.prank(alice);
+        vm.expectRevert(WeiRoll.NotBacking.selector);
+        roll.enter(tAlice, uint256(type(uint64).max) + 1);
+    }
+
     function testOneTicketPerNamePerRound() public {
         vm.startPrank(alice);
         roll.enter(tAlice, 0);
@@ -322,6 +374,29 @@ contract WeiRollTest is Test {
         roll.draw();
         vm.expectRevert(WeiRoll.DrawPending.selector);
         roll.draw();
+    }
+
+    /// @dev The grinding residual is meant to be visible: a round showing resets is a round whose
+    ///      fulfilment failed or was withheld.
+    function testResetsAreCountedAndEmitted() public {
+        _enterAll();
+        vm.warp(roll.roundEnd());
+        roll.draw();
+        uint256 id = roll.requestId();
+        vm.warp(block.timestamp + roll.REQUEST_TIMEOUT());
+
+        vm.expectEmit(true, false, false, true, address(roll));
+        emit WeiRoll.RequestReset(0, id, 1);
+        roll.resetRequest();
+
+        assertEq(roll.resetsOf(0), 1);
+        assertEq(roll.state().resets, 1);
+        assertEq(roll.roundInfo(0).resets, 1);
+
+        roll.draw();
+        vm.warp(block.timestamp + roll.REQUEST_TIMEOUT());
+        roll.resetRequest();
+        assertEq(roll.resetsOf(0), 2, "resets accumulate within a round");
     }
 
     function testResetWithNothingInFlightReverts() public {
@@ -567,7 +642,7 @@ contract WeiRollTest is Test {
         vm.stopPrank();
 
         assertEq(roll.ticketAt(0, 0).cum, roll.weightOf(tAlice) * 2);
-        assertEq(roll.ticketAt(0, 0).boostPid, pid);
+        assertEq(uint256(roll.ticketAt(0, 0).boostPid), pid);
     }
 
     function testCannotClaimBoostWithoutBacking() public {

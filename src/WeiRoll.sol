@@ -117,6 +117,8 @@ interface IVRFV2PlusWrapper {
 ///   Buying odds stays fairly priced, weight being linear in the fee you would pay today.
 /// • The boost costs only gas, so it confers no edge — it taxes the unengaged rather than
 ///   differentiating. That is the safe direction: a scarce boost would advantage whoever held it.
+/// • A prize belongs to the registration that bought the ticket. A lapsed name re-registered by
+///   someone else returns under the same tokenId, so {claim} checks the epoch, not just liveness.
 /// • A DAO position whose supported runway elapses is prunable by anyone, so a boosted winner in
 ///   that state must re-`support` before claiming.
 /// • Naming needs an active `roll.wei` held here; without one only the namespace stops. Renewal is
@@ -148,6 +150,7 @@ contract WeiRoll {
         uint256 boostPid
     );
     event Drawn(uint256 indexed round, uint256 requestId);
+    event RequestReset(uint256 indexed round, uint256 requestId, uint256 resets);
     event RoundOpened(uint256 indexed round, uint256 roundEnd);
     event Won(uint256 indexed round, uint256 indexed tokenId, uint256 prize);
     event Claimed(
@@ -227,6 +230,7 @@ contract WeiRoll {
         uint256 requestId;
         uint256 resetAt;
         uint256 drawPrice;
+        uint256 resets;
         bool drawSettles;
         bool naming;
     }
@@ -242,6 +246,7 @@ contract WeiRoll {
         uint256 claimBy;
         uint256 roundName;
         uint256 trophy;
+        uint256 resets;
         bool settled;
         bool resolved;
     }
@@ -252,7 +257,8 @@ contract WeiRoll {
     struct Ticket {
         uint256 tokenId; //   The namehash, full width.
         uint128 cum; //     ┐ Cumulative weight through this ticket,
-        uint128 boostPid; // ┘ proposal bonded to for the boost (0 = none).
+        uint64 boostPid; //  │ proposal bonded to for the boost (0 = none),
+        uint64 epoch; //    ┘ the name's registration epoch when the ticket was bought.
     }
 
     /// @notice The round now accepting entries.
@@ -281,6 +287,14 @@ contract WeiRoll {
 
     /// @notice Proposal the winning ticket bonded to, re-checked at claim (0 = unboosted).
     mapping(uint256 => uint256) public winnerBoostOf;
+
+    /// @notice The winning name's registration epoch when its ticket was bought. A prize belongs
+    ///         to the registration that entered, not to whoever holds the name later.
+    mapping(uint256 => uint64) public winnerEpochOf;
+
+    /// @notice How many times a round's VRF request was cleared and redrawn. Non-zero means
+    ///         fulfilment failed or was withheld — the grinding surface, made visible.
+    mapping(uint256 => uint256) public resetsOf;
 
     /// @notice Unclaimed prize of a settled round.
     mapping(uint256 => uint256) public prizeOf;
@@ -355,10 +369,14 @@ contract WeiRoll {
         uint256 r = round;
         if (ticketOf[r][tokenId] != 0) revert AlreadyEntered();
 
-        uint256 weight = weightOf(tokenId);
+        (uint256 weight, uint64 epoch) = _snapshot(tokenId);
         if (weight == 0) revert NotLive();
 
         if (boostPid != 0) {
+            // Bounded so the id checked here is the id re-checked at claim, with no silent
+            // truncation between them. WeiDAO only lets a name back ids <= proposalCount, so a
+            // larger one could never have been backed anyway.
+            if (boostPid > type(uint64).max) revert NotBacking();
             // Requiring the proposal to still be open keeps the boost about current governance:
             // support left on a long-settled one cannot buy odds forever.
             (,, bool executed, bool vetoed,,,,,) = dao.proposals(boostPid);
@@ -371,7 +389,9 @@ contract WeiRoll {
         uint256 cum = (t.length == 0 ? 0 : t[t.length - 1].cum) + weight;
         if (cum > type(uint128).max) revert WeightTooLarge();
 
-        t.push(Ticket({tokenId: tokenId, cum: uint128(cum), boostPid: uint128(boostPid)}));
+        t.push(
+            Ticket({tokenId: tokenId, cum: uint128(cum), boostPid: uint64(boostPid), epoch: epoch})
+        );
         ticketOf[r][tokenId] = t.length; // index + 1
 
         emit Entered(r, tokenId, msg.sender, weight, boostPid);
@@ -431,6 +451,7 @@ contract WeiRoll {
         uint256 prize = address(this).balance - reserved;
         winnerOf[r] = t[lo].tokenId;
         winnerBoostOf[r] = t[lo].boostPid;
+        winnerEpochOf[r] = t[lo].epoch;
         prizeOf[r] = prize;
         claimBy[r] = block.timestamp + CLAIM_WINDOW;
         reserved += prize;
@@ -448,10 +469,17 @@ contract WeiRoll {
     /// @dev A late callback for the cleared id is rejected by the id check in
     ///      {rawFulfillRandomWords}, so there is no race with the retry.
     function resetRequest() external {
-        if (requestId == 0) revert NoRequest();
+        uint256 id = requestId;
+        if (id == 0) revert NoRequest();
         if (block.timestamp < requestedAt + REQUEST_TIMEOUT) revert TooSoon();
+
         requestId = 0;
         requestedAt = 0;
+
+        // Counted and emitted so the one residual in the caveats is observable rather than silent:
+        // a round showing resets is a round whose fulfilment failed or was withheld.
+        uint256 n = ++resetsOf[round];
+        emit RequestReset(round, id, n);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -467,7 +495,13 @@ contract WeiRoll {
 
         uint256 tokenId = winnerOf[r];
         if (nft.ownerOf(tokenId) != msg.sender) revert NotWinner();
-        if (weightOf(tokenId) == 0) revert NotLive();
+
+        // Not merely "still alive" but "still the same registration". Token IDs are namehashes, so
+        // a lapsed name that someone re-registers comes back under the very same id — and a round
+        // can stay open long enough for that to happen. Without the epoch check, a sniper could
+        // register an expired name and collect on the ticket its previous holder paid for.
+        (uint256 weight, uint64 epoch) = _snapshot(tokenId);
+        if (weight == 0 || epoch != winnerEpochOf[r]) revert NotLive();
 
         uint256 pid = winnerBoostOf[r];
         if (pid != 0 && dao.supportOf(pid, tokenId) == 0) revert NotBacking();
@@ -536,10 +570,17 @@ contract WeiRoll {
 
     /// @notice A name's ticket weight: WeiDAO's `weightOf`, the current cost to hold it for its
     ///         remaining runway. Active top-level names only; subdomains and expired names are 0.
-    function weightOf(uint256 tokenId) public view returns (uint256) {
-        (string memory label, uint256 parent, uint64 exp,,) = nft.records(tokenId);
-        if (parent != 0 || bytes(label).length == 0 || block.timestamp >= exp) return 0;
-        return nft.getFee(bytes(label).length) * (exp - block.timestamp) / REGISTRATION_PERIOD;
+    function weightOf(uint256 tokenId) public view returns (uint256 weight) {
+        (weight,) = _snapshot(tokenId);
+    }
+
+    /// @dev A name's weight and its registration epoch, from one read. Weight 0 means the name is
+    ///     not an active top-level name; the epoch is then meaningless and returned as 0. A live
+    ///     name's epoch is never 0 — NameNFT starts it at 1 and bumps it on every re-registration.
+    function _snapshot(uint256 tokenId) internal view returns (uint256 weight, uint64 epoch) {
+        (string memory label, uint256 parent, uint64 exp, uint64 ep,) = nft.records(tokenId);
+        if (parent != 0 || bytes(label).length == 0 || block.timestamp >= exp) return (0, 0);
+        return (nft.getFee(bytes(label).length) * (exp - block.timestamp) / REGISTRATION_PERIOD, ep);
     }
 
     /// @notice The id `<r>.roll.wei` has, whether or not the round was ever named. Naming is
@@ -586,6 +627,7 @@ contract WeiRoll {
             requestId: requestId,
             resetAt: requestId == 0 ? 0 : requestedAt + REQUEST_TIMEOUT,
             drawPrice: drawPrice(),
+            resets: resetsOf[r],
             drawSettles: drawSettles(),
             naming: _holdsParent()
         });
@@ -603,6 +645,7 @@ contract WeiRoll {
             claimBy: claimBy[r],
             roundName: roundName(r),
             trophy: trophyOf[r],
+            resets: resetsOf[r],
             settled: winner != 0,
             resolved: winner != 0 && prizeOf[r] == 0
         });
@@ -622,7 +665,8 @@ contract WeiRoll {
         if (prizeOf[r] == 0 || block.timestamp > claimBy[r]) return false;
 
         uint256 tokenId = winnerOf[r];
-        if (weightOf(tokenId) == 0) return false;
+        (uint256 weight, uint64 epoch) = _snapshot(tokenId);
+        if (weight == 0 || epoch != winnerEpochOf[r]) return false;
         try nft.ownerOf(tokenId) returns (address holder) {
             if (holder != who) return false;
         } catch {
