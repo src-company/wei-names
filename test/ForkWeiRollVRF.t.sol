@@ -14,6 +14,8 @@ interface IWNS {
     function ownerOf(uint256) external view returns (address);
     function computeId(string calldata) external pure returns (uint256);
     function transferFrom(address, address, uint256) external;
+    function approve(address, uint256) external;
+    function reverseResolve(address) external view returns (string memory);
     function getFullName(uint256) external view returns (string memory);
     function resolve(uint256) external view returns (address);
     function text(uint256, string calldata) external view returns (string memory);
@@ -142,6 +144,54 @@ contract ForkWeiRollVRF is Test {
         assertEq(IWNS(NFT).ownerOf(badge), holder, "badge not handed to the claimer");
         assertEq(IWNS(NFT).resolve(badge), holder);
         emit log_named_string("badge minted", IWNS(NFT).getFullName(badge));
+    }
+
+    /// @notice Rehearses the launch transaction itself against the live registry: pre-approve the
+    ///         address the deploy will land at, deploy with value, and assert the end state
+    ///         ops/ROLL.md says to check. This is the one step that has to be got right in the
+    ///         correct order — approve *before* the deploy, or the pull silently no-ops.
+    function testDeployRehearsalPullsInRollWeiAndOpensTheFirstRound() public onlyFork {
+        uint256 parent = roll.PARENT(); // hoisted: an inline call would eat the prank
+        address holder = IWNS(NFT).ownerOf(parent);
+
+        address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)));
+        vm.prank(holder);
+        IWNS(NFT).approve(predicted, parent);
+
+        // A deploy address can already hold ETH — this one holds a wei of mainnet dust — and it
+        // counts toward the pot, which is right: it is unspoken-for money like any other.
+        uint256 dust = predicted.balance;
+
+        vm.deal(address(this), 1 ether);
+        WeiRoll fresh = new WeiRoll{value: 0.25 ether}(NFT, DAO, WRAPPER);
+
+        assertEq(address(fresh), predicted, "address prediction drifted");
+        assertEq(IWNS(NFT).ownerOf(parent), address(fresh), "roll.wei was not pulled in");
+        assertEq(IWNS(NFT).reverseResolve(address(fresh)), "roll.wei");
+        assertEq(IWNS(NFT).resolve(parent), address(fresh), "roll.wei should resolve to it");
+        assertEq(fresh.pot(), 0.25 ether + dust);
+        assertEq(fresh.roundEnd(), block.timestamp + fresh.ROUND_LENGTH());
+        assertTrue(fresh.phase() == WeiRoll.Phase.Open, "first round should be open");
+        assertTrue(fresh.state().naming, "namespace should be live from round zero");
+    }
+
+    /// @dev The boring path in ops/ROLL.md §5: no approval, deploy, then hand the name over. Costs
+    ///      only the reverse record, and avoids pre-approving an address that has no code yet.
+    function testDeployRehearsalWithoutPreApproval() public onlyFork {
+        uint256 parent = roll.PARENT();
+        address holder = IWNS(NFT).ownerOf(parent);
+
+        vm.deal(address(this), 1 ether);
+        WeiRoll fresh = new WeiRoll{value: 0.25 ether}(NFT, DAO, WRAPPER);
+        assertGe(fresh.pot(), 0.25 ether);
+        assertEq(IWNS(NFT).ownerOf(parent), holder, "nothing should have been pulled");
+        assertFalse(fresh.state().naming);
+
+        vm.prank(holder);
+        IWNS(NFT).transferFrom(holder, address(fresh), parent);
+
+        assertTrue(fresh.state().naming, "naming live once the name arrives");
+        assertEq(fresh.roundEnd(), block.timestamp + fresh.ROUND_LENGTH());
     }
 
     function _enter(uint256 tokenId) internal {

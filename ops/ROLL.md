@@ -79,6 +79,10 @@ forge create src/WeiRoll.sol:WeiRoll \
 
 (Or the CreateX CREATE3 call with the mined salt and the same args, per [DEPLOY.md](DEPLOY.md).)
 
+> A deploy address may already hold ETH — stray dust is common. WeiRoll counts it toward the pot,
+> which is correct (it is unspoken-for money like any other) and will even open the first round on
+> it alone. Just don't be surprised if `pot()` reads a few wei over what you sent.
+
 Then assert the end state:
 
 ```
