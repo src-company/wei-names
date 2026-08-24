@@ -67,10 +67,11 @@ interface IVRFV2PlusWrapper {
 ///
 /// ── A round ────────────────────────────────────────────────────────────────────────────
 /// Funding opens a {ROUND_LENGTH} entry window; {draw} settles it and pays the whole pot, leaving
-/// nothing to run on until the next funding. A round that cannot settle — under two tickets, too
-/// thin for the VRF fee, or a wrapper that will not quote — is abandoned for a fresh one rather
-/// than reverting: entries are shut by then and no owner exists to unstick it. Abandoning rather
-/// than extending is also what stops a ticket outliving the name that bought it.
+/// nothing to run on until the next funding. Whoever calls {draw} pays the VRF fee out of their own
+/// pocket, so the pot is entirely prize money and the draw's timing is theirs to choose. A round
+/// that cannot settle — under two tickets, or a wrapper that will not quote — is abandoned for a
+/// fresh one rather than reverting: entries are shut by then and no owner exists to unstick it.
+/// Abandoning rather than extending is also what stops a ticket outliving the name that bought it.
 ///
 /// ── Odds ───────────────────────────────────────────────────────────────────────────────
 /// Ticket weight is WeiDAO's `weightOf`: the ETH it would cost today to hold the name for its
@@ -101,12 +102,13 @@ interface IVRFV2PlusWrapper {
 ///   under it, so holders are motivated.
 /// • Weight is snapshotted at {enter}, drifting down over at most one {ROUND_LENGTH}.
 contract WeiRoll {
-    error NoConfig();
     error NotLive();
     error TooSoon();
+    error NoConfig();
     error NotOwner();
     error NoRequest();
     error NotWinner();
+    error Underpaid();
     error NotBacking();
     error NotRunning();
     error DrawPending();
@@ -371,10 +373,15 @@ contract WeiRoll {
                                   DRAW
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Close the round and ask Chainlink for a seed. Permissionless.
-    /// @dev An undrawable round is abandoned for a fresh one rather than reverting; see the
-    ///      contract header.
-    function draw() external {
+    /// @notice Close the round and ask Chainlink for a seed. Permissionless, and the caller pays
+    ///         the VRF fee: send at least {drawPrice}. Anything over stays in the pot.
+    /// @dev The fee used to come out of the pot, which on a small one could burn most of the prize
+    ///      — and made the draw's timing a decision about gas rather than about the round. The
+    ///      caller chooses when to call and therefore what the fee costs, so they are the right
+    ///      payer; every entrant has a prize waiting on it. The pot is now entirely prize money.
+    ///
+    ///      An undrawable round is abandoned for a fresh one rather than reverting; see the header.
+    function draw() external payable {
         if (roundEnd == 0) revert NotRunning();
         if (block.timestamp < roundEnd) revert TooSoon();
         if (requestId != 0) revert DrawPending();
@@ -382,8 +389,9 @@ contract WeiRoll {
         uint256 r = round;
         (bool priced, uint256 price) = _quote();
 
-        // The +1 leaves at least a wei of prize behind, so a settled round is always claimable.
-        if (!priced || _tickets[r].length < 2 || address(this).balance < reserved + price + 1) {
+        // No affordability test any more: a round only opens on a non-empty pot, and nothing
+        // between opening and settling can shrink it, so a settled round is always claimable.
+        if (!priced || _tickets[r].length < 2) {
             // Fresh round, not a carried one: a carried ticket can outlive the name that bought
             // it, and once that name lapses past its grace anyone may re-register it — same
             // tokenId, IDs being namehashes — and inherit the prize. Nothing to re-enter here
@@ -393,6 +401,8 @@ contract WeiRoll {
             emit RoundOpened(r + 1, roundEnd);
             return;
         }
+
+        if (msg.value < price) revert Underpaid();
 
         requestId = wrapper.requestRandomWordsInNative{value: price}(
             CALLBACK_GAS, CONFIRMATIONS, 1, EXTRA_ARGS
@@ -557,19 +567,20 @@ contract WeiRoll {
         return block.timestamp < roundEnd ? Phase.Open : Phase.Ready;
     }
 
-    /// @notice What the wrapper would charge for a seed right now, paid from the pot. 0 if it
-    ///         will not quote one — read {drawSettles} for whether a draw would actually go ahead.
+    /// @notice What the wrapper charges for a seed right now — send at least this with {draw}.
+    ///         0 if it will not quote one; read {drawSettles} for whether a draw would go ahead.
     /// @dev Priced off `tx.gasprice`, which is 0 in an `eth_call` — a frontend quoting this over
     ///      RPC should send a realistic gas price or treat the result as a floor.
     function drawPrice() public view returns (uint256 price) {
         (, price) = _quote();
     }
 
-    /// @notice Whether {draw} would settle the round rather than just reopen it.
+    /// @notice Whether {draw} would settle this round rather than abandon it. Says nothing about
+    ///         the caller: they must still send {drawPrice} with the call.
     function drawSettles() public view returns (bool) {
         if (phase() != Phase.Ready) return false;
-        (bool priced, uint256 price) = _quote();
-        return priced && _tickets[round].length > 1 && address(this).balance >= reserved + price + 1;
+        (bool priced,) = _quote();
+        return priced && _tickets[round].length > 1;
     }
 
     /// @notice The whole contract state in one call.

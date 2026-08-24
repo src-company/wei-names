@@ -87,14 +87,17 @@ contract ForkWeiRollVRF is Test {
 
         uint256 balBefore = address(roll).balance;
         vm.warp(roll.roundEnd());
+        emit log_named_decimal_uint("VRF fee the caller fronts (ETH)", roll.drawPrice(), 18);
 
         // The real call. A wrong selector, a wrong ExtraArgsV1 tag, or a nativePayment mismatch
         // all revert here rather than silently costing a round.
-        roll.draw();
+        vm.deal(address(this), 1 ether);
+        roll.draw{value: roll.drawPrice()}();
 
         uint256 requestId = roll.requestId();
         assertGt(requestId, 0, "wrapper returned no request id");
-        assertLt(address(roll).balance, balBefore, "wrapper was not paid");
+        assertEq(address(roll).balance, balBefore, "the fee must come from the caller, not the pot");
+        emit log_named_uint("live VRF requestId", requestId);
         emit log_named_uint("live VRF requestId", requestId);
         emit log_named_decimal_uint(
             "fee actually paid (ETH)", balBefore - address(roll).balance, 18
@@ -181,7 +184,8 @@ contract ForkWeiRollVRF is Test {
         _enter(idA);
         _enter(idB);
         vm.warp(roll.roundEnd());
-        roll.draw();
+        vm.deal(address(this), 1 ether);
+        roll.draw{value: roll.drawPrice()}();
 
         uint256 requestId = roll.requestId(); // hoisted: an inline call would eat the prank
         uint256[] memory words = new uint256[](1);

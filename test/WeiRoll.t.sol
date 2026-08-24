@@ -237,7 +237,7 @@ contract WeiRollTest is Test {
         vm.expectRevert(WeiRoll.TooSoon.selector);
         roll.enter(tCarol, 0); // closed at roundEnd, before draw() is even callable
 
-        roll.draw();
+        _draw();
         vm.prank(carol);
         vm.expectRevert(WeiRoll.TooSoon.selector);
         roll.enter(tCarol, 0); // and still closed with the request in flight
@@ -294,7 +294,7 @@ contract WeiRollTest is Test {
     function testDrawSendsExactlyTheQuotedPriceInNative() public {
         _enterAll();
         vm.warp(roll.roundEnd());
-        roll.draw();
+        _draw();
         assertEq(wrapper.lastValue(), wrapper.price());
         assertEq(wrapper.lastWords(), 1);
         assertEq(wrapper.lastConfs(), 64, "should wait for finality, not the 3-block floor");
@@ -349,7 +349,7 @@ contract WeiRollTest is Test {
         assertFalse(roll.drawSettles());
         assertFalse(roll.state().drawSettles, "state must not revert either");
 
-        roll.draw();
+        _draw();
         assertEq(roll.requestId(), 0, "must not have requested a seed");
         assertEq(roll.round(), 1, "abandoned, and a fresh round opened");
         assertGt(roll.roundEnd(), block.timestamp);
@@ -358,7 +358,7 @@ contract WeiRollTest is Test {
         vm.clearMockedCalls();
         _enterAll();
         vm.warp(roll.roundEnd());
-        roll.draw();
+        _draw();
         assertGt(roll.requestId(), 0);
         wrapper.fulfill(address(roll), roll.requestId(), 0);
         assertEq(roll.winnerOf(1), tAlice);
@@ -367,7 +367,7 @@ contract WeiRollTest is Test {
     function testCannotDrawTwiceWithARequestInFlight() public {
         _enterAll();
         vm.warp(roll.roundEnd());
-        roll.draw();
+        _draw();
         vm.expectRevert(WeiRoll.DrawPending.selector);
         roll.draw();
     }
@@ -377,7 +377,7 @@ contract WeiRollTest is Test {
     function testResetsAreCountedAndEmitted() public {
         _enterAll();
         vm.warp(roll.roundEnd());
-        roll.draw();
+        _draw();
         uint256 id = roll.requestId();
         vm.warp(block.timestamp + roll.REQUEST_TIMEOUT());
 
@@ -389,7 +389,7 @@ contract WeiRollTest is Test {
         assertEq(roll.state().resets, 1);
         assertEq(roll.roundInfo(0).resets, 1);
 
-        roll.draw();
+        _draw();
         vm.warp(block.timestamp + roll.REQUEST_TIMEOUT());
         roll.resetRequest();
         assertEq(roll.resetsOf(0), 2, "resets accumulate within a round");
@@ -400,35 +400,54 @@ contract WeiRollTest is Test {
         roll.resetRequest();
     }
 
-    /// @dev Reverting here would wedge the contract: entries are already shut at `roundEnd`, so
-    ///      nobody could enter and nobody could draw until someone funded it.
-    function testAPotTooThinForTheFeeReopensInsteadOfWedging() public {
-        _enterAll();
+    /// @dev The fee used to come out of the pot, so a pot thinner than the fee could not be drawn.
+    ///      Now the caller pays it and the whole pot is prize money, however small.
+    function testATinyPotStillDrawsBecauseTheCallerPaysTheFee() public {
         vm.deal(address(roll), 0);
-        wrapper.setPrice(1 ether);
-        vm.warp(roll.roundEnd());
-
-        roll.draw();
-        assertEq(roll.requestId(), 0, "should not have requested a seed");
-        assertGt(roll.roundEnd(), block.timestamp, "entries should be open again");
-        assertEq(roll.round(), 1, "the round was abandoned, not reopened");
-        assertEq(roll.ticketCount(1), 0, "entries do not carry forward");
-
-        // funding it and re-entering makes the next round drawable
-        wrapper.setPrice(0.0001 ether);
-        _fund(1 ether);
+        _fund(1); // one wei of prize
         _enterAll();
         vm.warp(roll.roundEnd());
-        roll.draw();
+
+        assertTrue(roll.drawSettles());
+        _draw();
         assertGt(roll.requestId(), 0);
+
         wrapper.fulfill(address(roll), roll.requestId(), 0);
-        assertEq(roll.winnerOf(1), tAlice);
+        assertEq(roll.prizeOf(0), 1, "the whole pot, fee taken from the caller instead");
+    }
+
+    function testDrawRevertsIfTheCallerUnderpaysTheFee() public {
+        _enterAll();
+        vm.warp(roll.roundEnd());
+        assertGt(roll.drawPrice(), 0);
+
+        uint256 fee = roll.drawPrice(); // hoisted: an inline call would absorb the expectRevert
+        vm.deal(address(this), 1 ether);
+
+        vm.expectRevert(WeiRoll.Underpaid.selector);
+        roll.draw();
+
+        vm.expectRevert(WeiRoll.Underpaid.selector);
+        roll.draw{value: fee - 1}();
+    }
+
+    function testOverpayingTheFeeTipsThePot() public {
+        _enterAll();
+        vm.warp(roll.roundEnd());
+        uint256 potBefore = roll.pot();
+        uint256 fee = roll.drawPrice();
+
+        vm.deal(address(this), fee + 0.5 ether);
+        roll.draw{value: fee + 0.5 ether}();
+
+        wrapper.fulfill(address(roll), roll.requestId(), 0);
+        assertEq(roll.prizeOf(0), potBefore + 0.5 ether, "the excess became prize money");
     }
 
     function testOnlyWrapperCanFulfill() public {
         _enterAll();
         vm.warp(roll.roundEnd());
-        roll.draw();
+        _draw();
         uint256[] memory words = new uint256[](1);
         words[0] = 1;
         vm.expectRevert(WeiRoll.Unauthorized.selector);
@@ -438,12 +457,12 @@ contract WeiRollTest is Test {
     function testStaleFulfillmentIsRejectedAfterReset() public {
         _enterAll();
         vm.warp(roll.roundEnd());
-        roll.draw();
+        _draw();
         uint256 stale = roll.requestId();
 
         vm.warp(block.timestamp + roll.REQUEST_TIMEOUT());
         roll.resetRequest();
-        roll.draw(); // fresh request, new id
+        _draw(); // fresh request, new id
 
         vm.expectRevert(WeiRoll.NoRequest.selector);
         wrapper.fulfill(address(roll), stale, 12345);
@@ -452,7 +471,7 @@ contract WeiRollTest is Test {
     function testResetBeforeTimeoutReverts() public {
         _enterAll();
         vm.warp(roll.roundEnd());
-        roll.draw();
+        _draw();
         vm.expectRevert(WeiRoll.TooSoon.selector);
         roll.resetRequest();
     }
@@ -495,7 +514,7 @@ contract WeiRollTest is Test {
         assertEq(roll.ticketCount(r), n);
 
         vm.warp(roll.roundEnd());
-        roll.draw();
+        _draw();
         uint256[] memory words = new uint256[](1);
         words[0] = uint256(keccak256(abi.encode("seed", n)));
 
@@ -518,12 +537,11 @@ contract WeiRollTest is Test {
         _enterAll();
         vm.warp(roll.roundEnd());
         uint256 potBefore = roll.pot();
-        roll.draw();
-        uint256 fee = wrapper.price();
+        _draw();
         wrapper.fulfill(address(roll), roll.requestId(), 0);
 
-        assertEq(roll.prizeOf(0), potBefore - fee);
-        assertEq(roll.reserved(), potBefore - fee);
+        assertEq(roll.prizeOf(0), potBefore, "the caller paid the fee, not the pot");
+        assertEq(roll.reserved(), potBefore);
         assertEq(roll.pot(), 0);
         assertEq(roll.round(), 1);
         assertEq(roll.requestId(), 0);
@@ -581,12 +599,12 @@ contract WeiRollTest is Test {
         uint256 exp = nft.expiresAt(tAlice);
         while (roll.roundEnd() + roll.ROUND_LENGTH() < exp) {
             vm.warp(roll.roundEnd());
-            roll.draw();
+            _draw();
         }
         uint256 r = roll.round();
         _enterAll();
         vm.warp(roll.roundEnd());
-        roll.draw();
+        _draw();
         wrapper.fulfill(address(roll), roll.requestId(), 0);
         assertEq(roll.winnerOf(r), tAlice);
         assertLt(exp, roll.claimBy(r));
@@ -641,7 +659,7 @@ contract WeiRollTest is Test {
         _enterAll();
 
         vm.warp(roll.roundEnd());
-        roll.draw();
+        _draw();
         wrapper.fulfill(address(roll), roll.requestId(), 0); // seed 0 -> hostile, ticket 0
         assertEq(roll.winnerOf(0), tHostile);
 
@@ -688,7 +706,7 @@ contract WeiRollTest is Test {
         roll.enter(tBob, 0);
 
         vm.warp(roll.roundEnd());
-        roll.draw();
+        _draw();
         wrapper.fulfill(address(roll), roll.requestId(), 0);
         assertEq(roll.winnerOf(0), tAlice);
 
@@ -748,7 +766,7 @@ contract WeiRollTest is Test {
         dao.execute(pid);
 
         vm.warp(roll.roundEnd());
-        roll.draw();
+        _draw();
         wrapper.fulfill(address(roll), roll.requestId(), 0);
         assertEq(roll.winnerOf(0), tAlice);
 
@@ -831,7 +849,7 @@ contract WeiRollTest is Test {
         _fund(5 ether); // refill: round 0 paid the whole pot out
         _enterAll();
         vm.warp(roll.roundEnd());
-        roll.draw();
+        _draw();
         wrapper.fulfill(address(roll), roll.requestId(), 0);
         assertEq(roll.winnerOf(1), tAlice);
 
@@ -867,7 +885,7 @@ contract WeiRollTest is Test {
         roll.enter(tBob, 0);
         uint256 r = roll.round();
         vm.warp(roll.roundEnd());
-        roll.draw();
+        _draw();
         wrapper.fulfill(address(roll), roll.requestId(), 0);
 
         uint256 prize = roll.prizeOf(r);
@@ -893,7 +911,7 @@ contract WeiRollTest is Test {
         _fund(5 ether);
         _enterAll();
         vm.warp(roll.roundEnd());
-        roll.draw();
+        _draw();
         wrapper.fulfill(address(roll), roll.requestId(), 0);
         vm.prank(alice);
         roll.claim(1);
@@ -922,7 +940,7 @@ contract WeiRollTest is Test {
         uint256 r = roll.round();
         _enterAll();
         vm.warp(roll.roundEnd());
-        roll.draw();
+        _draw();
         wrapper.fulfill(address(roll), roll.requestId(), 0);
         vm.prank(alice);
         roll.claim(r);
@@ -1125,10 +1143,9 @@ contract WeiRollTest is Test {
 
         _enterAll();
         vm.warp(roll.roundEnd());
-        roll.draw();
-        uint256 fee = wrapper.price();
+        _draw();
         wrapper.fulfill(address(roll), roll.requestId(), 0);
-        assertEq(roll.prizeOf(1), prize0 - fee, "forfeited pot did not carry forward");
+        assertEq(roll.prizeOf(1), prize0, "forfeited pot did not carry forward");
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -1151,7 +1168,7 @@ contract WeiRollTest is Test {
 
             uint256 seed = _seedFor(expected[r]);
             vm.warp(roll.roundEnd());
-            roll.draw();
+            _draw();
             wrapper.fulfill(address(roll), roll.requestId(), seed);
             assertEq(roll.winnerOf(r), expected[r]);
 
@@ -1186,7 +1203,7 @@ contract WeiRollTest is Test {
         vm.warp(roll.roundEnd());
         assertTrue(roll.phase() == WeiRoll.Phase.Ready);
 
-        roll.draw();
+        _draw();
         assertTrue(roll.phase() == WeiRoll.Phase.Drawing);
 
         wrapper.fulfill(address(roll), roll.requestId(), 0);
@@ -1213,7 +1230,7 @@ contract WeiRollTest is Test {
         vm.warp(roll.roundEnd());
         assertTrue(roll.state().drawSettles);
 
-        roll.draw();
+        _draw();
         st = roll.state();
         assertTrue(st.phase == WeiRoll.Phase.Drawing);
         assertEq(st.resetAt, block.timestamp + roll.REQUEST_TIMEOUT());
@@ -1237,9 +1254,6 @@ contract WeiRollTest is Test {
         roll.enter(tBob, 0);
         vm.warp(roll.roundEnd());
         assertTrue(roll.drawSettles());
-
-        vm.deal(address(roll), 0);
-        assertFalse(roll.drawSettles(), "an empty pot cannot settle");
     }
 
     function testRoundInfoCoversTheWholeLifecycle() public {
@@ -1323,7 +1337,7 @@ contract WeiRollTest is Test {
         vm.prank(bob);
         roll.enter(tBob, 0);
         vm.warp(roll.roundEnd());
-        roll.draw();
+        _draw();
         wrapper.fulfill(address(roll), roll.requestId(), 0);
 
         assertTrue(roll.canClaim(0, alice));
@@ -1412,9 +1426,17 @@ contract WeiRollTest is Test {
     function _rollRoundsUntil(uint256 ts) internal {
         while (roll.roundEnd() < ts) {
             vm.warp(roll.roundEnd());
-            roll.draw();
+            _draw();
         }
         vm.warp(ts);
+    }
+
+    /// @dev The caller funds the VRF fee, so a draw sends {WeiRoll.drawPrice} — and nothing at all
+    ///      when the round is only going to be abandoned, which is what a real caller would do.
+    function _draw() internal {
+        uint256 fee = roll.drawSettles() ? roll.drawPrice() : 0;
+        vm.deal(address(this), fee);
+        roll.draw{value: fee}();
     }
 
     /// @dev Real transfer, not `vm.deal`: funding is what opens a round.
@@ -1436,7 +1458,7 @@ contract WeiRollTest is Test {
     function _drawWith(uint256 seed) internal returns (uint256 prize) {
         _enterAll();
         vm.warp(roll.roundEnd());
-        roll.draw();
+        _draw();
         wrapper.fulfill(address(roll), roll.requestId(), seed);
         prize = roll.prizeOf(0);
     }

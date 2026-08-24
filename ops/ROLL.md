@@ -39,8 +39,9 @@ there is no cost to starting at a few tenths of an ETH and raising it once a cou
 have settled. It also caps what a bug — or a grinding oracle, see the re-request caveat in the
 README — can reach while the contract is young.
 
-Each `draw` burns a VRF fee from the pot (~0.0075 ETH at 20 gwei), so a pot in the low hundredths of
-an ETH is mostly fee. Keep it comfortably above that.
+The VRF fee is paid by whoever calls `draw`, not out of the pot, so the whole pot is prize money
+however small it is. Send at least `drawPrice()` with the call — at mainnet's typical sub-gwei
+basefee that is a couple of cents, since the fee scales linearly with gas price.
 
 ## 2. Rehearse on a mainnet fork
 
@@ -125,7 +126,7 @@ Nothing needs an operator. For the record, the whole loop is:
 | Who | When | Call |
 |---|---|---|
 | holders | while `roundEnd` is in the future | `enter(tokenId, boostPid)` |
-| anyone | once `block.timestamp >= roundEnd` | `draw()` |
+| anyone | once `block.timestamp >= roundEnd` | `draw{value: drawPrice()}()` |
 | Chainlink | ~13 min later (64 confirmations) | callback settles the round |
 | the winner | within `CLAIM_WINDOW` (30 days) | `claim(r)` |
 | anyone | if that window lapses | `rollOver(r)` — returns the prize to the pot and reopens |
