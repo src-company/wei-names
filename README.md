@@ -709,6 +709,72 @@ While the DAO holds `dao.wei`, **every proposal atomically mints `<id>.dao.wei` 
 
 Support-only (no explicit "against"). Weight is captured at `support` time along with the name's epoch and expiry; a transferred name stays valid, but once its supported runway elapses or the name is re-registered, anyone may prune it. Roles are recognised only while the DAO owns the active `dao.wei`, so a lapse-and-re-register can't hand them to a new parent owner. The fixed-point `α^Δ` is differential-tested against an independent exp/ln to ~1 ppm and analysed in [ops/MATH_REVIEW.md](ops/MATH_REVIEW.md). The `exec` god-mode key is fully trusted until relinquished.
 
+---
+
+## Lottery (WeiRoll)
+
+`WeiRoll.sol` is an **ownerless** ETH lottery for `.wei` holders, funded by WeiDAO and drawn with **Chainlink VRF v2.5**. There is no owner, no admin and no withdrawal: value leaves only as a prize or as the VRF fee. It runs itself — an empty pot means no round, ETH arriving opens one, and settling pays the whole pot out and stops until the next funding. No keeper, no schedule.
+
+### Entries — an opt-in registry, because WNS isn't enumerable
+
+Token IDs are namehashes and `NameNFT` implements no `ERC721Enumerable`, so "the set of holders" doesn't exist on-chain to index into. Holders opt in per round with `enter(tokenId, boostPid)`, which checks ownership and eligibility live. That registry *is* the candidate set — no snapshot, no Merkle root, no indexer, nothing to trust.
+
+### Odds = the same weight governance uses
+
+```
+weightOf(name) = getFee(byteLength(label)) × (expiresAt − now) / 365 days
+```
+
+Identical to `WeiDAO.weightOf`: current cost-to-hold for the remaining runway. Odds are proportional to it, which makes a draw **EV-equivalent to a pro-rata airdrop** — just lumpier, and paid in one transfer instead of N. Flat one-name-one-ticket isn't viable: at the 0.001 ETH default fee, odds would be for sale at 0.001 ETH each. Subdomains cost no ETH, weigh 0, and are excluded, exactly as in governance.
+
+Tickets are stored as **cumulative** weights, so the winner is the first ticket whose running total exceeds a uniform draw — a binary search in the callback rather than a loop that could run out of gas.
+
+### Rounds are names
+
+While the contract holds `roll.wei`, claiming writes the round into the namespace:
+
+```
+roll.wei  →  7.roll.wei  →  alice.7.roll.wei
+```
+
+`7.roll.wei` is kept by the contract, resolves to the winner, and carries the winning label and prize in its text records. `alice.7.roll.wei` goes to the claimer. Giving every round its own parent is what makes repeat wins work — `alice.7` and `alice.12` never collide, so nothing is ever overwritten. That matters: `NameNFT` lets a parent owner **re-register its own subdomains**, which would burn a badge its holder already has. Naming is a swallowed self-call and can never block a payout.
+
+### Winners hold names, not addresses
+
+A draw records a **tokenId**. `claim` pays whoever holds that name, while it's still active — selling or lapsing forfeits the prize to the next round. `NameNFT`'s 90-day grace period exceeds the 30-day claim window, so a name that lapses mid-window can't be re-registered by someone else in time to claim off the previous holder.
+
+### The DAO boost is a bond, not a snapshot
+
+`enter` takes an optional `boostPid`. If the name backs that proposal and the proposal is still **open**, the ticket weighs `BOOST_BPS` more. `claim` re-checks the backing, so support-enter-unsupport buys better odds on an unclaimable prize. Only the *backing* is re-checked, never the proposal's state — a boosted entrant is never punished for the thing they backed passing. Requiring the proposal to be open is what keeps this about current governance: support left on a long-settled proposal can't buy odds forever.
+
+### Randomness
+
+| | |
+|---|---|
+| Source | Chainlink VRF v2.5, **direct funding**, paid in native ETH |
+| Wrapper | [`0x02aae1A04f9828517b3007f83f6181900CaD910c`](https://etherscan.io/address/0x02aae1a04f9828517b3007f83f6181900cad910c) |
+| `requestConfirmations` | `64` — two epochs, Ethereum's finality bound |
+| `callbackGasLimit` | `200_000` (measured 123k at 64 tickets, +~2.1k per doubling) |
+| Cost per draw | ~0.0075 ETH at 20 gwei, paid from the pot |
+
+Direct funding rather than a subscription: there is no subscription to underfund and stall on, and no subscription owner — the role at the centre of the [2022 VRF v2 critical report](https://blog.chain.link/smart-contract-research-case-study/). Confirmations are set to **64** rather than Chainlink's floor of 3 because a reorg that moves the request into a different block re-rolls the seed; past finality no reorg can change it. Confirmations aren't priced, so this costs ~13 minutes on a 30-day round and nothing in fees.
+
+Against Chainlink's [VRF security checklist](https://docs.chain.link/vrf/v2-5/security): inputs halt **before** the request, not at it (entries close at `roundEnd`, which is strictly before `draw` is callable); only one request is ever in flight, so out-of-order fulfilment can't apply; the callback does a binary search and seven writes and nothing else.
+
+**One documented deviation.** Chainlink states that *any* re-request of randomness is incorrect use, because it lets someone discard a result they dislike. `resetRequest` re-requests after `REQUEST_TIMEOUT` (3 days). It's kept because this contract is ownerless with no withdrawal: an undelivered request with no retry would strand the pot **permanently**. Nothing can be discarded — the reset only fires when no result was ever delivered and no participant has seen one. The residual is that whoever controls fulfilment could withhold, or starve the callback of gas, to force a fresh draw: one roll per three days, each burning another VRF fee from the pot. That takes a malicious DON, which is the same adversary that would otherwise brick the contract outright. A grindable lottery beats a bricked one.
+
+### Setup
+
+Constructor: `WeiRoll(nameNFT, weiDAO, vrfWrapper)`, `payable`. Pre-approve the address the deploy will land at for `roll.wei` and the constructor **pulls it in and sets its primary name**, so the contract reverse-resolves to `roll.wei` — the same handover trick WeiDAO uses for `dao.wei`. Send ETH with the deploy and the first round opens in the same transaction. Unlike WeiDAO, **none of it is load-bearing**: with no approval the deploy still succeeds and the name can be transferred in later, and the lottery runs without it — only naming stops. Runbook: [ops/ROLL.md](ops/ROLL.md).
+
+WeiDAO funds it with an ordinary proposal targeting the contract with a `value` and empty calldata. Anyone may top it up the same way at any time; a top-up mid-round does not extend the window.
+
+### Caveats
+
+Weight is snapshotted at `enter` and drifts down over the round as runway burns, bounded by `ROUND_LENGTH` — the same treatment WeiDAO gives support weight. A name whose supported runway elapses makes its DAO position prunable by anyone, so a boosted winner in that state must re-`support` before claiming. `NameNFT` blocks transfers of inactive names, so a lapsed `roll.wei` freezes every badge under it — renewal is left outside the contract because `renew` is permissionless and badge holders are motivated. `draw` is permissionless and pays the VRF fee from the pot; there's no keeper reward, but every entrant has one waiting for them.
+
+---
+
 ## Audits
 
 AI-assisted audits performed on the codebase:
@@ -724,6 +790,8 @@ AI-assisted audits performed on the codebase:
 **Cantina Apex** found three valid dapp/integration issues: XSS via unescaped name in `innerHTML`, router commit-reveal frontrunning, and refund misdirection through router. All were patched in the dapp and zRouter. NameNFT contract was not affected. (SubdomainRegistrar not included.)
 
 **Zellic V12** reported two findings on SubdomainRegistrar, both self-invalidated: flash mode `transferFrom` does not trigger `onERC721Received` (incorrect premise), and `tx.origin` in constructor is intentional for CREATE2/CREATE3 deployment.
+
+**WeiRoll** has had **one** review pass — no independent audit. Its VRF integration is exercised end-to-end against the live mainnet wrapper in [test/ForkWeiRollVRF.t.sol](test/ForkWeiRollVRF.t.sol), which makes a real paid request and settles the round through the genuine coordinator→wrapper→callback path under the real gas limit. Treat the pot size accordingly until it has been reviewed independently.
 
 **WeiDAO** was hardened across several independent AI-assisted review passes (one recorded in [ops/AUDIT.md](ops/AUDIT.md)) plus a fixed-point precision analysis ([ops/MATH_REVIEW.md](ops/MATH_REVIEW.md)) and a mainnet-fork deploy rehearsal ([test/ForkDeploySim.t.sol](test/ForkDeploySim.t.sol)). The one serious finding — role seizure via a re-registered `dao.wei` — was fixed and regression-tested; a machine-checked pass on `_pow`/`_accrue` is still recommended before large treasury value.
 

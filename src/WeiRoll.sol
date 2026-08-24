@@ -109,8 +109,16 @@ interface IVRFV2PlusWrapper {
 /// ── Caveats ────────────────────────────────────────────────────────────────────────────
 /// • Weight is snapshotted at {enter} and drifts down over the round as runway burns, bounded by
 ///   {ROUND_LENGTH}. Same treatment WeiDAO gives support weight.
-/// • Chainlink is a liveness dependency, not a safety one. An unfulfilled request is cleared by
-///   the permissionless {resetRequest} after {REQUEST_TIMEOUT} and the draw retried.
+/// • {resetRequest} is a deliberate departure from Chainlink's guidance that "any re-request or
+///   cancellation of randomness is an incorrect use of VRF". That rule exists to stop anyone
+///   discarding a result they dislike; here nothing can be discarded, because the reset only fires
+///   when no result was ever delivered and no participant has seen one. It is kept because this
+///   contract is ownerless with no withdrawal: an undelivered request with no way to retry would
+///   strand the pot permanently, and a lottery that can be ground is better than one that can be
+///   bricked. The residual is that whoever controls fulfilment can withhold, or starve the
+///   callback of gas, to force a fresh draw — one roll per {REQUEST_TIMEOUT}, each paying another
+///   VRF fee out of the pot. That takes a malicious DON, which is the same adversary that would
+///   otherwise brick it outright.
 /// • A name whose supported runway elapses makes its DAO position prunable by anyone; a boosted
 ///   winner in that state must re-`support` before claiming.
 /// • Naming needs an active `roll.wei` held here. Without one, draws and payouts are unchanged and
@@ -172,14 +180,23 @@ contract WeiRoll {
     uint256 public constant BOOST_BPS = 10_000;
 
     /// @notice After this long with no VRF callback, anyone may clear the request and redraw.
-    uint256 public constant REQUEST_TIMEOUT = 1 days;
+    /// @dev Also the grinding period — see the re-request caveat. Honest fulfilment takes about a
+    ///      minute, so this is generous for liveness while keeping forced re-rolls to one per
+    ///      three days, each burning another VRF fee from the pot.
+    uint256 public constant REQUEST_TIMEOUT = 3 days;
 
     /// @notice `namehash("roll.wei")` — the parent every trophy is minted under.
     uint256 public constant PARENT =
         0xf218d633879b71231b282e26380ab665b6d0defe8dafef3bfeac70dd46799d80;
 
     uint32 internal constant CALLBACK_GAS = 200_000;
-    uint16 internal constant CONFIRMATIONS = 3;
+
+    /// @dev Blocks the VRF node waits before deriving the seed from the request block. Chainlink's
+    ///      floor is 3 and it advises raising it with the value at stake, because a reorg that
+    ///      moves the request into a different block re-rolls the result. Two epochs is Ethereum's
+    ///      finality bound, so past it no reorg can change the seed at all. It costs about thirteen
+    ///      minutes on a thirty-day round and nothing in fees — confirmations are not priced.
+    uint16 internal constant CONFIRMATIONS = 64;
 
     /// @dev `VRFV2PlusClient._argsToBytes(ExtraArgsV1({nativePayment: true}))`: the tag
     ///      `bytes4(keccak256("VRF ExtraArgsV1"))` followed by the bool. Inlined so this contract

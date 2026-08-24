@@ -258,7 +258,7 @@ contract WeiRollTest is Test {
         roll.draw();
         assertEq(wrapper.lastValue(), wrapper.price());
         assertEq(wrapper.lastWords(), 1);
-        assertEq(wrapper.lastConfs(), 3);
+        assertEq(wrapper.lastConfs(), 64, "should wait for finality, not the 3-block floor");
         // nativePayment: true, ExtraArgsV1 tag
         assertEq(
             wrapper.lastExtraArgs(),
