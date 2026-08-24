@@ -337,8 +337,11 @@ contract WeiRoll {
     ///         targeting this address; anyone else may top it up the same way. ETH is staked on
     ///         arrival, so a waiting pot earns and every holder can watch it grow.
     receive() external payable {
-        steth.submit{value: address(this).balance}(address(0));
-        emit Funded(msg.sender, msg.value);
+        // Reports what was staked, not `msg.value`: the balance can carry stray wei that arrived
+        // without running code, and an indexer summing these should reconcile with {pot}.
+        uint256 amount = address(this).balance;
+        steth.submit{value: amount}(address(0));
+        emit Funded(msg.sender, amount);
         _open();
     }
 

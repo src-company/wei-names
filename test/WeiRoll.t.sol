@@ -1084,6 +1084,19 @@ contract WeiRollTest is Test {
         assertEq(roll.pot(), potBefore + 1 ether, "swept into the prize");
     }
 
+    /// @dev `Funded` must reconcile with the pot even when funding sweeps stray wei alongside it.
+    function testFundedReportsWhatWasActuallyStaked() public {
+        WeiRoll fresh = new WeiRoll(address(nft), address(dao), address(wrapper), address(steth));
+        vm.deal(address(fresh), 3); // stray wei, as a forced transfer would leave it
+        vm.deal(address(this), 1 ether);
+
+        vm.expectEmit(true, false, false, true, address(fresh));
+        emit WeiRoll.Funded(address(this), 1 ether + 3);
+        (bool ok,) = address(fresh).call{value: 1 ether}("");
+        assertTrue(ok);
+        assertEq(fresh.pot(), 1 ether + 3, "the event matches the pot");
+    }
+
     function testStakeOnNothingIsANoOp() public {
         uint256 potBefore = roll.pot();
         roll.stake();
