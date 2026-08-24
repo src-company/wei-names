@@ -924,6 +924,26 @@ contract WeiRollTest is Test {
         assertEq(roll.trophyOf(0), 0);
     }
 
+    /// @dev Pins the README's claim that a lapsed `roll.wei` freezes every badge under it. NameNFT
+    ///      blocks transfers of inactive names, and a badge is inactive once its parent chain is,
+    ///      which is the whole reason renewal matters even though this contract never does it.
+    function testALapsedParentFreezesBadgeTransfers() public {
+        _drawWith(0);
+        vm.prank(alice);
+        roll.claim(0);
+        uint256 badge = roll.trophyOf(0);
+
+        vm.prank(alice); // freely transferable while roll.wei is alive
+        nft.transferFrom(alice, bob, badge);
+        assertEq(nft.ownerOf(badge), bob);
+
+        vm.warp(nft.expiresAt(tRoll) + 1);
+        assertEq(nft.ownerOf(badge), bob, "still owned, just frozen");
+        vm.prank(bob);
+        vm.expectRevert(NameNFT.Expired.selector);
+        nft.transferFrom(bob, alice, badge);
+    }
+
     function testNameWinnerIsSelfCallOnly() public {
         _drawWith(0);
         vm.prank(alice);
