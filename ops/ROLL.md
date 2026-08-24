@@ -11,13 +11,14 @@ looks fiddly, take the boring path in §5.
 ## What the constructor does
 
 ```solidity
-WeiRoll(address nameNFT, address weiDAO, address vrfWrapper) payable
+WeiRoll(address nameNFT, address weiDAO, address vrfWrapper, address steth) payable
 ```
 
-1. Stores the three immutables.
+1. Stores the four immutables, refusing any that is zero.
 2. If `roll.wei`'s holder pre-approved this address, pulls it in and calls `setPrimaryName(roll.wei)`
    so `reverseResolve(weiRoll) == "roll.wei"`. Every step swallowed.
-3. Opens the first entry window **if** `msg.value > 0`.
+3. Stakes its whole balance into stETH — `msg.value` plus any stray wei already sitting at the
+   address — and opens the first entry window if that leaves anything in the pot.
 
 ## 0. Addresses
 
@@ -26,6 +27,7 @@ WeiRoll(address nameNFT, address weiDAO, address vrfWrapper) payable
 | `NameNFT` | `0x0000000000696760E15f265e828DB644A0c242EB` |
 | `WeiDAO` | `0x00000007988A79d16cf76B5dc4cF54dc3Af24936` |
 | VRF v2.5 wrapper (mainnet) | `0x02aae1A04f9828517b3007f83f6181900CaD910c` |
+| Lido stETH (mainnet) | `0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84` |
 | `roll.wei` tokenId | `0xf218d633879b71231b282e26380ab665b6d0defe8dafef3bfeac70dd46799d80` |
 
 The wrapper address is compiled in as `PARENT`'s sibling constant — **verify it against
@@ -74,21 +76,22 @@ cast send $NFT "approve(address,uint256)" <PREDICTED> $ROLL_WEI --rpc-url $RPC .
 
 ```
 forge create src/WeiRoll.sol:WeiRoll \
-  --constructor-args $NFT $DAO $WRAPPER \
+  --constructor-args $NFT $DAO $WRAPPER $STETH \
   --value 0.25ether --rpc-url $RPC --verify ...
 ```
 
 (Or the CreateX CREATE3 call with the mined salt and the same args, per [DEPLOY.md](DEPLOY.md).)
 
-> A deploy address may already hold ETH — stray dust is common. WeiRoll counts it toward the pot,
-> which is correct (it is unspoken-for money like any other) and will even open the first round on
-> it alone. Just don't be surprised if `pot()` reads a few wei over what you sent.
+> Two things will make `pot()` differ from what you sent. A deploy address may already hold stray
+> ETH, which the constructor stakes along with your deposit — the address the fork rehearsal lands
+> on holds 0.000577 ETH. And Lido's share division credits a hair under 1:1, measured at 2 wei. So
+> expect `pot()` to read a little over, or two wei under, depending on which dominates.
 
 Then assert the end state:
 
 ```
 cast call $ROLL "roundEnd()(uint256)"          # non-zero: first round is open
-cast call $ROLL "pot()(uint256)"               # what you funded
+cast call $ROLL "pot()(uint256)"               # what you funded, in stETH
 cast call $NFT  "ownerOf(uint256)(address)" $ROLL_WEI          # == $ROLL
 cast call $NFT  "reverseResolve(address)(string)" $ROLL         # == "roll.wei"
 ```

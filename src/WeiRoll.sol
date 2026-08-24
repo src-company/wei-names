@@ -44,6 +44,16 @@ interface IWeiDAO {
         );
 }
 
+/// @dev Lido stETH. Rebasing is a balance that grows while your *shares* stay put, so everything
+///      owed here is denominated in shares: exact across rebases, and immune to the 1-2 wei
+///      rounding that stETH's share-to-balance division puts on `transfer`.
+interface ISTETH {
+    function submit(address referral) external payable returns (uint256);
+    function sharesOf(address account) external view returns (uint256);
+    function transferShares(address to, uint256 shares) external returns (uint256);
+    function getPooledEthByShares(uint256 shares) external view returns (uint256);
+}
+
 /// @dev Chainlink VRF v2.5 direct-funding wrapper, paid in native ETH. It quotes its own
 ///      gas-price-dependent price and is the only address permitted to call back.
 interface IVRFV2PlusWrapper {
@@ -73,6 +83,14 @@ interface IVRFV2PlusWrapper {
 /// fresh one rather than reverting: entries are shut by then and no owner exists to unstick it.
 /// Abandoning rather than extending is also what stops a ticket outliving the name that bought it.
 ///
+/// ── The pot is staked ──────────────────────────────────────────────────────────────────
+/// ETH sent here is submitted to Lido on arrival, so a pot waiting out a round earns and everyone
+/// can watch it grow. Everything owed is denominated in *shares* rather than stETH: shares are
+/// what rebasing holds constant, so a prize keeps earning while it waits to be claimed, and
+/// {ISTETH.transferShares} sidesteps the 1-2 wei rounding stETH puts on `transfer`. The winner is
+/// paid in stETH. {draw} never touches Lido — its fee comes from the caller and goes straight to
+/// Chainlink — so a paused or rate-limited staking queue can stall funding but never a settlement.
+///
 /// ── Odds ───────────────────────────────────────────────────────────────────────────────
 /// Ticket weight is WeiDAO's `weightOf`: the ETH it would cost today to hold the name for its
 /// remaining runway. Subdomains are free to mint, weigh 0, and are excluded. One-name-one-ticket
@@ -97,6 +115,8 @@ interface IVRFV2PlusWrapper {
 ///   odds of everyone already holding that length. WeiDAO carries the same caveat for votes.
 /// • The boost costs only gas, so it confers no edge — it taxes the unengaged rather than
 ///   differentiating. A scarce boost would be the dangerous direction.
+/// • Lido is a dependency this contract cannot be rescued from, and the prize is stETH rather than
+///   ETH: it traded near 0.94 in June 2022, so a prize can lose ETH value between draw and claim.
 /// • Naming needs an active `roll.wei` held here; without one only the namespace stops. Renewal is
 ///   left outside: `NameNFT.renew` is permissionless, and a lapsed parent freezes every badge
 ///   under it, so holders are motivated.
@@ -181,6 +201,7 @@ contract WeiRoll {
     INameNFT public immutable nft;
     IWeiDAO public immutable dao;
     IVRFV2PlusWrapper public immutable wrapper;
+    ISTETH public immutable steth;
 
     /*//////////////////////////////////////////////////////////////
                                  STORAGE
@@ -249,8 +270,8 @@ contract WeiRoll {
     /// @notice When that request was made, for {resetRequest}.
     uint256 public requestedAt;
 
-    /// @notice Prize money spoken for by drawn-but-unclaimed rounds. Never part of a new pot.
-    uint256 public reserved;
+    /// @notice Shares spoken for by drawn-but-unclaimed rounds. Never part of a new pot.
+    uint256 public reservedShares;
 
     mapping(uint256 => Ticket[]) internal _tickets;
 
@@ -268,8 +289,9 @@ contract WeiRoll {
     ///         fulfilment failed or was withheld — the grinding surface, made visible.
     mapping(uint256 => uint256) public resetsOf;
 
-    /// @notice Unclaimed prize of a settled round.
-    mapping(uint256 => uint256) public prizeOf;
+    /// @notice Unclaimed prize of a settled round, in shares (0 = claimed, rolled over, or unrun).
+    ///         Read {prizeOf} for what that is worth in stETH today.
+    mapping(uint256 => uint256) public prizeSharesOf;
 
     /// @notice Claim deadline of a settled round.
     mapping(uint256 => uint256) public claimBy;
@@ -281,15 +303,23 @@ contract WeiRoll {
     ///      address for `roll.wei` to hand the namespace over in the same transaction. Both are
     ///      optional and everything here is swallowed — nothing in this constructor is
     ///      load-bearing, unlike WeiDAO's role mints. See ops/ROLL.md.
-    constructor(address _nft, address _dao, address _wrapper) payable {
+    constructor(address _nft, address _dao, address _wrapper, address _steth) payable {
         // An ownerless immutable contract has no way back from a mistyped dependency: a zero
         // wrapper would refuse to quote forever, so no round could ever settle and the pot would
         // sit unreachable. Cheap to refuse the deploy instead.
         if (_nft == address(0) || _dao == address(0) || _wrapper == address(0)) revert NoConfig();
+        if (_steth == address(0)) revert NoConfig();
 
         nft = INameNFT(_nft);
         dao = IWeiDAO(_dao);
         wrapper = IVRFV2PlusWrapper(_wrapper);
+        steth = ISTETH(_steth);
+
+        // The whole balance, not just msg.value: a deploy address can already hold stray wei, and
+        // once the pot is counted in shares any native ETH left behind is invisible to it.
+        if (address(this).balance != 0) {
+            ISTETH(_steth).submit{value: address(this).balance}(address(0));
+        }
 
         if (_nft.code.length != 0) {
             try nft.ownerOf(PARENT) returns (address holder) {
@@ -304,15 +334,30 @@ contract WeiRoll {
     }
 
     /// @notice Fund the pot, starting a round if none is running. WeiDAO does this with a proposal
-    ///         targeting this address; anyone else may top it up the same way.
+    ///         targeting this address; anyone else may top it up the same way. ETH is staked on
+    ///         arrival, so a waiting pot earns and every holder can watch it grow.
     receive() external payable {
+        steth.submit{value: address(this).balance}(address(0));
         emit Funded(msg.sender, msg.value);
+        _open();
+    }
+
+    /// @notice Stake native ETH sitting here into the pot. Permissionless, and a no-op if there is
+    ///         none.
+    /// @dev {receive} stakes on arrival, but ETH can still arrive without it — a forced
+    ///      `selfdestruct` transfer runs no code. Since the pot is counted in shares, that ETH
+    ///      would otherwise be stranded; this turns it into prize money.
+    function stake() external {
+        uint256 amount = address(this).balance;
+        if (amount == 0) return;
+        steth.submit{value: amount}(address(0));
+        emit Funded(msg.sender, amount);
         _open();
     }
 
     /// @dev Every path that can leave money in the pot calls this, so funding is the only trigger.
     function _open() internal {
-        if (roundEnd == 0 && address(this).balance > reserved) {
+        if (roundEnd == 0 && steth.sharesOf(address(this)) > reservedShares) {
             roundEnd = block.timestamp + ROUND_LENGTH;
             emit RoundOpened(round, roundEnd);
         }
@@ -409,6 +454,10 @@ contract WeiRoll {
         );
         requestedAt = block.timestamp;
         emit Drawn(r, requestId);
+
+        // Refunded rather than staked: keeping {draw} independent of Lido means a paused or
+        // rate-limited staking queue can never stop a round settling.
+        if (msg.value > price) safeTransferETH(msg.sender, msg.value - price);
     }
 
     /// @notice Chainlink's callback. Picks the winner and opens the next round.
@@ -431,12 +480,14 @@ contract WeiRoll {
             else lo = mid + 1;
         }
 
-        uint256 prize = address(this).balance - reserved;
+        // The pot is every share not already owed to an earlier winner. Denominating in shares is
+        // what makes a prize survive a rebase: it keeps earning while it waits to be claimed.
+        uint256 shares = steth.sharesOf(address(this)) - reservedShares;
         winnerOf[r] = t[lo].tokenId;
         winnerBoostOf[r] = t[lo].boostPid;
-        prizeOf[r] = prize;
+        prizeSharesOf[r] = shares;
         claimBy[r] = block.timestamp + CLAIM_WINDOW;
-        reserved += prize;
+        reservedShares += shares;
 
         requestId = 0;
         requestedAt = 0;
@@ -444,7 +495,7 @@ contract WeiRoll {
         // The prize was the entire pot, so nothing is left to run on: the next funding reopens.
         roundEnd = 0;
 
-        emit Won(r, t[lo].tokenId, prize);
+        emit Won(r, t[lo].tokenId, steth.getPooledEthByShares(shares));
     }
 
     /// @notice Clear a request that was never fulfilled, so {draw} can retry. Permissionless.
@@ -470,8 +521,8 @@ contract WeiRoll {
     /// @notice Collect the prize for a settled round. The caller must still own the winning name,
     ///         it must still be active, and any boost bonded at entry must still be in place.
     function claim(uint256 r) external {
-        uint256 prize = prizeOf[r];
-        if (prize == 0) revert NotWinner();
+        uint256 shares = prizeSharesOf[r];
+        if (shares == 0) revert NotWinner();
         if (block.timestamp > claimBy[r]) revert ClaimWindowOver();
 
         uint256 tokenId = winnerOf[r];
@@ -482,8 +533,10 @@ contract WeiRoll {
         uint256 pid = winnerBoostOf[r];
         if (pid != 0 && dao.supportOf(pid, tokenId) == 0) revert NotBacking();
 
-        prizeOf[r] = 0;
-        reserved -= prize;
+        prizeSharesOf[r] = 0;
+        reservedShares -= shares;
+
+        uint256 prize = steth.transferShares(msg.sender, shares);
         emit Claimed(r, tokenId, msg.sender, prize);
 
         // Self-call so the mints and the resolver writes fail together, and are swallowed
@@ -491,18 +544,16 @@ contract WeiRoll {
         if (_holdsParent()) {
             try this.nameWinner(r, tokenId, msg.sender, prize) {} catch {}
         }
-
-        safeTransferETH(msg.sender, prize);
     }
 
     /// @notice Return an unclaimed prize to the pot once its window closes. Permissionless.
     function rollOver(uint256 r) external {
-        uint256 prize = prizeOf[r];
-        if (prize == 0) revert NotWinner();
+        uint256 shares = prizeSharesOf[r];
+        if (shares == 0) revert NotWinner();
         if (block.timestamp <= claimBy[r]) revert ClaimWindowOpen();
-        prizeOf[r] = 0;
-        reserved -= prize;
-        emit RolledOver(r, prize);
+        prizeSharesOf[r] = 0;
+        reservedShares -= shares;
+        emit RolledOver(r, steth.getPooledEthByShares(shares));
         _open(); // a forfeited prize is funding like any other
     }
 
@@ -590,8 +641,8 @@ contract WeiRoll {
             phase: phase(),
             round: r,
             roundEnd: roundEnd,
-            pot: address(this).balance - reserved,
-            reserved: reserved,
+            pot: pot(),
+            reserved: steth.getPooledEthByShares(reservedShares),
             tickets: _tickets[r].length,
             totalWeight: totalWeight(r),
             requestId: requestId,
@@ -611,13 +662,13 @@ contract WeiRoll {
             totalWeight: totalWeight(r),
             winner: winner,
             boostPid: winnerBoostOf[r],
-            prize: prizeOf[r],
+            prize: prizeOf(r),
             claimBy: claimBy[r],
             roundName: roundName(r),
             trophy: trophyOf[r],
             resets: resetsOf[r],
             settled: winner != 0,
-            resolved: winner != 0 && prizeOf[r] == 0
+            resolved: winner != 0 && prizeSharesOf[r] == 0
         });
     }
 
@@ -632,7 +683,7 @@ contract WeiRoll {
 
     /// @notice Whether {claim} would succeed for `who` on round `r` right now.
     function canClaim(uint256 r, address who) external view returns (bool) {
-        if (prizeOf[r] == 0 || block.timestamp > claimBy[r]) return false;
+        if (prizeSharesOf[r] == 0 || block.timestamp > claimBy[r]) return false;
 
         uint256 tokenId = winnerOf[r];
         if (weightOf(tokenId) == 0) return false;
@@ -702,9 +753,15 @@ contract WeiRoll {
         }
     }
 
-    /// @notice What a draw settled now would pay out, net of prizes already spoken for.
-    function pot() external view returns (uint256) {
-        return address(this).balance - reserved;
+    /// @notice What a draw settled now would pay out, in stETH, net of prizes already owed.
+    function pot() public view returns (uint256) {
+        return steth.getPooledEthByShares(steth.sharesOf(address(this)) - reservedShares);
+    }
+
+    /// @notice A settled round's unclaimed prize in stETH. Grows with the pot's yield until it is
+    ///         claimed, because the claim is recorded in shares.
+    function prizeOf(uint256 r) public view returns (uint256) {
+        return steth.getPooledEthByShares(prizeSharesOf[r]);
     }
 }
 

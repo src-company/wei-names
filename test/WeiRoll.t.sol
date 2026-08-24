@@ -48,6 +48,46 @@ contract MockWrapper {
     }
 }
 
+/// @dev Lido, small enough to reason about: shares are minted against pooled ETH, and {rebase}
+///      adds yield without minting, which is exactly how a real rebase moves the balance.
+contract MockStETH {
+    uint256 public totalShares;
+    uint256 public totalPooled;
+
+    mapping(address => uint256) public sharesOf;
+
+    function submit(address) public payable returns (uint256 shares) {
+        require(msg.value != 0, "ZERO_DEPOSIT");
+        shares = totalPooled == 0 ? msg.value : msg.value * totalShares / totalPooled;
+        totalShares += shares;
+        totalPooled += msg.value;
+        sharesOf[msg.sender] += shares;
+    }
+
+    receive() external payable {
+        submit(address(0));
+    }
+
+    function getPooledEthByShares(uint256 s) public view returns (uint256) {
+        return totalShares == 0 ? s : s * totalPooled / totalShares;
+    }
+
+    function balanceOf(address a) external view returns (uint256) {
+        return getPooledEthByShares(sharesOf[a]);
+    }
+
+    function transferShares(address to, uint256 s) external returns (uint256) {
+        sharesOf[msg.sender] -= s;
+        sharesOf[to] += s;
+        return getPooledEthByShares(s);
+    }
+
+    /// @dev Simulate a rebase: pooled ETH grows, share count does not.
+    function rebase(uint256 addedEth) external {
+        totalPooled += addedEth;
+    }
+}
+
 /// @dev Refuses ETH — used to prove {claim} cannot be bricked by a hostile winner contract.
 contract RejectsETH {
     function onERC721Received(address, address, uint256, bytes calldata)
@@ -68,6 +108,7 @@ contract WeiRollTest is Test {
     WeiDAO dao;
     WeiRoll roll;
     MockWrapper wrapper;
+    MockStETH steth;
 
     address alice = address(0xA11CE); // "ab"     len 2 -> 0.05 ether/yr
     address bob = address(0xB0B); //    "bobby"   len 5 -> 0.02 ether/yr
@@ -84,6 +125,8 @@ contract WeiRollTest is Test {
     uint256 constant ALPHA = 999_998_853_923_940_000; // 7-day half-life
     uint256 constant HALF_LIFE = 7 days;
 
+    receive() external payable {} // draw refunds any overpayment
+
     function setUp() public {
         nft = new NameNFT();
         // threshold = convictionMax(alice's weight)/2, so one supported name passes in a half-life
@@ -91,7 +134,8 @@ contract WeiRollTest is Test {
             address(nft), ALPHA, 0.05 ether * 1e18 / (1e18 - ALPHA) / 2, 0, 0, address(0)
         );
         wrapper = new MockWrapper();
-        roll = new WeiRoll(address(nft), address(dao), address(wrapper));
+        steth = new MockStETH();
+        roll = new WeiRoll(address(nft), address(dao), address(wrapper), address(steth));
 
         uint256[] memory lens = new uint256[](2);
         uint256[] memory fees = new uint256[](2);
@@ -402,18 +446,26 @@ contract WeiRollTest is Test {
 
     /// @dev The fee used to come out of the pot, so a pot thinner than the fee could not be drawn.
     ///      Now the caller pays it and the whole pot is prize money, however small.
-    function testATinyPotStillDrawsBecauseTheCallerPaysTheFee() public {
-        vm.deal(address(roll), 0);
-        _fund(1); // one wei of prize
-        _enterAll();
-        vm.warp(roll.roundEnd());
+    function testAOneWeiPotStillDrawsBecauseTheCallerPaysTheFee() public {
+        WeiRoll tiny = new WeiRoll(address(nft), address(dao), address(wrapper), address(steth));
+        vm.deal(address(this), 1);
+        (bool ok,) = address(tiny).call{value: 1}("");
+        assertTrue(ok);
+        assertEq(tiny.pot(), 1, "one wei of prize");
 
-        assertTrue(roll.drawSettles());
-        _draw();
-        assertGt(roll.requestId(), 0);
+        vm.prank(alice);
+        tiny.enter(tAlice, 0);
+        vm.prank(bob);
+        tiny.enter(tBob, 0);
+        vm.warp(tiny.roundEnd());
 
-        wrapper.fulfill(address(roll), roll.requestId(), 0);
-        assertEq(roll.prizeOf(0), 1, "the whole pot, fee taken from the caller instead");
+        assertTrue(tiny.drawSettles());
+        uint256 fee = tiny.drawPrice();
+        vm.deal(address(this), fee);
+        tiny.draw{value: fee}();
+
+        wrapper.fulfill(address(tiny), tiny.requestId(), 0);
+        assertEq(tiny.prizeOf(0), 1, "the whole pot, fee taken from the caller instead");
     }
 
     function testDrawRevertsIfTheCallerUnderpaysTheFee() public {
@@ -431,7 +483,8 @@ contract WeiRollTest is Test {
         roll.draw{value: fee - 1}();
     }
 
-    function testOverpayingTheFeeTipsThePot() public {
+    /// @dev Overpayment comes back rather than being staked, so {draw} never depends on Lido.
+    function testOverpayingTheFeeIsRefunded() public {
         _enterAll();
         vm.warp(roll.roundEnd());
         uint256 potBefore = roll.pot();
@@ -440,8 +493,9 @@ contract WeiRollTest is Test {
         vm.deal(address(this), fee + 0.5 ether);
         roll.draw{value: fee + 0.5 ether}();
 
+        assertEq(address(this).balance, 0.5 ether, "the excess should come back");
         wrapper.fulfill(address(roll), roll.requestId(), 0);
-        assertEq(roll.prizeOf(0), potBefore + 0.5 ether, "the excess became prize money");
+        assertEq(roll.prizeOf(0), potBefore, "and must not have touched the pot");
     }
 
     function testOnlyWrapperCanFulfill() public {
@@ -541,7 +595,7 @@ contract WeiRollTest is Test {
         wrapper.fulfill(address(roll), roll.requestId(), 0);
 
         assertEq(roll.prizeOf(0), potBefore, "the caller paid the fee, not the pot");
-        assertEq(roll.reserved(), potBefore);
+        assertEq(roll.reservedShares(), potBefore);
         assertEq(roll.pot(), 0);
         assertEq(roll.round(), 1);
         assertEq(roll.requestId(), 0);
@@ -551,11 +605,11 @@ contract WeiRollTest is Test {
     function testWinnerClaims() public {
         uint256 prize = _drawWith(0); // seed 0 -> first ticket -> alice
         assertEq(roll.winnerOf(0), tAlice);
-        uint256 before = alice.balance;
+        uint256 before = steth.balanceOf(alice);
         vm.prank(alice);
         roll.claim(0);
-        assertEq(alice.balance - before, prize);
-        assertEq(roll.reserved(), 0);
+        assertEq(steth.balanceOf(alice) - before, prize);
+        assertEq(roll.reservedShares(), 0);
     }
 
     function testNonWinnerCannotClaim() public {
@@ -587,10 +641,10 @@ contract WeiRollTest is Test {
         vm.expectRevert(WeiRoll.NotWinner.selector);
         roll.claim(0);
 
-        uint256 before = bob.balance;
+        uint256 before = steth.balanceOf(bob);
         vm.prank(bob);
         roll.claim(0);
-        assertEq(bob.balance - before, prize);
+        assertEq(steth.balanceOf(bob) - before, prize);
     }
 
     function testLettingTheNameLapseForfeitsThePrize() public {
@@ -637,7 +691,7 @@ contract WeiRollTest is Test {
         assertEq(roll.pot(), 0);
         roll.rollOver(0);
         assertEq(roll.pot(), prize);
-        assertEq(roll.reserved(), 0);
+        assertEq(roll.reservedShares(), 0);
     }
 
     function testCannotRollOverAnUnsettledRound() public {
@@ -651,7 +705,9 @@ contract WeiRollTest is Test {
         roll.rollOver(0);
     }
 
-    function testHostileWinnerCannotBrickTheContract() public {
+    /// @dev Paying in stETH removed a failure mode rather than adding one: an ERC20 transfer calls
+    ///      nothing on the recipient, so a winner that rejects ETH outright still collects.
+    function testAWinnerThatRefusesETHStillCollectsItsPrize() public {
         RejectsETH hostile = new RejectsETH();
         uint256 tHostile = _register("hostile", address(hostile));
         vm.prank(address(hostile));
@@ -663,14 +719,12 @@ contract WeiRollTest is Test {
         wrapper.fulfill(address(roll), roll.requestId(), 0); // seed 0 -> hostile, ticket 0
         assertEq(roll.winnerOf(0), tHostile);
 
+        uint256 prize = roll.prizeOf(0);
         vm.prank(address(hostile));
-        vm.expectRevert(); // the push fails, but only for them
         roll.claim(0);
 
-        // everyone else's next round is unaffected once it rolls over
-        vm.warp(roll.claimBy(0) + 1);
-        roll.rollOver(0);
-        assertGt(roll.pot(), 0);
+        assertEq(steth.balanceOf(address(hostile)), prize, "stETH needs no receive hook");
+        assertEq(roll.reservedShares(), 0);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -771,10 +825,12 @@ contract WeiRollTest is Test {
         assertEq(roll.winnerOf(0), tAlice);
 
         uint256 prize = roll.prizeOf(0);
-        uint256 before = alice.balance;
+        uint256 before = steth.balanceOf(alice);
         vm.prank(alice);
         roll.claim(0);
-        assertEq(alice.balance - before, prize, "winner punished for their proposal passing");
+        assertEq(
+            steth.balanceOf(alice) - before, prize, "winner punished for their proposal passing"
+        );
     }
 
     function testUnboostedWinnerNeedsNoDAOPosition() public {
@@ -827,10 +883,10 @@ contract WeiRollTest is Test {
         nft.transferFrom(address(roll), bob, tRoll);
 
         uint256 prize = _drawWith(0);
-        uint256 before = alice.balance;
+        uint256 before = steth.balanceOf(alice);
         vm.prank(alice);
         roll.claim(0);
-        assertEq(alice.balance - before, prize, "naming failure blocked the prize");
+        assertEq(steth.balanceOf(alice) - before, prize, "naming failure blocked the prize");
         assertEq(roll.trophyOf(0), 0);
     }
 
@@ -854,11 +910,11 @@ contract WeiRollTest is Test {
         assertEq(roll.winnerOf(1), tAlice);
 
         uint256 prize1 = roll.prizeOf(1);
-        uint256 before = alice.balance;
+        uint256 before = steth.balanceOf(alice);
         vm.prank(alice);
         roll.claim(1);
 
-        assertEq(alice.balance - before, prize1, "repeat winner was not paid");
+        assertEq(steth.balanceOf(alice) - before, prize1, "repeat winner was not paid");
         uint256 second = roll.trophyOf(1);
         assertEq(nft.getFullName(second), "ab.1.roll.wei", "second badge missing");
         assertTrue(first != second);
@@ -889,10 +945,10 @@ contract WeiRollTest is Test {
         wrapper.fulfill(address(roll), roll.requestId(), 0);
 
         uint256 prize = roll.prizeOf(r);
-        uint256 before = alice.balance;
+        uint256 before = steth.balanceOf(alice);
         vm.prank(alice);
         roll.claim(r);
-        assertEq(alice.balance - before, prize);
+        assertEq(steth.balanceOf(alice) - before, prize);
         assertEq(roll.trophyOf(r), 0);
     }
 
@@ -960,10 +1016,12 @@ contract WeiRollTest is Test {
         );
 
         assertFalse(roll.state().naming, "naming should report unavailable");
-        uint256 before = alice.balance;
+        uint256 before = steth.balanceOf(alice);
         vm.prank(alice);
         roll.claim(0);
-        assertEq(alice.balance - before, prize, "an absent parent must not block the prize");
+        assertEq(
+            steth.balanceOf(alice) - before, prize, "an absent parent must not block the prize"
+        );
         assertEq(roll.trophyOf(0), 0);
     }
 
@@ -1011,6 +1069,111 @@ contract WeiRollTest is Test {
     }
 
     /*//////////////////////////////////////////////////////////////
+                              STAKED POT
+    //////////////////////////////////////////////////////////////*/
+
+    /// @dev A forced `selfdestruct` transfer runs no code, so it lands as native ETH that the
+    ///      share-denominated pot cannot see. {stake} is how it becomes prize money.
+    function testStakeSweepsETHThatArrivedWithoutRunningCode() public {
+        uint256 potBefore = roll.pot();
+        vm.deal(address(roll), 1 ether); // as a forced transfer would leave it
+        assertEq(roll.pot(), potBefore, "native ETH is invisible to a staked pot");
+
+        roll.stake();
+        assertEq(address(roll).balance, 0);
+        assertEq(roll.pot(), potBefore + 1 ether, "swept into the prize");
+    }
+
+    function testStakeOnNothingIsANoOp() public {
+        uint256 potBefore = roll.pot();
+        roll.stake();
+        assertEq(roll.pot(), potBefore);
+    }
+
+    /// @dev The sweep also has to be able to start a round, since it is real funding.
+    function testStakeCanOpenAnIdleRound() public {
+        WeiRoll fresh = new WeiRoll(address(nft), address(dao), address(wrapper), address(steth));
+        assertEq(fresh.roundEnd(), 0);
+
+        vm.deal(address(fresh), 1 ether);
+        fresh.stake();
+        assertEq(fresh.roundEnd(), block.timestamp + fresh.ROUND_LENGTH());
+        assertEq(fresh.pot(), 1 ether);
+    }
+
+    function testFundingIsStakedAndTheWaitingPotEarns() public {
+        assertEq(roll.pot(), 10 ether, "staked one-for-one on arrival");
+        assertEq(address(roll).balance, 0, "no idle ETH left behind");
+        assertGt(steth.sharesOf(address(roll)), 0);
+
+        steth.rebase(1 ether);
+        assertEq(roll.pot(), 11 ether, "a pot waiting out a round earns");
+    }
+
+    /// @dev The reason everything owed is denominated in shares: a prize drawn but not yet claimed
+    ///      keeps earning, because shares are what a rebase holds constant.
+    function testAnUnclaimedPrizeKeepsEarning() public {
+        uint256 prizeAtDraw = _drawWith(0);
+        uint256 shares = roll.prizeSharesOf(0);
+
+        steth.rebase(1 ether); // yield lands mid claim window
+        uint256 prizeNow = roll.prizeOf(0);
+        assertGt(prizeNow, prizeAtDraw, "the prize should have grown");
+        assertEq(roll.prizeSharesOf(0), shares, "shares are what stays put");
+
+        uint256 before = steth.balanceOf(alice);
+        vm.prank(alice);
+        roll.claim(0);
+        assertEq(steth.balanceOf(alice) - before, prizeNow, "the winner gets the grown amount");
+    }
+
+    /// @dev Yield reaches an owed prize and a freshly funded pot alike, and neither takes from the
+    ///      other — the whole point of keeping `reservedShares` in shares rather than stETH.
+    function testYieldSplitsBetweenAnOwedPrizeAndTheNextPot() public {
+        _drawWith(0);
+        uint256 owedShares = roll.prizeSharesOf(0);
+        _fund(10 ether);
+        uint256 potShares = steth.sharesOf(address(roll)) - owedShares;
+        uint256 potBefore = roll.pot();
+        uint256 owedBefore = roll.prizeOf(0);
+
+        steth.rebase(2 ether);
+
+        assertEq(roll.prizeSharesOf(0), owedShares, "the debt is fixed in shares");
+        assertEq(steth.sharesOf(address(roll)) - roll.reservedShares(), potShares);
+        assertGt(roll.prizeOf(0), owedBefore, "the owed prize earned");
+        assertGt(roll.pot(), potBefore, "and so did the new pot");
+    }
+
+    /// @dev A rebase must never let a settled round pay out more shares than it was awarded, which
+    ///      is what would let one round eat another's prize.
+    function testARebaseCannotLetOneRoundEatAnothersPrize() public {
+        _drawWith(0);
+        uint256 owed = roll.prizeSharesOf(0);
+        _fund(5 ether);
+        steth.rebase(3 ether);
+
+        _enterAll();
+        vm.warp(roll.roundEnd());
+        _draw();
+        wrapper.fulfill(address(roll), roll.requestId(), 0);
+
+        assertEq(roll.prizeSharesOf(0), owed, "round 0's prize untouched");
+        assertEq(
+            roll.reservedShares(),
+            owed + roll.prizeSharesOf(1),
+            "every owed share accounted for exactly once"
+        );
+
+        vm.prank(alice);
+        roll.claim(0);
+        vm.prank(alice);
+        roll.claim(1);
+        assertEq(roll.reservedShares(), 0);
+        assertEq(steth.sharesOf(address(roll)), 0, "the contract keeps nothing back");
+    }
+
+    /*//////////////////////////////////////////////////////////////
                             FUNDING RUNS IT
     //////////////////////////////////////////////////////////////*/
 
@@ -1027,7 +1190,9 @@ contract WeiRollTest is Test {
         nft.approve(predicted, tRoll);
 
         vm.deal(address(this), 1 ether);
-        WeiRoll fresh = new WeiRoll{value: 1 ether}(address(nft), address(dao), address(wrapper));
+        WeiRoll fresh = new WeiRoll{value: 1 ether}(
+            address(nft), address(dao), address(wrapper), address(steth)
+        );
 
         assertEq(address(fresh), predicted, "address prediction drifted");
         assertEq(nft.ownerOf(tRoll), address(fresh), "roll.wei was not pulled in");
@@ -1046,7 +1211,7 @@ contract WeiRollTest is Test {
         vm.prank(address(roll));
         nft.transferFrom(address(roll), bob, tRoll);
 
-        WeiRoll fresh = new WeiRoll(address(nft), address(dao), address(wrapper));
+        WeiRoll fresh = new WeiRoll(address(nft), address(dao), address(wrapper), address(steth));
         assertEq(nft.ownerOf(tRoll), bob, "nothing should have been pulled");
 
         vm.deal(address(this), 1 ether);
@@ -1059,15 +1224,17 @@ contract WeiRollTest is Test {
 
     function testAZeroDependencyIsRefusedAtDeploy() public {
         vm.expectRevert(WeiRoll.NoConfig.selector);
-        new WeiRoll(address(0), address(dao), address(wrapper));
+        new WeiRoll(address(0), address(dao), address(wrapper), address(steth));
         vm.expectRevert(WeiRoll.NoConfig.selector);
-        new WeiRoll(address(nft), address(0), address(wrapper));
+        new WeiRoll(address(nft), address(0), address(wrapper), address(steth));
         vm.expectRevert(WeiRoll.NoConfig.selector);
-        new WeiRoll(address(nft), address(dao), address(0));
+        new WeiRoll(address(nft), address(dao), address(0), address(steth));
+        vm.expectRevert(WeiRoll.NoConfig.selector);
+        new WeiRoll(address(nft), address(dao), address(wrapper), address(0));
     }
 
     function testNothingRunsUntilItIsFunded() public {
-        WeiRoll fresh = new WeiRoll(address(nft), address(dao), address(wrapper));
+        WeiRoll fresh = new WeiRoll(address(nft), address(dao), address(wrapper), address(steth));
         assertEq(fresh.roundEnd(), 0);
         assertEq(fresh.pot(), 0);
 
@@ -1080,7 +1247,7 @@ contract WeiRollTest is Test {
     }
 
     function testFundingOpensARound() public {
-        WeiRoll fresh = new WeiRoll(address(nft), address(dao), address(wrapper));
+        WeiRoll fresh = new WeiRoll(address(nft), address(dao), address(wrapper), address(steth));
         vm.deal(address(this), 1 ether);
 
         vm.expectEmit(true, false, false, true, address(fresh));
@@ -1096,7 +1263,9 @@ contract WeiRollTest is Test {
     /// @dev Deploying with value is funding too.
     function testDeployingWithValueOpensTheFirstRound() public {
         vm.deal(address(this), 1 ether);
-        WeiRoll fresh = new WeiRoll{value: 1 ether}(address(nft), address(dao), address(wrapper));
+        WeiRoll fresh = new WeiRoll{value: 1 ether}(
+            address(nft), address(dao), address(wrapper), address(steth)
+        );
         assertEq(fresh.roundEnd(), block.timestamp + fresh.ROUND_LENGTH());
         assertEq(fresh.pot(), 1 ether);
     }
@@ -1173,10 +1342,10 @@ contract WeiRollTest is Test {
             assertEq(roll.winnerOf(r), expected[r]);
 
             uint256 prize = roll.prizeOf(r);
-            uint256 before = holders[r].balance;
+            uint256 before = steth.balanceOf(holders[r]);
             vm.prank(holders[r]);
             roll.claim(r);
-            assertEq(holders[r].balance - before, prize);
+            assertEq(steth.balanceOf(holders[r]) - before, prize);
 
             assertEq(nft.getFullName(roll.roundName(r)), string.concat(vm.toString(r), ".roll.wei"));
             assertEq(
@@ -1187,7 +1356,7 @@ contract WeiRollTest is Test {
         }
 
         assertEq(roll.round(), 3);
-        assertEq(roll.reserved(), 0, "nothing should be left owed");
+        assertEq(roll.reservedShares(), 0, "nothing should be left owed");
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -1195,7 +1364,7 @@ contract WeiRollTest is Test {
     //////////////////////////////////////////////////////////////*/
 
     function testPhaseTracksTheLifecycle() public {
-        WeiRoll fresh = new WeiRoll(address(nft), address(dao), address(wrapper));
+        WeiRoll fresh = new WeiRoll(address(nft), address(dao), address(wrapper), address(steth));
         assertTrue(fresh.phase() == WeiRoll.Phase.Idle);
 
         assertTrue(roll.phase() == WeiRoll.Phase.Open);

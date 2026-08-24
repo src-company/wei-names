@@ -10,6 +10,12 @@ interface IVRFWrapper {
     function rawFulfillRandomWords(uint256 requestId, uint256[] memory randomWords) external;
 }
 
+interface ISteth {
+    function sharesOf(address) external view returns (uint256);
+    function balanceOf(address) external view returns (uint256);
+    function getPooledEthByShares(uint256) external view returns (uint256);
+}
+
 interface IWNS {
     function ownerOf(uint256) external view returns (address);
     function computeId(string calldata) external pure returns (uint256);
@@ -39,10 +45,12 @@ contract ForkWeiRollVRF is Test {
     address constant DAO = 0x00000007988A79d16cf76B5dc4cF54dc3Af24936;
     address constant WRAPPER = 0x02aae1A04f9828517b3007f83f6181900CaD910c;
     address constant COORDINATOR = 0xD7f86b4b8Cae7D942340FF628F82735b7a20893a;
+    address constant STETH = 0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84;
 
     uint256 constant GAS_PRICE = 20 gwei;
 
     WeiRoll roll;
+    uint256 preDust;
     uint256 idA;
     uint256 idB;
     bool skipped;
@@ -56,8 +64,12 @@ contract ForkWeiRollVRF is Test {
         // The wrapper prices a request off `tx.gasprice` (it is pre-paying the callback), which
         // Foundry leaves at 0. Without this the quote is 0 and the test proves nothing about cost.
         vm.txGasPrice(GAS_PRICE);
-        roll = new WeiRoll(NFT, DAO, WRAPPER);
-        vm.deal(address(roll), 5 ether);
+        address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)));
+        preDust = predicted.balance;
+        roll = new WeiRoll(NFT, DAO, WRAPPER, STETH);
+        vm.deal(address(this), 5 ether);
+        (bool funded,) = address(roll).call{value: 5 ether}(""); // staked on arrival
+        require(funded, "funding failed");
 
         // Two live top-level names. Owners are read from chain, so a transfer can't stale the test.
         idA = IWNS(NFT).computeId("ross.wei");
@@ -116,7 +128,11 @@ contract ForkWeiRollVRF is Test {
         assertGt(winner, 0, "wrapper's gas-limited callback did not settle the round");
         address holder0 = IWNS(NFT).ownerOf(winner);
         assertTrue(winner == idA || winner == idB, "winner is not an entrant");
-        assertEq(roll.prizeOf(0), address(roll).balance, "prize is not the whole pot");
+        emit log_named_decimal_uint("stray ETH found at the address and swept in", preDust, 18);
+        assertApproxEqAbs(
+            roll.prizeOf(0), 5 ether + preDust, 4, "the prize is the whole staked pot"
+        );
+        assertEq(roll.pot(), 0, "nothing left unreserved");
         assertEq(roll.round(), 1);
 
         // A winning name sold on carries its prize: the old holder can no longer claim, the new
@@ -136,12 +152,12 @@ contract ForkWeiRollVRF is Test {
         uint256 prize = roll.prizeOf(0);
         address holder = IWNS(NFT).ownerOf(winner);
         assertEq(holder, buyer);
-        uint256 before = holder.balance;
+        uint256 before = ISteth(STETH).balanceOf(holder);
         vm.prank(holder);
         roll.claim(0);
-        assertEq(holder.balance - before, prize, "winner was not paid the pot");
-        assertEq(roll.reserved(), 0);
-        assertEq(address(roll).balance, 0);
+        assertEq(ISteth(STETH).balanceOf(holder) - before, prize, "winner was not paid in stETH");
+        assertEq(roll.reservedShares(), 0);
+        assertEq(roll.pot(), 0, "the pot was paid out in full");
 
         // roll.wei -> 0.roll.wei -> <winning label>.0.roll.wei, against the real registry.
         uint256 roundName = roll.roundName(0);
@@ -164,6 +180,24 @@ contract ForkWeiRollVRF is Test {
     /// @notice The invariant {WeiRoll.CLAIM_WINDOW} rests on, checked against the deployed
     ///         NameNFT rather than a local copy: a name that lapses cannot be re-registered by
     ///         anyone else before the claim window shuts, so a winner cannot be sniped mid-window.
+    /// @notice Funding really does become stETH on the live Lido, and the winner is really paid in
+    ///         it — `transferShares` and all — rather than in ETH.
+    function testFundingIsStakedOnLiveLido() public onlyFork {
+        WeiRoll fresh = new WeiRoll(NFT, DAO, WRAPPER, STETH);
+        vm.deal(address(this), 1 ether);
+        (bool ok,) = address(fresh).call{value: 0.5 ether}("");
+        assertTrue(ok, "funding failed");
+
+        assertEq(address(fresh).balance, 0, "no idle ETH left behind");
+        assertGt(ISteth(STETH).sharesOf(address(fresh)), 0, "no shares minted");
+        // Lido's share division credits a hair under 1:1 on the way in — measured at 2 wei.
+        assertApproxEqAbs(fresh.pot(), 0.5 ether, 4, "pot should be what was staked");
+        assertEq(fresh.roundEnd(), block.timestamp + fresh.ROUND_LENGTH(), "round opened");
+
+        emit log_named_decimal_uint("pot after staking 0.5 ETH (stETH)", fresh.pot(), 18);
+        emit log_named_uint("shares held", ISteth(STETH).sharesOf(address(fresh)));
+    }
+
     function testLiveGracePeriodOutlastsTheClaimWindow() public onlyFork {
         uint256 id = IWNS(NFT).computeId("ross.wei");
         uint256 exp = IWNS(NFT).expiresAt(id);
@@ -202,7 +236,7 @@ contract ForkWeiRollVRF is Test {
         roll.rollOver(0);
 
         assertEq(roll.pot(), prize, "the prize came back");
-        assertEq(roll.reserved(), 0);
+        assertEq(roll.reservedShares(), 0);
         assertEq(roll.roundEnd(), block.timestamp + roll.ROUND_LENGTH(), "and it reopened");
         assertEq(roll.trophyOf(0), 0, "an unclaimed round is never named");
     }
@@ -224,13 +258,13 @@ contract ForkWeiRollVRF is Test {
         uint256 dust = predicted.balance;
 
         vm.deal(address(this), 1 ether);
-        WeiRoll fresh = new WeiRoll{value: 0.25 ether}(NFT, DAO, WRAPPER);
+        WeiRoll fresh = new WeiRoll{value: 0.25 ether}(NFT, DAO, WRAPPER, STETH);
 
         assertEq(address(fresh), predicted, "address prediction drifted");
         assertEq(IWNS(NFT).ownerOf(parent), address(fresh), "roll.wei was not pulled in");
         assertEq(IWNS(NFT).reverseResolve(address(fresh)), "roll.wei");
         assertEq(IWNS(NFT).resolve(parent), address(fresh), "roll.wei should resolve to it");
-        assertEq(fresh.pot(), 0.25 ether + dust);
+        assertApproxEqAbs(fresh.pot(), 0.25 ether + dust, 4, "staked, less Lido rounding");
         assertEq(fresh.roundEnd(), block.timestamp + fresh.ROUND_LENGTH());
         assertTrue(fresh.phase() == WeiRoll.Phase.Open, "first round should be open");
         assertTrue(fresh.state().naming, "namespace should be live from round zero");
@@ -243,8 +277,8 @@ contract ForkWeiRollVRF is Test {
         address holder = IWNS(NFT).ownerOf(parent);
 
         vm.deal(address(this), 1 ether);
-        WeiRoll fresh = new WeiRoll{value: 0.25 ether}(NFT, DAO, WRAPPER);
-        assertGe(fresh.pot(), 0.25 ether);
+        WeiRoll fresh = new WeiRoll{value: 0.25 ether}(NFT, DAO, WRAPPER, STETH);
+        assertApproxEqAbs(fresh.pot(), 0.25 ether, 4);
         assertEq(IWNS(NFT).ownerOf(parent), holder, "nothing should have been pulled");
         assertFalse(fresh.state().naming);
 

@@ -715,6 +715,23 @@ Support-only (no explicit "against"). Weight is captured at `support` time along
 
 `WeiRoll.sol` is an **ownerless** ETH lottery for `.wei` holders, funded by WeiDAO and drawn with **Chainlink VRF v2.5**. There is no owner, no admin and no withdrawal: value leaves only as a prize or as the VRF fee. It runs itself — an empty pot means no round, ETH arriving opens one, and settling pays the whole pot out and stops until the next funding. No keeper, no schedule.
 
+### The pot is staked
+
+ETH sent here is submitted to **Lido** on arrival, so a pot waiting out a round earns and anyone can watch it grow. Everything owed is denominated in **shares**, not stETH:
+
+```
+reservedShares          shares owed to drawn-but-unclaimed rounds
+pot()                   getPooledEthByShares(sharesOf(this) − reservedShares)
+prizeSharesOf(r)        a settled round's claim, fixed
+prizeOf(r)              what that claim is worth in stETH today
+```
+
+Shares are what a rebase holds constant, so a prize **keeps earning while it waits to be claimed**, and `transferShares` sidesteps the 1–2 wei rounding stETH puts on `transfer` — measured at 2 wei on the live contract. `draw` never touches Lido: its fee comes from the caller and goes straight to Chainlink, so a paused or rate-limited staking queue can stall *funding* but never a *settlement*.
+
+The constructor stakes its whole balance rather than just `msg.value`, which sweeps in any stray wei already sitting at the deploy address (there was 0.000577 ETH at the one the fork test lands on). `stake()` is a permissionless no-op sweeper for the one case `receive()` cannot catch — a forced `selfdestruct` transfer, which runs no code.
+
+**Lido is a dependency this contract cannot be rescued from**, and the prize is stETH rather than ETH: it traded near 0.94 in June 2022, so a prize can lose ETH value between draw and claim.
+
 ### Entries — an opt-in registry, because WNS isn't enumerable
 
 Token IDs are namehashes and `NameNFT` implements no `ERC721Enumerable`, so "the set of holders" doesn't exist on-chain to index into. Holders opt in per round with `enter(tokenId, boostPid)`, which checks ownership and eligibility live. That registry *is* the candidate set — no snapshot, no Merkle root, no indexer, nothing to trust.
@@ -769,7 +786,7 @@ Every stage is drivable from views alone — no event indexing needed for the li
 
 | Call | Gives you |
 |---|---|
-| `state()` | one struct: `phase`, `round`, `roundEnd`, `pot`, `reserved`, `tickets`, `totalWeight`, `requestId`, `resetAt`, `drawPrice`, `drawSettles`, `naming` |
+| `state()` | one struct: `phase`, `round`, `roundEnd`, `pot`, `reserved`, `tickets`, `totalWeight`, `requestId`, `resetAt`, `drawPrice`, `resets`, `drawSettles`, `naming` — stETH-denominated |
 | `phase()` | `Idle` (waiting on funding) · `Open` (entries) · `Ready` (`draw` callable) · `Drawing` (seed in flight) |
 | `roundInfo(r)` | one struct per round: tickets, weight, winner, boost, prize, `claimBy`, `roundName`, `trophy`, `settled`, `resolved` |
 | `weightIn(r, tokenId)` | a name's own ticket weight — over `totalWeight(r)` for its odds |
@@ -782,7 +799,7 @@ Every stage is drivable from views alone — no event indexing needed for the li
 
 ### Setup
 
-Constructor: `WeiRoll(nameNFT, weiDAO, vrfWrapper)`, `payable`. Pre-approve the address the deploy will land at for `roll.wei` and the constructor **pulls it in and sets its primary name**, so the contract reverse-resolves to `roll.wei` — the same handover trick WeiDAO uses for `dao.wei`. Send ETH with the deploy and the first round opens in the same transaction. Unlike WeiDAO, **none of it is load-bearing**: with no approval the deploy still succeeds and the name can be transferred in later, and the lottery runs without it — only naming stops. Runbook: [ops/ROLL.md](ops/ROLL.md).
+Constructor: `WeiRoll(nameNFT, weiDAO, vrfWrapper, steth)`, `payable`. Every dependency is checked non-zero — an ownerless contract has no way back from a mistyped one. Pre-approve the address the deploy will land at for `roll.wei` and the constructor **pulls it in and sets its primary name**, so the contract reverse-resolves to `roll.wei` — the same handover trick WeiDAO uses for `dao.wei`. Send ETH with the deploy and the first round opens in the same transaction. Unlike WeiDAO, **none of it is load-bearing**: with no approval the deploy still succeeds and the name can be transferred in later, and the lottery runs without it — only naming stops. Runbook: [ops/ROLL.md](ops/ROLL.md).
 
 WeiDAO funds it with an ordinary proposal targeting the contract with a `value` and empty calldata. Anyone may top it up the same way at any time; a top-up mid-round does not extend the window.
 
