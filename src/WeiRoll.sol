@@ -71,63 +71,31 @@ interface IVRFV2PlusWrapper {
 }
 
 /// @title WeiRoll
-/// @notice Ownerless ETH lottery for WNS name holders, drawn with Chainlink VRF.
-/// @dev No owner, no admin, no withdrawal: value leaves only as a prize or the VRF fee. The long
-///      form — rationale, VRF footgun review, integration notes — is in the README under "Lottery
-///      (WeiRoll)". Here is only what reading the code requires.
+/// @notice Ownerless ETH lottery for WNS name holders, drawn with Chainlink VRF, staked in Lido.
+/// @dev No owner, admin, or withdrawal: value leaves only as a prize, the VRF fee, or a {rescue}.
+///      Full rationale is in the README ("Lottery (WeiRoll)"); this header is only the non-obvious.
 ///
-/// ── A round ────────────────────────────────────────────────────────────────────────────
-/// Funding opens a {ROUND_LENGTH} entry window; {draw} settles it and pays the whole pot, leaving
-/// nothing to run on until the next funding. Whoever calls {draw} pays the VRF fee out of their own
-/// pocket, so the pot is entirely prize money and the draw's timing is theirs to choose. A round
-/// that cannot settle — under two tickets, or a wrapper that will not quote — is abandoned for a
-/// fresh one rather than reverting: entries are shut by then and no owner exists to unstick it.
-/// Abandoning rather than extending is also what stops a ticket outliving the name that bought it.
+///      Funding opens a {ROUND_LENGTH} window and stakes into Lido; {draw} settles it and pays the
+///      whole pot; then it idles until the next funding. The {draw} caller pays the VRF fee, so the
+///      pot is all prize. An unsettleable round (under two tickets, or the wrapper won't quote) is
+///      abandoned for a fresh one — never reverting (entries are shut, no owner to unstick it), and
+///      never carrying a ticket past the name that bought it.
 ///
-/// ── The pot is staked ──────────────────────────────────────────────────────────────────
-/// ETH sent here is submitted to Lido on arrival, so a pot waiting out a round earns and everyone
-/// can watch it grow. Everything owed is denominated in *shares* rather than stETH: shares are
-/// what rebasing holds constant, so a prize keeps earning while it waits to be claimed, and
-/// {ISTETH.transferShares} sidesteps the 1-2 wei rounding stETH puts on `transfer`. The winner is
-/// paid in stETH. {draw} never touches Lido — its fee comes from the caller and goes straight to
-/// Chainlink — so a paused or rate-limited staking queue can stall funding but never a settlement.
+///      Accounting is in stETH *shares*, which a rebase holds constant: a prize keeps earning until
+///      claimed, and {ISTETH.transferShares} avoids stETH's 1-2 wei transfer rounding. {draw} never
+///      touches Lido, so a paused queue stalls funding but never a settlement.
 ///
-/// ── Odds ───────────────────────────────────────────────────────────────────────────────
-/// Ticket weight is WeiDAO's `weightOf`: the ETH it would cost today to hold the name for its
-/// remaining runway. Subdomains are free to mint, weigh 0, and are excluded. One-name-one-ticket
-/// would instead put odds on sale at the 0.001 ETH default fee.
+///      Weight is WeiDAO's `weightOf` (cost-to-hold), snapshotted at {enter}; subdomains and
+///      expired names weigh 0. A draw records a tokenId: {claim} pays whoever *holds* it, so selling
+///      forfeits to the buyer but lapsing does not (an inactive name is frozen, still held, and —
+///      grace > {CLAIM_WINDOW} — un-re-registerable in-window). The boost is spent at the draw,
+///      checked only at {enter}. Claiming mints `<label>.<r>.roll.wei` best-effort; see {nameWinner}.
 ///
-/// ── Winners hold names, not addresses ──────────────────────────────────────────────────
-/// A draw records a tokenId, so {claim} pays whoever *holds* that name — nothing more. Selling it
-/// forfeits to the buyer, by design. Letting it lapse does not: NameNFT freezes an inactive name's
-/// transfers, so a winner whose name drifts into grace still holds it and still claims, and its
-/// 90-day grace exceeds {CLAIM_WINDOW}, so no one can re-register it inside the window to claim in
-/// their place. Holding is the whole test.
-///
-/// ── Rounds are names ───────────────────────────────────────────────────────────────────
-/// While this contract holds `roll.wei`, claiming round 7 mints `7.roll.wei` here and the winner's
-/// label beneath it, so history browses as `roll.wei` → `7.roll.wei` → `alice.7.roll.wei`. Naming
-/// is a swallowed self-call and can never block a payout. See {nameWinner}.
-///
-/// ── Caveats ────────────────────────────────────────────────────────────────────────────
-/// • {resetRequest} departs from Chainlink's rule against re-requesting randomness. Nothing can be
-///   discarded — it fires only when nothing was delivered — and the alternative is stranding the
-///   pot forever on one undelivered request. Residual: whoever controls fulfilment can force one
-///   fresh draw per {REQUEST_TIMEOUT}, each burning a fee. Counted in {resetsOf} to make it visible.
-/// • Odds track the *current* fee schedule, which WeiDAO governs: raising a length tier lifts the
-///   odds of everyone already holding that length. WeiDAO carries the same caveat for votes.
-/// • The boost costs only gas, so it confers no edge — it taxes the unengaged rather than
-///   differentiating. A scarce boost would be the dangerous direction.
-/// • The prize is stETH, not ETH: it traded near 0.94 in June 2022, so a prize can lose ETH value
-///   between draw and claim. Denominating in shares at least keeps it earning while it waits.
-/// • Two hardcoded dependencies could strand the pot if permanently deprecated. For the VRF
-///   wrapper, {rescue} is the backstop: a year with no draw returns the unreserved pot to WeiDAO.
-///   For Lido there is no backstop — if `transferShares` ever permanently fails, prizes cannot be
-///   paid and the pot cannot be swept. That half is an accepted, unrescuable risk.
-/// • Naming needs an active `roll.wei` held here; without one only the namespace stops. Renewal is
-///   left outside: `NameNFT.renew` is permissionless, and a lapsed parent freezes every badge
-///   under it, so holders are motivated.
-/// • Weight is snapshotted at {enter}, drifting down over at most one {ROUND_LENGTH}.
+///      Caveats: {resetRequest} re-requests VRF only when nothing was delivered — grindable (one
+///      draw per {REQUEST_TIMEOUT}, surfaced in {resetsOf}) but never bricked. Odds track WeiDAO's
+///      live fee schedule. The prize is stETH (depeg risk). If the wrapper is deprecated, {rescue}
+///      returns the pot to WeiDAO after a year; if Lido's `transferShares` dies, nothing moves —
+///      the one unrescuable risk. `roll.wei` must be kept renewed (permissionless) or naming stops.
 contract WeiRoll is ReentrancyGuard {
     error NotLive();
     error TooSoon();
@@ -440,14 +408,8 @@ contract WeiRoll is ReentrancyGuard {
                                   DRAW
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Close the round and ask Chainlink for a seed. Permissionless, and the caller pays
-    ///         the VRF fee: send at least {drawPrice}. Anything over stays in the pot.
-    /// @dev The fee used to come out of the pot, which on a small one could burn most of the prize
-    ///      — and made the draw's timing a decision about gas rather than about the round. The
-    ///      caller chooses when to call and therefore what the fee costs, so they are the right
-    ///      payer; every entrant has a prize waiting on it. The pot is now entirely prize money.
-    ///
-    ///      An undrawable round is abandoned for a fresh one rather than reverting; see the header.
+    /// @notice Close the round and request a seed. Permissionless; caller pays the VRF fee (send at
+    ///         least {drawPrice}, excess refunded). An undrawable round is abandoned, not reverted.
     function draw() external payable nonReentrant {
         if (roundEnd == 0) revert NotRunning();
         if (block.timestamp < roundEnd) revert TooSoon();
@@ -539,16 +501,10 @@ contract WeiRoll is ReentrancyGuard {
     }
 
     /// @notice Sweep the unreserved pot back to WeiDAO if no draw has been requested for
-    ///         {RESCUE_TIMEOUT}. Permissionless. The one escape from an otherwise permanent lock.
-    /// @dev If the VRF wrapper is ever deprecated at its hardcoded address, draws stop and
-    ///      {lastRequest} stops advancing; after a year anyone may return the stranded pot to the
-    ///      DAO that funded it — owned by the same .wei holders — instead of leaving it locked. Only
-    ///      the unreserved pot moves; a settled winner's reserved prize stays claimable while Lido
-    ///      works. Not terminal: fresh funding reopens a round and a recovered wrapper resumes as
-    ///      normal. It cannot fire in ordinary use — any successful draw resets the clock, and a
-    ///      funded round with entrants is always drawable by someone with a prize waiting. If Lido
-    ///      itself is what failed, nothing can move and this cannot help; that half stays a
-    ///      documented, unrescuable risk.
+    ///         {RESCUE_TIMEOUT}. Permissionless — the one escape from a deprecated VRF wrapper.
+    /// @dev A successful draw stamps {lastRequest}, so this can't fire on a working lottery. Only
+    ///      the unreserved pot moves (reserved prizes stay claimable); not terminal — funding
+    ///      reopens a round. Useless if Lido itself is what failed; that half is unrescuable.
     function rescue() external nonReentrant {
         if (block.timestamp < lastRequest + RESCUE_TIMEOUT) revert NotStuck();
         uint256 shares = steth.sharesOf(address(this)) - reservedShares;
@@ -569,14 +525,9 @@ contract WeiRoll is ReentrancyGuard {
         if (shares == 0) revert NotWinner();
         if (block.timestamp > claimBy[r]) revert ClaimWindowOver();
 
-        // The only surviving check: you must still hold the winning name. NameNFT freezes an
-        // inactive name's transfers, so a winner whose name lapses into grace still holds it and
-        // can still claim (M-2) — and no one can re-register it inside the window (grace > window),
-        // so ownership cannot move to a stranger. Selling forfeits to the buyer, by design.
-        //
-        // The boost is not re-checked: it weighted the draw, which is already over, so re-checking
-        // could only forfeit a prize already won — through ordinary governance (unsupporting) or a
-        // permissionless prune after a renewal. It buys no integrity (M-1).
+        // Holding the name is the whole test: selling forfeits to the buyer, lapsing does not (an
+        // inactive name is frozen and un-re-registerable in-window). The boost is spent at the
+        // draw, so it is not re-checked here — that could only forfeit a prize already won.
         uint256 tokenId = winnerOf[r];
         if (nft.ownerOf(tokenId) != msg.sender) revert NotWinner();
 
@@ -610,14 +561,10 @@ contract WeiRoll is ReentrancyGuard {
 
     /// @notice Record a claimed round in the namespace: mint `<r>.roll.wei` here, point it at the
     ///         winner, and mint `<label>.<r>.roll.wei` to them.
-    /// @dev External only so {claim} can wrap it in try/catch; callable by this contract alone.
-    ///      The round name stays here: resolver writes need ownership, and it must keep owning the
-    ///      badge's parent. Labels leave NameNFT normalised, so none is validated.
-    ///
-    ///      Per-round parents are what make repeat wins work — `alice.7` and `alice.12` cannot
-    ///      collide — and they matter for safety too: NameNFT lets a parent owner re-register its
-    ///      own subdomains, burning an NFT its holder already has. No path here re-enters a
-    ///      settled round, so that power is never used.
+    /// @dev External so {claim} can try/catch it; self-call only. The round name is kept (resolver
+    ///      writes need ownership; it parents the badge). Per-round parents stop repeat wins
+    ///      colliding — and since a parent owner can re-register its own subdomains, this contract
+    ///      never re-enters a settled round, so it never overwrites a badge someone holds.
     function nameWinner(uint256 r, uint256 tokenId, address to, uint256 prize) external {
         if (msg.sender != address(this)) revert Unauthorized();
 
