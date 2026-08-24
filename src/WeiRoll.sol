@@ -20,6 +20,7 @@ interface INameNFT {
     function isAvailable(string memory label, uint256 parentId) external view returns (bool);
     function registerSubdomain(string memory label, uint256 parentId) external returns (uint256);
     function setAddr(uint256 tokenId, address addr) external;
+    function setPrimaryName(uint256 tokenId) external;
     function setText(uint256 tokenId, string memory key, string memory value) external;
     function transferFrom(address from, address to, uint256 tokenId) external;
 }
@@ -238,10 +239,26 @@ contract WeiRoll {
     /// @notice `<label>.<r>.roll.wei`, the winner's badge for a round (0 = never named).
     mapping(uint256 => uint256) public trophyOf;
 
+    /// @dev Send ETH with the deploy to open the first round immediately, and pre-approve this
+    ///      (deterministic, e.g. CREATE3) address for `roll.wei` to hand the namespace over in the
+    ///      same transaction. Both are optional and everything here is best-effort: with no
+    ///      approval the deploy still succeeds and the name can be transferred in later, and unlike
+    ///      WeiDAO — which refuses to launch a treasury without its veto backstop — nothing this
+    ///      constructor does is load-bearing. Naming is decoration; the lottery runs without it.
     constructor(address _nft, address _dao, address _wrapper) payable {
         nft = INameNFT(_nft);
         dao = IWeiDAO(_dao);
         wrapper = IVRFV2PlusWrapper(_wrapper);
+
+        if (_nft.code.length != 0) {
+            try nft.ownerOf(PARENT) returns (address holder) {
+                try nft.transferFrom(holder, address(this), PARENT) {
+                    // Owning the parent, reverse-resolve to it: `roll.wei` now names this contract.
+                    try nft.setPrimaryName(PARENT) {} catch {}
+                } catch {}
+            } catch {}
+        }
+
         _open();
     }
 

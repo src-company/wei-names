@@ -825,6 +825,49 @@ contract WeiRollTest is Test {
                             FUNDING RUNS IT
     //////////////////////////////////////////////////////////////*/
 
+    /// @dev The WeiDAO handover trick: pre-approve the address the deploy will land at, and the
+    ///      constructor pulls `roll.wei` in itself, so deploy and namespace handover are one
+    ///      transaction. Funding it in the same breath opens the first round on the spot.
+    function testConstructorPullsInRollWeiWhenPreApproved() public {
+        address z3 = makeAddr("z3");
+        vm.prank(address(roll));
+        nft.transferFrom(address(roll), z3, tRoll); // park it on an EOA to hand over
+
+        address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)));
+        vm.prank(z3);
+        nft.approve(predicted, tRoll);
+
+        vm.deal(address(this), 1 ether);
+        WeiRoll fresh = new WeiRoll{value: 1 ether}(address(nft), address(dao), address(wrapper));
+
+        assertEq(address(fresh), predicted, "address prediction drifted");
+        assertEq(nft.ownerOf(tRoll), address(fresh), "roll.wei was not pulled in");
+        assertEq(
+            nft.reverseResolve(address(fresh)), "roll.wei", "should reverse-resolve to roll.wei"
+        );
+        assertEq(nft.resolve(tRoll), address(fresh), "roll.wei should resolve to the contract");
+        assertEq(
+            fresh.roundEnd(), block.timestamp + fresh.ROUND_LENGTH(), "first round should be open"
+        );
+        assertEq(fresh.pot(), 1 ether);
+    }
+
+    /// @dev No approval is not a failure: the deploy still works and the name arrives later.
+    function testDeployWithoutTheNameStillWorks() public {
+        vm.prank(address(roll));
+        nft.transferFrom(address(roll), bob, tRoll);
+
+        WeiRoll fresh = new WeiRoll(address(nft), address(dao), address(wrapper));
+        assertEq(nft.ownerOf(tRoll), bob, "nothing should have been pulled");
+
+        vm.deal(address(this), 1 ether);
+        (bool ok,) = address(fresh).call{value: 1 ether}("");
+        assertTrue(ok);
+        vm.prank(alice);
+        fresh.enter(tAlice, 0); // runs fine, it just cannot name anything yet
+        assertEq(fresh.ticketCount(0), 1);
+    }
+
     function testNothingRunsUntilItIsFunded() public {
         WeiRoll fresh = new WeiRoll(address(nft), address(dao), address(wrapper));
         assertEq(fresh.roundEnd(), 0);

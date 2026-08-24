@@ -4,6 +4,12 @@ pragma solidity ^0.8.30;
 import {Test} from "@forge/Test.sol";
 import {WeiRoll} from "../src/WeiRoll.sol";
 
+/// @dev The wrapper is itself a VRF consumer: the coordinator calls this, and the wrapper then
+///      calls the consumer with exactly `callbackGasLimit` forwarded.
+interface IVRFWrapper {
+    function rawFulfillRandomWords(uint256 requestId, uint256[] memory randomWords) external;
+}
+
 interface IWNS {
     function ownerOf(uint256) external view returns (address);
     function computeId(string calldata) external pure returns (uint256);
@@ -28,6 +34,7 @@ contract ForkWeiRollVRF is Test {
     address constant NFT = 0x0000000000696760E15f265e828DB644A0c242EB;
     address constant DAO = 0x00000007988A79d16cf76B5dc4cF54dc3Af24936;
     address constant WRAPPER = 0x02aae1A04f9828517b3007f83f6181900CaD910c;
+    address constant COORDINATOR = 0xD7f86b4b8Cae7D942340FF628F82735b7a20893a;
 
     uint256 constant GAS_PRICE = 20 gwei;
 
@@ -89,13 +96,17 @@ contract ForkWeiRollVRF is Test {
             "fee actually paid (ETH)", balBefore - address(roll).balance, 18
         );
 
-        // Deliver the callback exactly as the wrapper would.
+        // Deliver the callback the way it actually arrives: the coordinator fulfils the wrapper,
+        // and the wrapper forwards to us with exactly CALLBACK_GAS. The wrapper swallows a failed
+        // callback rather than reverting, so the winner assertion below is what proves our
+        // settlement fits the gas limit on the real path.
         uint256[] memory words = new uint256[](1);
         words[0] = uint256(keccak256("wei roll"));
-        vm.prank(WRAPPER);
-        roll.rawFulfillRandomWords(requestId, words);
+        vm.prank(COORDINATOR);
+        IVRFWrapper(WRAPPER).rawFulfillRandomWords(requestId, words);
 
         uint256 winner = roll.winnerOf(0);
+        assertGt(winner, 0, "wrapper's gas-limited callback did not settle the round");
         assertTrue(winner == idA || winner == idB, "winner is not an entrant");
         assertEq(roll.prizeOf(0), address(roll).balance, "prize is not the whole pot");
         assertEq(roll.round(), 1);
