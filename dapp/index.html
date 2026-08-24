@@ -3703,12 +3703,16 @@ async function doFreeMint() {
     if (!readContract) await getRpc();
     if (!readContract) { showFreeStatus('RPC unavailable', 'error'); btn.disabled = false; return; }
 
-    // Verify registrar config is still enabled + free
+    // Verify registrar config is still enabled + free. Use the provider getRpc()
+    // hands back rather than the module-level `rpcProvider`: invalidateRpc() (the
+    // custom-RPC settings sheet) nulls that field, and reading it here would be a
+    // null deref rather than a rebuilt provider.
     showFreeStatus('Checking availability...', '');
+    const freeRpc = await getRpc();
     const [cfgRes, parentOwnerRes, escrowRes] = await Promise.all([
-      rpcProvider.call({ to: SUBDOMAIN_REGISTRAR, data: regIface.encodeFunctionData('config', [ID_WEI_PARENT]) }),
-      rpcProvider.call({ to: CONTRACT, data: ownerOfIface.encodeFunctionData('ownerOf', [ID_WEI_PARENT]) }),
-      rpcProvider.call({ to: SUBDOMAIN_REGISTRAR, data: regIface.encodeFunctionData('escrowedController', [ID_WEI_PARENT]) })
+      freeRpc.call({ to: SUBDOMAIN_REGISTRAR, data: regIface.encodeFunctionData('config', [ID_WEI_PARENT]) }),
+      freeRpc.call({ to: CONTRACT, data: ownerOfIface.encodeFunctionData('ownerOf', [ID_WEI_PARENT]) }),
+      freeRpc.call({ to: SUBDOMAIN_REGISTRAR, data: regIface.encodeFunctionData('escrowedController', [ID_WEI_PARENT]) })
     ]);
     const cfg = regIface.decodeFunctionResult('config', cfgRes);
     const parentOwner = ownerOfIface.decodeFunctionResult('ownerOf', parentOwnerRes)[0];
@@ -4227,13 +4231,17 @@ initPending();
 // Supports both top-level (wei.domains/#name) and subdomains (wei.domains/#sub.name)
 function initFromHash() {
   const hash = window.location.hash.slice(1); // Remove #
-  if (hash) {
-    let name = decodeURIComponent(hash);
-    if (name.endsWith('.wei')) name = name.slice(0, -4);
-    if (name) {
-      $('nameInput').value = name;
-      checkName();
-    }
+  if (!hash) return;
+  // decodeURIComponent throws URIError on a malformed escape (a bare '%', a
+  // truncated '%E0%A4%A'). This runs at top level BEFORE walletInit(), so an
+  // unguarded throw aborted the rest of the inline script: no hashchange
+  // listener, no wallet DOM, no connect button — wei.domains/#% was a dead page.
+  let name;
+  try { name = decodeURIComponent(hash); } catch (_) { name = hash; }
+  if (name.endsWith('.wei')) name = name.slice(0, -4);
+  if (name) {
+    $('nameInput').value = name;
+    checkName();
   }
 }
 
@@ -4260,8 +4268,9 @@ function copyShareLink() {
   });
 }
 
-// Init from hash on load
-initFromHash();
+// Init from hash on load. Belt-and-braces: nothing about parsing a URL fragment
+// is worth taking walletInit() below down with it.
+try { initFromHash(); } catch (e) { console.error('initFromHash failed:', e); }
 
 // Autofocus the name field on desktop (not touch — avoids popping the mobile
 // keyboard on load) when nothing was pre-filled from the URL hash.

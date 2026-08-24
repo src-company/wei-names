@@ -293,7 +293,12 @@ export async function handleRequest(request, env) {
         ? `${sub} is not an on-chain page: it answers neither ERC-4804 resolveMode() nor ERC-8244 html().\n`
         : `No on-chain dapp or IPFS/IPNS content set for ${sub}.\n` +
             `Set an addr (ERC-4804 contract) or a contenthash on this name at https://wei.domains to publish here.\n`,
-      { status: 404, headers: { 'content-type': 'text/plain; charset=utf-8' } },
+      // `no-store` for the same reason the depth guard above carries it: 404 is
+      // heuristically cacheable (RFC 9111 4.2.2), and this is precisely the 404
+      // a name gets in the seconds BEFORE its owner sets a contenthash. Letting
+      // a browser pin it defeats the whole premise that a freshly registered
+      // name resolves instantly with no DNS write.
+      { status: 404, headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' } },
     )
   }
 
@@ -389,23 +394,48 @@ export async function handleRequest(request, env) {
   if (mode === 'proxy') {
     // Stream the content through the gateway, keeping <label>.wei.limo in the bar.
     // Heavier: the gateway carries the bandwidth. Prefer `redirect` at scale.
-    const upstream = await fetch(target, {
-      method: request.method,
-      headers: { accept: request.headers.get('accept') || '*/*' },
-    })
+    let upstream
+    try {
+      upstream = await fetch(target, {
+        method: request.method,
+        headers: { accept: request.headers.get('accept') || '*/*' },
+      })
+    } catch (e) {
+      // An unreachable IPFS gateway is upstream trouble like any other; without
+      // this it escaped handleRequest entirely and server.js turned it into a
+      // bare 500 with no retry-after and no cache-control.
+      return upstreamError(e, 'fetching ' + target)
+    }
     // Forward only a safe subset. Never propagate Set-Cookie: upstream content
     // is untrusted and must not be able to set cookies on a *.wei.limo origin.
-    const PASS = ['content-type', 'content-length', 'etag', 'last-modified']
+    //
+    // content-length is deliberately NOT forwarded. fetch() transparently
+    // decodes content-encoding but leaves the ORIGINAL (compressed)
+    // content-length on the header object, while content-encoding itself is not
+    // in this list — so forwarding it would advertise the gzipped length for a
+    // body we hand over decompressed, and every client would truncate there.
+    // dweb.link happens to answer chunked today, which is the only reason this
+    // has not bitten; IPFS_SUBDOMAIN_GATEWAY is env-configurable and the next
+    // one need not. Let the runtime frame the body.
+    const PASS = ['content-type', 'etag', 'last-modified']
     const headers = new Headers()
     for (const h of PASS) {
       const v = upstream.headers.get(h)
       if (v) headers.set(h, v)
     }
-    headers.set('cache-control', 'public, max-age=300')
+    // Never let an upstream failure be cached: a 5xx from the IPFS gateway held
+    // for five minutes outlives the outage that caused it, which is the exact
+    // trap the depth-guard 404 above documents.
+    headers.set('cache-control', upstream.ok ? 'public, max-age=300' : 'no-store')
     // Defense-in-depth for untrusted content executing on this origin.
     headers.set('x-content-type-options', 'nosniff')
     headers.set('x-wns-name', sub)
     headers.set(idHeader[0], idHeader[1])
+    // `Response` throws rather than truncating when a null-body status carries
+    // one — same guard the contract path already has.
+    if (request.method === 'HEAD' || NULL_BODY_STATUS.has(upstream.status)) {
+      return new Response(null, { status: upstream.status, headers })
+    }
     return new Response(upstream.body, { status: upstream.status, headers })
   }
 

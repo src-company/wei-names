@@ -74,7 +74,15 @@ let calls = []
 // the string 'revert' / 'down'.
 let routes = {}
 
+// Non-RPC fetches (proxy mode reaching the IPFS gateway) are answered from
+// `proxyResponse`, which a test sets to a function of the target URL. RPC calls
+// are the ones carrying a JSON-RPC body.
+let proxyResponse = null
 globalThis.fetch = async (url, init) => {
+  if (!init?.body) {
+    if (!proxyResponse) throw new Error('unexpected non-RPC fetch: ' + url)
+    return proxyResponse(String(url), init)
+  }
   const req = JSON.parse(init.body)
   const to = req.params[0].to.toLowerCase()
   const data = req.params[0].data
@@ -347,6 +355,82 @@ eq('depth: a dotted name resolves', res.status, 200)
 calls = []
 res = await handleRequest(new Request('https://token.list.wei.limo/x'), { ...ENV, SUBDOMAIN_PARENTS: 'id' })
 eq('depth: a stale SUBDOMAIN_PARENTS env var is inert', res.status, 200)
+
+// --- proxy mode --------------------------------------------------------------
+
+const PROXY_ENV = { ...ENV, GATEWAY_MODE: 'proxy' }
+// An ipfs contenthash (ENSIP-7 0xe3 + CIDv1) so the name resolves to a gateway
+// target rather than a contract page.
+const IPFS_CH =
+  '0x0000000000000000000000000000000000000000000000000000000000000020' +
+  '0000000000000000000000000000000000000000000000000000000000000026' +
+  'e3010170122029f2d17be6139079dc48696d1f582a8530eb9805b561eda517e22a892c7e3f1f' +
+  '0000000000000000000000000000000000000000000000000000'
+function ipfsName(tokenId) {
+  return {
+    [`${WNS}:${COMPUTE_ID}`]: uint(tokenId),
+    [`${WNS}:${RESOLVE}`]: addressWord('0x' + '00'.repeat(20)),
+    [`${WNS}:${CONTENTHASH}`]: IPFS_CH,
+  }
+}
+async function proxyGet(hostAndPath, method = 'GET') {
+  calls = []
+  return handleRequest(new Request('https://' + hostAndPath, { method }), PROXY_ENV)
+}
+
+// A compressed upstream must not have its (compressed) content-length forwarded
+// on top of the body fetch() already decoded — clients truncate there.
+routes = ipfsName(20)
+proxyResponse = async () =>
+  new Response('x'.repeat(5000), {
+    status: 200,
+    headers: { 'content-type': 'text/html', 'content-length': '65', 'etag': '"abc"' },
+  })
+res = await proxyGet('p20.wei.limo/')
+eq('proxy: serves upstream body', res.status, 200)
+eq('proxy: does not forward content-length', res.headers.get('content-length'), null)
+eq('proxy: keeps the safe subset', res.headers.get('etag'), '"abc"')
+eq('proxy: body is intact', (await res.text()).length, 5000)
+
+// An upstream failure must not be cacheable.
+routes = ipfsName(21)
+proxyResponse = async () => new Response('bad gateway', { status: 502 })
+res = await proxyGet('p21.wei.limo/')
+eq('proxy: upstream 5xx is not cached', res.headers.get('cache-control'), 'no-store')
+eq('proxy: upstream status passes through', res.status, 502)
+
+// A healthy upstream still gets the normal edge TTL.
+routes = ipfsName(22)
+proxyResponse = async () => new Response('ok', { status: 200, headers: { 'content-type': 'text/html' } })
+res = await proxyGet('p22.wei.limo/')
+eq('proxy: healthy upstream is cacheable', res.headers.get('cache-control'), 'public, max-age=300')
+
+// A null-body status must not blow up the Response constructor.
+routes = ipfsName(23)
+proxyResponse = async () => new Response(null, { status: 204 })
+res = await proxyGet('p23.wei.limo/')
+eq('proxy: 204 does not throw', res.status, 204)
+
+// An unreachable IPFS gateway is upstream trouble, not a bare 500.
+routes = ipfsName(24)
+proxyResponse = async () => { throw new Error('connect ECONNREFUSED') }
+res = await proxyGet('p24.wei.limo/')
+eq('proxy: dead gateway is a 502', res.status, 502)
+eq('proxy: dead gateway is not cached', res.headers.get('cache-control'), 'no-store')
+proxyResponse = null
+
+// --- 404 cacheability --------------------------------------------------------
+
+// The 404 a name gets in the seconds before its owner sets a contenthash must
+// not be pinnable by a browser cache.
+routes = {
+  [`${WNS}:${COMPUTE_ID}`]: uint(25),
+  [`${WNS}:${RESOLVE}`]: addressWord('0x' + '00'.repeat(20)),
+  [`${WNS}:${CONTENTHASH}`]: '0x' + '00'.repeat(64),
+}
+res = await get('p25.wei.limo/')
+eq('404: no content set is a 404', res.status, 404)
+eq('404: and it is not cacheable', res.headers.get('cache-control'), 'no-store')
 
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail ? 1 : 0)
