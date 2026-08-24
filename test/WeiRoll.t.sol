@@ -457,27 +457,57 @@ contract WeiRollTest is Test {
         roll.resetRequest();
     }
 
-    function testFulfillGasFitsCallbackLimit() public {
-        // 64 tickets -> 6 binary-search steps, the deepest realistic case for cold SLOADs.
-        for (uint256 i; i < 64; ++i) {
-            address who = address(uint160(0x1000 + i));
-            uint256 id = _register(string(abi.encodePacked("n", vm.toString(i), "xx")), who);
+    /// @dev The property that matters is not "the search is logarithmic" but "worst-case callback
+    ///      gas < CALLBACK_GAS", because a reverting callback burns the randomness for good.
+    ///      Measures two real points, derives the cost of one more search step from them, and
+    ///      extrapolates to a field of 2**32 tickets — far past anything WNS could ever hold.
+    function testFulfillGasFitsTheBudgetEvenExtrapolatedAbsurdly() public {
+        // Discard the first: round 0 -> 1 writes a cold slot the later rounds do not, which is
+        // worth more than several search steps and would poison the extrapolation.
+        _measureFulfillGas(2);
+
+        uint256 small = _measureFulfillGas(8); // 3 search steps
+        uint256 large = _measureFulfillGas(64); // 6 search steps
+        assertGt(large, small, "more tickets should cost more");
+
+        uint256 perStep = (large - small) / 3;
+        emit log_named_uint("fulfill gas, 8 tickets", small);
+        emit log_named_uint("fulfill gas, 64 tickets", large);
+        emit log_named_uint("gas per extra search step", perStep);
+
+        // 2**32 tickets is 32 steps: 26 beyond the largest point measured.
+        uint256 absurd = large + perStep * 26;
+        emit log_named_uint("extrapolated gas at 2**32 tickets", absurd);
+        assertLt(absurd, 200_000, "callback would not fit CALLBACK_GAS");
+    }
+
+    /// @dev Runs one round with `n` tickets and returns the gas the callback actually burned.
+    function _measureFulfillGas(uint256 n) internal returns (uint256) {
+        _fund(5 ether);
+        uint256 r = roll.round();
+        for (uint256 i; i < n; ++i) {
+            address who = address(uint160(0x100000 + r * 1000 + i));
+            uint256 id =
+                _register(string(abi.encodePacked("g", vm.toString(r), "x", vm.toString(i))), who);
             vm.prank(who);
             roll.enter(id, 0);
         }
+        assertEq(roll.ticketCount(r), n);
+
         vm.warp(roll.roundEnd());
         roll.draw();
-        uint256 id_ = roll.requestId();
         uint256[] memory words = new uint256[](1);
-        words[0] = uint256(keccak256("seed"));
+        words[0] = uint256(keccak256(abi.encode("seed", n)));
+
+        uint256 id = roll.requestId(); // hoisted: an inline call would eat the prank
         uint256 before = gasleft();
         vm.prank(address(wrapper));
-        roll.rawFulfillRandomWords(id_, words);
+        roll.rawFulfillRandomWords(id, words);
         uint256 used = before - gasleft();
-        emit log_named_uint("fulfill gas, 64 tickets", used);
-        // Each doubling of the field adds one cold SLOAD (~2100) to the search, so the headroom
-        // here covers field sizes far beyond any plausible round.
-        assertLt(used, 200_000, "callback exceeds CALLBACK_GAS");
+
+        vm.warp(roll.claimBy(r) + 1);
+        roll.rollOver(r); // return the pot so the next measurement can run
+        return used;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -1007,6 +1037,15 @@ contract WeiRollTest is Test {
         vm.prank(alice);
         fresh.enter(tAlice, 0); // runs fine, it just cannot name anything yet
         assertEq(fresh.ticketCount(0), 1);
+    }
+
+    function testAZeroDependencyIsRefusedAtDeploy() public {
+        vm.expectRevert(WeiRoll.NoConfig.selector);
+        new WeiRoll(address(0), address(dao), address(wrapper));
+        vm.expectRevert(WeiRoll.NoConfig.selector);
+        new WeiRoll(address(nft), address(0), address(wrapper));
+        vm.expectRevert(WeiRoll.NoConfig.selector);
+        new WeiRoll(address(nft), address(dao), address(0));
     }
 
     function testNothingRunsUntilItIsFunded() public {

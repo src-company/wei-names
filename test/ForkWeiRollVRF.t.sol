@@ -16,6 +16,8 @@ interface IWNS {
     function transferFrom(address, address, uint256) external;
     function approve(address, uint256) external;
     function reverseResolve(address) external view returns (string memory);
+    function isAvailable(string calldata, uint256) external view returns (bool);
+    function expiresAt(uint256) external view returns (uint256);
     function getFullName(uint256) external view returns (string memory);
     function resolve(uint256) external view returns (address);
     function text(uint256, string calldata) external view returns (string memory);
@@ -109,9 +111,18 @@ contract ForkWeiRollVRF is Test {
 
         uint256 winner = roll.winnerOf(0);
         assertGt(winner, 0, "wrapper's gas-limited callback did not settle the round");
+        address holder0 = IWNS(NFT).ownerOf(winner);
         assertTrue(winner == idA || winner == idB, "winner is not an entrant");
         assertEq(roll.prizeOf(0), address(roll).balance, "prize is not the whole pot");
         assertEq(roll.round(), 1);
+
+        // A winning name sold on carries its prize: the old holder can no longer claim, the new
+        // one can. Checked here against the live registry, not a local mock.
+        address buyer = makeAddr("buyer");
+        vm.prank(holder0);
+        IWNS(NFT).transferFrom(holder0, buyer, winner);
+        assertFalse(roll.canClaim(0, holder0), "the seller must lose the claim");
+        assertTrue(roll.canClaim(0, buyer), "the buyer must gain it");
 
         // Hand the live roll.wei over, exactly as it would be at launch, so the claim also badges.
         uint256 parent = roll.PARENT(); // hoisted: an inline call here would eat the prank
@@ -121,6 +132,7 @@ contract ForkWeiRollVRF is Test {
 
         uint256 prize = roll.prizeOf(0);
         address holder = IWNS(NFT).ownerOf(winner);
+        assertEq(holder, buyer);
         uint256 before = holder.balance;
         vm.prank(holder);
         roll.claim(0);
@@ -144,6 +156,51 @@ contract ForkWeiRollVRF is Test {
         assertEq(IWNS(NFT).ownerOf(badge), holder, "badge not handed to the claimer");
         assertEq(IWNS(NFT).resolve(badge), holder);
         emit log_named_string("badge minted", IWNS(NFT).getFullName(badge));
+    }
+
+    /// @notice The invariant {WeiRoll.CLAIM_WINDOW} rests on, checked against the deployed
+    ///         NameNFT rather than a local copy: a name that lapses cannot be re-registered by
+    ///         anyone else before the claim window shuts, so a winner cannot be sniped mid-window.
+    function testLiveGracePeriodOutlastsTheClaimWindow() public onlyFork {
+        uint256 id = IWNS(NFT).computeId("ross.wei");
+        uint256 exp = IWNS(NFT).expiresAt(id);
+        assertGt(exp, block.timestamp, "pick a name that has not already lapsed");
+
+        vm.warp(exp + 1);
+        assertFalse(IWNS(NFT).isAvailable("ross", 0), "should still be in grace");
+
+        vm.warp(exp + roll.CLAIM_WINDOW());
+        assertFalse(
+            IWNS(NFT).isAvailable("ross", 0), "grace must outlast the claim window on live WNS"
+        );
+    }
+
+    /// @notice The unhappy path end to end: nobody claims, the window shuts, the prize returns to
+    ///         the pot and reopens the contract rather than being stranded.
+    function testUnclaimedPrizeRollsOverAgainstLiveContracts() public onlyFork {
+        _enter(idA);
+        _enter(idB);
+        vm.warp(roll.roundEnd());
+        roll.draw();
+
+        uint256 requestId = roll.requestId(); // hoisted: an inline call would eat the prank
+        uint256[] memory words = new uint256[](1);
+        words[0] = uint256(keccak256("nobody claims"));
+        vm.prank(COORDINATOR);
+        IVRFWrapper(WRAPPER).rawFulfillRandomWords(requestId, words);
+
+        uint256 prize = roll.prizeOf(0);
+        assertGt(prize, 0);
+        assertEq(roll.roundEnd(), 0, "settling leaves nothing to run on");
+
+        vm.warp(roll.claimBy(0) + 1);
+        assertFalse(roll.canClaim(0, IWNS(NFT).ownerOf(roll.winnerOf(0))));
+        roll.rollOver(0);
+
+        assertEq(roll.pot(), prize, "the prize came back");
+        assertEq(roll.reserved(), 0);
+        assertEq(roll.roundEnd(), block.timestamp + roll.ROUND_LENGTH(), "and it reopened");
+        assertEq(roll.trophyOf(0), 0, "an unclaimed round is never named");
     }
 
     /// @notice Rehearses the launch transaction itself against the live registry: pre-approve the
