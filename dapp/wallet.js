@@ -490,7 +490,14 @@ async function tryAutoConnect() {
       // Connect directly — eth_requestAccounts won't prompt if site is already authorized
       await connectWithWallet(savedWallet, { silent: true });
     } catch (e) {
-      if (btn && btn.textContent === '...') btn.textContent = 'connect';
+    } finally {
+      // The optimistic paint above can leave the button showing the last account's
+      // .wei name in "connected" styling even though nothing connected — every
+      // connectWithWallet() bail-out that returns early (already connecting, no
+      // provider) skips its own reset. A button that claims to be connected while
+      // _connectedAddress is null makes the whole app look broken: names the user
+      // owns render "Connect as owner to manage" with no way to tell why.
+      if (btn && !_connectedAddress) { btn.textContent = 'connect'; btn.classList.remove('connected'); }
     }
   }, 50);
 }

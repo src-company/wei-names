@@ -2772,7 +2772,15 @@ async function showManage(tokenId, name) {
     } else if (isSubInactive) {
       $('manageActions').innerHTML = '';
     } else {
-      $('manageActions').innerHTML = '<span style="font-size:12px;opacity:0.5;">Connect as owner to manage</span>';
+      // Distinguish "no wallet" from "wrong wallet". Collapsing both into
+      // "Connect as owner" reads as the panel not noticing a wallet that is
+      // plainly connected, when the real answer is that this name is held by a
+      // different address (another account in the same wallet, a Safe, or the
+      // subdomain registrar while the name is escrowed).
+      const hint = _connectedAddress
+        ? 'Connected as ' + _connectedAddress.slice(0, 6) + '...' + _connectedAddress.slice(-4) + ' — not this name\'s owner'
+        : 'Connect as owner to manage';
+      $('manageActions').innerHTML = '<span style="font-size:12px;opacity:0.5;">' + escapeHtml(hint) + '</span>';
     }
 
     if (stale()) return false;
