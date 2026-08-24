@@ -652,6 +652,27 @@ body.modal-open { overflow: hidden; }
     .dao-banner-arrow { display: none; }
     .dao-banner-close { padding: 11px 13px; font-size: 22px; align-self: flex-start; }
   }
+
+/* ── roll.wei lottery ──────────────────────────────────────────────── */
+.roll-panel { display:none; margin-top:16px; }
+.roll-panel.show { display:block; }
+.roll-pot { border:1px solid var(--border); padding:24px 20px; text-align:center; margin-bottom:16px; }
+.roll-pot-label { font-size:11px; text-transform:uppercase; letter-spacing:0.08em; opacity:0.5; }
+.roll-pot-amount { font-size:38px; line-height:1.1; margin:8px 0 4px; font-variant-numeric:tabular-nums; }
+.roll-pot-sub { font-size:11px; opacity:0.5; }
+.roll-meta { display:flex; gap:10px; margin-bottom:16px; }
+.roll-meta > div { flex:1; border:1px solid var(--border-muted); padding:12px; text-align:center; }
+.roll-meta-k { font-size:10px; text-transform:uppercase; letter-spacing:0.06em; opacity:0.45; }
+.roll-meta-v { font-size:16px; margin-top:4px; font-variant-numeric:tabular-nums; }
+.roll-phase { display:inline-block; font-size:10px; text-transform:uppercase; letter-spacing:0.08em; padding:3px 8px; border:1px solid var(--border); margin-bottom:14px; }
+.roll-your { border:1px solid var(--free-border,var(--border)); background:var(--free-bg,transparent); padding:12px; margin-bottom:16px; font-size:13px; }
+.roll-winners { margin-top:20px; }
+.roll-winners h4 { font-size:11px; text-transform:uppercase; letter-spacing:0.06em; opacity:0.5; margin:0 0 8px; font-weight:normal; }
+.roll-win-row { display:flex; justify-content:space-between; font-size:13px; padding:6px 0; border-bottom:1px solid var(--border-muted); }
+.roll-win-row .n { opacity:0.85; }
+.roll-win-row .p { font-variant-numeric:tabular-nums; opacity:0.6; }
+.roll-note { font-size:10px; opacity:0.45; line-height:1.5; margin-top:14px; }
+
 </style>
 </head>
 <body>
@@ -837,6 +858,15 @@ try{if(localStorage.getItem('wns_dao_banner')==='1'){var _db=document.getElement
   </div>
 </div>
 
+<!-- roll.wei lottery -->
+<div id="rollSection" class="send-section">
+  <a href="#" onclick="toggleRoll(event)" class="send-toggle" id="rollToggle">🎲 roll.wei →</a>
+  <div id="rollPanel" class="roll-panel">
+    <div style="font-size:11px;opacity:0.5;margin-bottom:12px;line-height:1.5;">An on-chain lottery for .wei holders. The pot is staked in Lido and earns while it waits; a random holder wins it, weighted by what their name costs to hold. Funded by WeiDAO, drawn with Chainlink VRF, owned by no one.</div>
+    <div id="rollBody"></div>
+  </div>
+</div>
+
 <div id="manage" class="manage">
   <h3>Manage Name</h3>
   <div class="manage-info" id="manageInfo"></div>
@@ -958,6 +988,25 @@ const ABI = [
   'function transferFrom(address from, address to, uint256 tokenId)',
   'function registerSubdomain(string label, uint256 parentId) returns (uint256)',
   'function reverseResolve(address addr) view returns (string)'
+];
+
+// ── roll.wei lottery (WeiRoll) ─────────────────────────────────────────
+// Ownerless stETH lottery for .wei holders. Set LOTTERY to the deployed
+// address to light the panel up; while empty the whole feature stays inert
+// (the toggle shows a "coming soon" note and no chain reads are made).
+const LOTTERY = ''; // TODO: WeiRoll mainnet address once deployed
+const LIDO_STETH = '0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84';
+const LOTTERY_ABI = [
+  'function state() view returns ((uint8 phase, uint256 round, uint256 roundEnd, uint256 pot, uint256 reserved, uint256 tickets, uint256 totalWeight, uint256 requestId, uint256 resetAt, uint256 drawPrice, uint256 resets, bool drawSettles, bool naming))',
+  'function roundInfo(uint256 r) view returns ((uint256 tickets, uint256 totalWeight, uint256 winner, uint256 boostPid, uint256 prize, uint256 claimBy, uint256 roundName, uint256 trophy, uint256 resets, bool settled, bool resolved))',
+  'function weightOf(uint256 tokenId) view returns (uint256)',
+  'function weightIn(uint256 r, uint256 tokenId) view returns (uint256)',
+  'function drawPrice() view returns (uint256)',
+  'function canClaim(uint256 r, address who) view returns (bool)',
+  'function ticketOf(uint256 r, uint256 tokenId) view returns (uint256)',
+  'function enter(uint256 tokenId, uint256 boostPid)',
+  'function draw() payable',
+  'function claim(uint256 r)'
 ];
 
 const MIN_COMMIT_AGE = 60;
@@ -4283,10 +4332,248 @@ try {
 // Listen for hash changes (back/forward navigation)
 window.addEventListener('hashchange', initFromHash);
 
+// ── roll.wei lottery ───────────────────────────────────────────────────
+// Self-contained. Every path guards on LOTTERY being set and swallows its
+// own errors, so nothing here can affect the rest of the dapp.
+const ROLL_PHASE = ['Idle', 'Open', 'Ready', 'Drawing'];
+let _rollTimer = null;
+
+function rollRead(p) { return new ethers.Contract(LOTTERY, LOTTERY_ABI, p); }
+
+// Until the contract is deployed (LOTTERY unset) the whole section stays hidden,
+// so nothing about the live dapp changes. Pasting the address is the only switch.
+try { if (!LOTTERY) { var _rs = document.getElementById('rollSection'); if (_rs) _rs.style.display = 'none'; } } catch (_) {}
+
+function toggleRoll(event) {
+  event.preventDefault();
+  const panel = $('rollPanel');
+  const toggle = $('rollToggle');
+  if (panel.classList.contains('show')) {
+    panel.classList.remove('show');
+    toggle.textContent = '🎲 roll.wei →';
+    if (_rollTimer) { clearInterval(_rollTimer); _rollTimer = null; }
+  } else {
+    panel.classList.add('show');
+    toggle.textContent = '← hide';
+    refreshRoll();
+    if (!_rollTimer) _rollTimer = setInterval(rollTick, 1000);
+  }
+}
+
+// Cheap per-second repaint of just the countdown, so the whole panel isn't re-fetched.
+function rollTick() {
+  try {
+    if (document.hidden) return;
+    const el = document.getElementById('rollCountdown');
+    if (!el) return;
+    const end = Number(el.dataset.end || 0);
+    if (!end) return;
+    el.textContent = fmtCountdown(end - Math.floor(Date.now() / 1000));
+  } catch (_) {}
+}
+
+function fmtCountdown(secs) {
+  if (secs <= 0) return 'now';
+  const d = Math.floor(secs / 86400), h = Math.floor((secs % 86400) / 3600),
+        m = Math.floor((secs % 3600) / 60), s = secs % 60;
+  if (d) return d + 'd ' + h + 'h';
+  if (h) return h + 'h ' + m + 'm';
+  if (m) return m + 'm ' + s + 's';
+  return s + 's';
+}
+
+function fmtEth(wei, dp = 4) {
+  try {
+    const n = parseFloat(ethers.formatEther(wei));
+    if (n === 0) return '0';
+    if (n < 0.0001) return '<0.0001';
+    return n.toLocaleString('en-US', { maximumFractionDigits: dp });
+  } catch (_) { return '0'; }
+}
+
+async function refreshRoll() {
+  const body = $('rollBody');
+  if (!body) return;
+  if (!LOTTERY) {
+    body.innerHTML = '<div class="roll-note" style="font-size:12px;opacity:0.6;">Coming soon — the contract is written and tested but not yet deployed. This panel lights up the moment it is.</div>';
+    return;
+  }
+  const me = window._connectedAddress || null;
+  try {
+    const data = await withRpc(async (p) => {
+      const c = rollRead(p);
+      const st = await c.state();
+      const round = Number(st.round);
+      // Recent settled rounds for the winners list, and claimable rounds for me.
+      const from = Math.max(0, round - 6);
+      const infos = [];
+      for (let r = round - 1; r >= from; r--) infos.push([r, await c.roundInfo(r)]);
+      let claimable = [];
+      if (me) {
+        for (let r = round; r >= from; r--) {
+          if (await c.canClaim(r, me)) claimable.push(r);
+        }
+      }
+      // Resolve winner names via NameNFT.
+      const nft = new ethers.Contract(CONTRACT, ABI, p);
+      const names = {};
+      for (const [r, info] of infos) {
+        if (info.settled && info.winner !== 0n) {
+          try { names[r] = await nft.getFullName(info.winner); } catch (_) { names[r] = null; }
+        }
+      }
+      return { st, round, infos, claimable, names };
+    });
+    renderRoll(body, data, me);
+  } catch (e) {
+    body.innerHTML = '<div class="roll-note" style="font-size:12px;opacity:0.6;">Couldn’t reach the lottery contract. It may not be deployed on this network yet.</div>';
+    console.error('refreshRoll:', e);
+  }
+}
+
+function renderRoll(body, d, me) {
+  const st = d.st;
+  const phase = Number(st.phase);
+  const now = Math.floor(Date.now() / 1000);
+  let h = '';
+
+  h += '<div class="roll-phase">' + ROLL_PHASE[phase] + ' · round ' + d.round + '</div>';
+  h += '<div class="roll-pot">'
+     + '<div class="roll-pot-label">Pot</div>'
+     + '<div class="roll-pot-amount">' + fmtEth(st.pot) + '</div>'
+     + '<div class="roll-pot-sub">stETH · earning via Lido</div></div>';
+
+  // Round meta
+  const endTs = Number(st.roundEnd);
+  const countdown = phase === 1
+    ? '<span id="rollCountdown" data-end="' + endTs + '">' + fmtCountdown(endTs - now) + '</span>'
+    : (phase === 2 ? 'closed' : (phase === 3 ? 'drawing' : '—'));
+  h += '<div class="roll-meta">'
+     + '<div><div class="roll-meta-k">Entries close</div><div class="roll-meta-v">' + countdown + '</div></div>'
+     + '<div><div class="roll-meta-k">Tickets</div><div class="roll-meta-v">' + Number(st.tickets) + '</div></div>'
+     + '</div>';
+
+  // Claim (highest priority for a connected winner)
+  if (d.claimable.length) {
+    for (const r of d.claimable) {
+      h += '<div class="roll-your"><b>You won round ' + r + '.</b> '
+         + '<button style="margin-top:8px;" onclick="rollClaim(' + r + ')">Claim prize</button></div>';
+    }
+  }
+
+  // Phase-specific action
+  if (phase === 0) {
+    h += '<div class="roll-note">No round is running. The next funding of the pot opens one automatically.</div>';
+  } else if (phase === 1) {
+    h += '<label style="margin-top:4px;">Enter a name you hold</label>'
+       + '<div class="input-wrap"><input type="text" id="rollNameInput" placeholder="yourname" autocomplete="off" autocapitalize="none" spellcheck="false" oninput="rollPreviewWeight()"><span class="suffix">.wei</span></div>'
+       + '<div id="rollWeightPreview" style="font-size:12px;opacity:0.6;margin:-4px 0 12px;min-height:16px;"></div>'
+       + '<button onclick="rollEnter()"' + (me ? '' : '') + '>' + (me ? 'Enter round ' + d.round : 'Connect & enter') + '</button>'
+       + '<div class="roll-note">Odds are proportional to what your name costs to hold for its remaining term. One ticket per name. You keep the name; winning pays whoever holds it at claim time.</div>';
+  } else if (phase === 2) {
+    if (st.drawSettles) {
+      const fee = st.drawPrice > 0n ? fmtEth(st.drawPrice, 5) : '~0.01';
+      h += '<button onclick="rollDraw()">Draw the winner</button>'
+         + '<div class="roll-note">Entries are closed. Anyone can trigger the draw. You pay the Chainlink VRF fee (≈ ' + fee + ' ETH at current gas; any excess is refunded), the pot stays whole.</div>';
+    } else {
+      h += '<div class="roll-note">This round had too few entries to draw, so calling draw will simply start a fresh one.</div>'
+         + '<button class="secondary" onclick="rollDraw()">Start next round</button>';
+    }
+  } else if (phase === 3) {
+    h += '<div class="roll-note">Winner is being drawn on-chain (Chainlink VRF, ~13 minutes for finality). This panel updates when it lands.'
+       + (Number(st.resetAt) && now > Number(st.resetAt) ? ' The request has stalled — anyone may reset it and redraw.' : '') + '</div>';
+  }
+
+  // Recent winners
+  const settled = d.infos.filter(([r, i]) => i.settled && i.winner !== 0n);
+  if (settled.length) {
+    h += '<div class="roll-winners"><h4>Recent winners</h4>';
+    for (const [r, i] of settled) {
+      const nm = d.names[r] || ('#' + i.winner.toString().slice(0, 8) + '…');
+      h += '<div class="roll-win-row"><span class="n">' + escapeHtml(nm) + '</span>'
+         + '<span class="p">' + fmtEth(i.prize) + ' stETH' + (i.resolved ? '' : ' · unclaimed') + '</span></div>';
+    }
+    h += '</div>';
+  }
+
+  body.innerHTML = h;
+  rollPreviewWeight();
+}
+
+async function rollPreviewWeight() {
+  const inp = document.getElementById('rollNameInput');
+  const out = document.getElementById('rollWeightPreview');
+  if (!inp || !out) return;
+  const name = inp.value.trim().toLowerCase().replace(/\.wei$/, '');
+  if (!name) { out.textContent = ''; return; }
+  try {
+    const id = computeIdFull(name);
+    const w = await withRpc((p) => rollRead(p).weightOf(id));
+    out.textContent = w > 0n
+      ? 'This name’s weight: ' + fmtEth(w, 5) + ' (its share of the odds)'
+      : 'Not an active top-level name — subdomains and expired names can’t enter.';
+  } catch (_) { out.textContent = ''; }
+}
+
+async function rollEnter() {
+  if (isProcessing) return;
+  if (!window._signer) { toggleWallet(); return; }
+  const inp = document.getElementById('rollNameInput');
+  const name = inp ? inp.value.trim().toLowerCase().replace(/\.wei$/, '') : '';
+  if (!name) { showStatus('Enter a name you hold', 'error'); return; }
+  isProcessing = true;
+  try {
+    const id = computeIdFull(name);
+    const c = new ethers.Contract(LOTTERY, LOTTERY_ABI, window._signer);
+    const tx = await wcTransaction(c.enter(id, 0), 'Confirm lottery entry');
+    showStatus('Entering ' + name + '.wei…', '', tx.hash);
+    await waitForTx(tx);
+    showStatus('Entered ' + name + '.wei into the round', 'success', tx.hash);
+    refreshRoll();
+  } catch (e) { handleError(e); }
+  finally { isProcessing = false; }
+}
+
+async function rollDraw() {
+  if (isProcessing) return;
+  if (!window._signer) { toggleWallet(); return; }
+  isProcessing = true;
+  try {
+    // drawPrice via eth_call can under-read (it depends on tx gas price), and the
+    // contract refunds any excess, so send a generous buffer over the quote.
+    let quote = 0n;
+    try { quote = await withRpc((p) => rollRead(p).drawPrice()); } catch (_) {}
+    const value = quote > 0n ? (quote * 3n) / 2n : ethers.parseEther('0.01');
+    const c = new ethers.Contract(LOTTERY, LOTTERY_ABI, window._signer);
+    const tx = await wcTransaction(c.draw({ value }), 'Confirm draw (VRF fee, excess refunded)');
+    showStatus('Requesting the random draw…', '', tx.hash);
+    await waitForTx(tx);
+    showStatus('Draw requested — winner lands in ~13 min', 'success', tx.hash);
+    refreshRoll();
+  } catch (e) { handleError(e); }
+  finally { isProcessing = false; }
+}
+
+async function rollClaim(r) {
+  if (isProcessing) return;
+  if (!window._signer) { toggleWallet(); return; }
+  isProcessing = true;
+  try {
+    const c = new ethers.Contract(LOTTERY, LOTTERY_ABI, window._signer);
+    const tx = await wcTransaction(c.claim(r), 'Claim your prize');
+    showStatus('Claiming round ' + r + '…', '', tx.hash);
+    await waitForTx(tx);
+    showStatus('Prize claimed — paid in stETH', 'success', tx.hash);
+    refreshRoll();
+  } catch (e) { handleError(e); }
+  finally { isProcessing = false; }
+}
+
+
 walletInit({
   appName: 'zFi Domains',
-  onConnect: [() => { contract = new ethers.Contract(CONTRACT, ABI, _signer); }, initPending, doCheckName],
-  onDisconnect: [() => { contract = null; $('commitBtn').disabled = true; }, hideManage, doCheckName]
+  onConnect: [() => { contract = new ethers.Contract(CONTRACT, ABI, _signer); }, initPending, doCheckName, () => { try { refreshRoll(); } catch (_) {} }],
+  onDisconnect: [() => { contract = null; $('commitBtn').disabled = true; }, hideManage, doCheckName, () => { try { refreshRoll(); } catch (_) {} }]
 });
 
 </script>
