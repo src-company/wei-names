@@ -72,46 +72,53 @@ retune constructor args.
 cast send $NFT "approve(address,uint256)" <PREDICTED> $ROLL_WEI --rpc-url $RPC ...
 ```
 
-## 4. Deploy with value
+## 4. Deploy
+
+One command deploys, funds+stakes, and — because you hold `roll.wei` — pre-approves the mined
+address and pulls the name in, all in one atomic broadcast. The script `require()`s a sender-bound
+salt, so the pre-approval cannot be front-run.
 
 ```
-forge create src/WeiRoll.sol:WeiRoll \
-  --constructor-args $NFT $DAO $WRAPPER $STETH \
-  --value 0.25ether --rpc-url $RPC --verify ...
+# import your deployer key once (keystore, not a plaintext key on the CLI)
+cast wallet import deployer --interactive     # paste the key that owns roll.wei
+
+export SALT=<mined salt>            # sender-bound: first 20 bytes == your deployer
+export ROLL_ADDR=<mined address>    # what SALT yields
+export VALUE=$(cast to-wei 0.05ether)   # start small; 0 to launch dormant
+
+forge script script/DeployWeiRoll.s.sol:DeployWeiRoll \
+  --rpc-url <your-node> --account deployer \
+  --broadcast --verify
 ```
 
-(Or the CreateX CREATE3 call with the mined salt and the same args, per [DEPLOY.md](DEPLOY.md).)
+The script refuses to proceed unless `ROLL_ADDR` matches the CREATE3 address for `SALT`, so a
+mistyped salt/address can't misdeploy. It prints the address and the staked pot.
 
-> Two things will make `pot()` differ from what you sent. A deploy address may already hold stray
-> ETH, which the constructor stakes along with your deposit — the address the fork rehearsal lands
-> on holds 0.000577 ETH. And Lido's share division credits a hair under 1:1, measured at 2 wei. So
-> expect `pot()` to read a little over, or two wei under, depending on which dominates.
+> Two things make `pot()` differ from what you sent: a deploy address may already hold stray ETH
+> (staked along with your deposit), and Lido credits ~2 wei under 1:1. Expect a few wei either way.
 
 Then assert the end state:
 
 ```
-cast call $ROLL "roundEnd()(uint256)"          # non-zero: first round is open
-cast call $ROLL "pot()(uint256)"               # what you funded, in stETH
-cast call $NFT  "ownerOf(uint256)(address)" $ROLL_WEI          # == $ROLL
-cast call $NFT  "reverseResolve(address)(string)" $ROLL         # == "roll.wei"
+cast call $ROLL_ADDR "roundEnd()(uint256)"                     # non-zero: first round open
+cast call $ROLL_ADDR "pot()(uint256)"                          # staked pot, in stETH
+cast call $NFT "ownerOf(uint256)(address)" $ROLL_WEI           # == $ROLL_ADDR
+cast call $NFT "reverseResolve(address)(string)" $ROLL_ADDR    # == "roll.wei"
 ```
 
-If `ownerOf` is not the contract, the pull didn't happen — that's fine, do §5.
+## 5. Boring path (no pre-approval, no vanity)
 
-## 5. The boring path (no pre-approval)
-
-Deploy first, verify the address, then hand the name over and fund it:
+If you'd rather not mine or pre-approve: deploy plain, then transfer `roll.wei` in afterward. The
+contract only checks `ownerOf(PARENT) == address(this)` at claim time, so a later transfer works
+identically — you lose only the reverse record (`setPrimaryName` runs only in the constructor).
 
 ```
-cast send $NFT  "transferFrom(address,address,uint256)" $YOU $ROLL $ROLL_WEI ...
-cast send $ROLL --value 0.25ether ...
+forge create src/WeiRoll.sol:WeiRoll --constructor-args $NFT $DAO $WRAPPER $STETH \
+  --value 0.05ether --rpc-url <your-node> --account deployer --verify
+cast send $NFT "transferFrom(address,address,uint256)" $YOU <ROLL> $ROLL_WEI --account deployer ...
 ```
 
-`roll.wei` arriving after deployment works identically — the contract only ever checks
-`ownerOf(PARENT) == address(this)` at claim time. The one thing you lose is the primary name: the
-constructor is the only place `setPrimaryName` is called, so `reverseResolve` stays unset. Cosmetic.
-
-## 6. Hand funding to governance
+## 6. Hand funding to governance## 6. Hand funding to governance
 
 Ongoing top-ups should come from WeiDAO, as an ordinary proposal with `value` set and empty calldata:
 
