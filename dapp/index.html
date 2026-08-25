@@ -4690,6 +4690,16 @@ function fmtCountdown(secs) {
   return s + 's';
 }
 
+// The pot is the hero number and the whole "earning via Lido" story — show its real precision
+// (up to 6 decimals) so accrued yield is visible, but trim trailing zeros so a round pot stays clean.
+function fmtPot(wei) {
+  const s = ethers.formatEther(wei);
+  const [whole, frac = ''] = s.split('.');
+  const w = Number(whole).toLocaleString('en-US');
+  const f = frac.slice(0, 6).replace(/0+$/, '');
+  return f ? w + '.' + f : w;
+}
+
 function fmtUsd(wei, ethUsd) {
   if (!ethUsd) return '';
   const usd = parseFloat(ethers.formatEther(wei)) * ethUsd;
@@ -4825,7 +4835,7 @@ function renderRoll(body, d, me) {
   const usd = d.usd ? fmtUsd(st.pot, d.usd) : '';
   h += '<div class="roll-pot">'
      + '<div class="roll-pot-label">Pot</div>'
-     + '<div class="roll-pot-amount">' + fmtEth(st.pot) + '</div>'
+     + '<div class="roll-pot-amount">' + fmtPot(st.pot) + '</div>'
      + '<div class="roll-pot-sub">stETH · earning via Lido' + (usd ? ' · ≈ ' + usd : '') + '</div></div>';
 
   // Round meta
