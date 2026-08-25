@@ -686,6 +686,8 @@ body.modal-open { overflow: hidden; }
 .roll-you { font-size:9px; text-transform:uppercase; letter-spacing:0.06em; opacity:0.55; border:1px solid var(--border-muted); padding:1px 5px; margin-left:6px; vertical-align:1px; }
 .roll-name-link { color:inherit; text-decoration:none; border-bottom:1px solid var(--border-muted); }
 .roll-odds { padding:7px 8px; margin:0 -8px; border-bottom:1px solid var(--border-muted); }
+.roll-donate { margin-top:24px; }
+.roll-forever { margin-top:28px; padding-top:18px; border-top:1px solid var(--border-muted); font-size:11px; line-height:1.6; opacity:0.4; text-align:center; }
 .roll-winners h4 { font-size:11px; text-transform:uppercase; letter-spacing:0.06em; opacity:0.5; margin:0 0 8px; font-weight:normal; }
 .roll-win-row { display:flex; justify-content:space-between; font-size:13px; padding:6px 0; border-bottom:1px solid var(--border-muted); }
 .roll-win-row .n { opacity:0.85; }
@@ -4576,6 +4578,7 @@ const rollIface = new ethers.Interface(LOTTERY_ABI);
 // What the user has typed into the entry box, kept outside the DOM because
 // renderRoll() replaces the whole panel — including that input — every refresh.
 let _rollNameDraft = '';
+let _rollDonateDraft = ''; // amount draft for "add to the pot", persisted across repaints
 // A "Connect & enter" click that is waiting on the wallet modal: { name, at }.
 // Time-bounded so a dismissed modal can't turn some later, unrelated connect into
 // a surprise lottery transaction.
@@ -4871,7 +4874,7 @@ function renderRoll(body, d, me) {
        + '<div class="input-wrap"><input type="text" id="rollNameInput" placeholder="yourname" autocomplete="off" autocapitalize="none" spellcheck="false" value="'
        + escapeHtml(_rollNameDraft) + '" oninput="rollNameChanged()"><span class="suffix">.wei</span></div>'
        + '<div id="rollWeightPreview" style="font-size:12px;opacity:0.6;margin:-4px 0 12px;min-height:16px;"></div>'
-       + '<button onclick="rollEnter()">' + (me ? 'Enter round ' + d.round : 'Connect & enter') + '</button>'
+       + '<button onclick="rollEnter()">' + (me ? 'Enter round ' + d.round + ' \u2192' : 'Connect & enter \u2192') + '</button>'
        + '<div class="roll-note">Odds are proportional to what your name costs to hold for its remaining term. One ticket per name. You keep the name; winning pays whoever holds it at claim time.</div>';
   } else if (phase === 2) {
     if (st.drawSettles) {
@@ -4931,8 +4934,50 @@ function renderRoll(body, d, me) {
     h += '</div>';
   }
 
+  // Add to the pot — a direct ETH send to roll.wei; receive() stakes it into Lido.
+  h += '<div class="roll-donate"><label>Add to the pot</label>'
+     + '<div class="input-wrap"><input type="text" id="rollDonateInput" placeholder="0.01" inputmode="decimal" autocomplete="off" spellcheck="false" value="'
+     + escapeHtml(_rollDonateDraft) + '" oninput="rollDonateChanged()"><span class="suffix">ETH</span></div>'
+     + '<button class="secondary" onclick="rollDonate()">' + (me ? 'Add to pot \u2192' : 'Connect & add \u2192') + '</button>'
+     + '<div class="roll-note">A direct send to roll.wei — staked into Lido and added to the prize. One-way: it grows whoever wins this round.</div></div>';
+
+  // A quiet statement about what this is.
+  h += '<div class="roll-forever">An ownerless machine. Each round runs ~30 days, then a random '
+     + '.wei holder wins the pot and the next one opens — forever, with no operator and no off switch. '
+     + 'It keeps rolling as long as the pot is fed and Ethereum runs.</div>';
+
   body.innerHTML = h;
   rollPreviewWeight();
+}
+
+// Keep the donation amount across the panel repaints (renderRoll rewrites the input away).
+function rollDonateChanged() {
+  const inp = document.getElementById('rollDonateInput');
+  _rollDonateDraft = inp ? inp.value : '';
+}
+
+async function rollDonate() {
+  if (isProcessing) return;
+  const inp = document.getElementById('rollDonateInput');
+  if (inp) _rollDonateDraft = inp.value;
+  if (!window._signer) { toggleWallet(); return; }
+
+  let value;
+  try { value = ethers.parseEther((_rollDonateDraft || '').trim()); } catch (_) { value = 0n; }
+  if (value <= 0n) { showStatus('Enter an amount to add', 'error'); return; }
+
+  isProcessing = true;
+  try {
+    // A plain send to the contract — receive() stakes it into Lido. It needs ~100k gas (not a bare
+    // 21k transfer), which the wallet estimates automatically.
+    const tx = await wcTransaction(window._signer.sendTransaction({ to: LOTTERY, value }), 'Confirm adding to the pot');
+    showStatus('Adding to the pot…', '', tx.hash);
+    const receipt = await waitForTx(tx);
+    showStatus('Added to the pot', 'success', tx.hash);
+    _rollDonateDraft = '';
+    afterReceipt(receipt, refreshRoll);
+  } catch (e) { handleError(e); }
+  finally { isProcessing = false; }
 }
 
 // oninput for the entry box: keep the draft (renderRoll repaints the input away)

@@ -48,7 +48,7 @@ const LIFTED = [
   'rollTokenFor', 'rollDrawQuote', 'rollDrawValue', 'rollPanelOpen',
   'rollNameChanged', 'rollPreviewWeight', 'rollEnter', 'rollOnConnect', 'rollOnDisconnect',
   'renderRoll', 'fmtCountdown', 'fmtEth', 'escapeHtml', 'afterReceipt', 'readSideHasTx',
-  'fmtUsd', 'fmtAgo', 'rollNameLink', 'fmtPot', 'rollPct',
+  'fmtUsd', 'fmtAgo', 'rollNameLink', 'fmtPot', 'rollPct', 'rollDonate', 'rollDonateChanged',
 ];
 
 function makeEl(id) {
@@ -117,6 +117,7 @@ function sandbox({ signer = null, address = null, panelOpen = true } = {}) {
 
   const prelude = `
     let _rollNameDraft = '';
+    let _rollDonateDraft = '';
     let _rollPendingEnter = null;
     const ROLL_ENTER_RESUME_MS = 120000;
     const ROLL_DRAW_GAS = 600000n;
