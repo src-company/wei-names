@@ -48,7 +48,7 @@ const LIFTED = [
   'rollTokenFor', 'rollDrawQuote', 'rollDrawValue', 'rollPanelOpen',
   'rollNameChanged', 'rollPreviewWeight', 'rollEnter', 'rollOnConnect', 'rollOnDisconnect',
   'renderRoll', 'fmtCountdown', 'fmtEth', 'escapeHtml', 'afterReceipt', 'readSideHasTx',
-  'fmtUsd', 'fmtAgo', 'rollNameLink', 'fmtPot',
+  'fmtUsd', 'fmtAgo', 'rollNameLink', 'fmtPot', 'rollPct',
 ];
 
 function makeEl(id) {
@@ -206,9 +206,11 @@ function eq(name, got, want) {
   ok('field header shows the count', html.includes('This round · 3 in'));
   ok('odds derived from cum weights', /0x\.wei[\s\S]{0,140}?9[0-9]%/.test(html), html);
   ok('the wallet\'s own name is marked', html.includes('roll-mine') && html.includes('roll-you'));
-  ok('combined odds line for you', /Your 1 name/.test(html));
+  ok('combined odds line for you', /in with 1 name/.test(html));
   ok('pot shows a USD estimate', /\$7,2\d\d/.test(html));
   ok('names link to their profile', html.includes('href="#majdao"'));
+  ok('field is sorted biggest-first', html.indexOf('0x.wei') < html.indexOf('majdao.wei'));
+  ok('rows carry an odds bar', html.includes('linear-gradient'));
 }
 
 // ── "Connect & enter" actually enters ────────────────────────────────────────

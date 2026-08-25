@@ -685,6 +685,7 @@ body.modal-open { overflow: hidden; }
 .roll-mine { font-weight:600; }
 .roll-you { font-size:9px; text-transform:uppercase; letter-spacing:0.06em; opacity:0.55; border:1px solid var(--border-muted); padding:1px 5px; margin-left:6px; vertical-align:1px; }
 .roll-name-link { color:inherit; text-decoration:none; border-bottom:1px solid var(--border-muted); }
+.roll-odds { padding:7px 8px; margin:0 -8px; border-bottom:1px solid var(--border-muted); }
 .roll-winners h4 { font-size:11px; text-transform:uppercase; letter-spacing:0.06em; opacity:0.5; margin:0 0 8px; font-weight:normal; }
 .roll-win-row { display:flex; justify-content:space-between; font-size:13px; padding:6px 0; border-bottom:1px solid var(--border-muted); }
 .roll-win-row .n { opacity:0.85; }
@@ -4690,6 +4691,12 @@ function fmtCountdown(secs) {
   return s + 's';
 }
 
+// Consistent odds label: 1 decimal below 10%, whole number at/above, a floor for slivers.
+function rollPct(pct) {
+  if (pct > 0 && pct < 0.1) return '<0.1%';
+  return pct >= 10 ? Math.round(pct) + '%' : pct.toFixed(1) + '%';
+}
+
 // The pot is the hero number and the whole "earning via Lido" story — show its real precision
 // (up to 6 decimals) so accrued yield is visible, but trim trailing zeros so a round pot stays clean.
 function fmtPot(wei) {
@@ -4889,21 +4896,25 @@ function renderRoll(body, d, me) {
   // Current round field — who's in and their odds, from the cum-weight deltas.
   if (d.field && d.field.length) {
     const total = Number(st.totalWeight);
+    // Biggest odds first — reads as a leaderboard rather than raw entry order.
+    const field = d.field.slice().sort((a, b) => (b.weight > a.weight ? 1 : b.weight < a.weight ? -1 : 0));
     h += '<div class="roll-field"><h4>This round · ' + Number(st.tickets) + ' in</h4>';
-    for (const row of d.field) {
+    for (const row of field) {
       const pct = total > 0 ? (100 * Number(row.weight) / total) : 0;
       const nm = row.name ? rollNameLink(row.name) : ('#' + row.tokenId.toString().slice(0, 8) + '…');
-      h += '<div class="roll-win-row' + (row.mine ? ' roll-mine' : '') + '">'
+      // Faint fill proportional to odds, so dominance reads at a glance.
+      const bar = 'background:linear-gradient(90deg,rgba(128,128,128,0.13) ' + pct.toFixed(2) + '%,transparent 0)';
+      h += '<div class="roll-win-row roll-odds' + (row.mine ? ' roll-mine' : '') + '" style="' + bar + '">'
          + '<span class="n">' + nm + (row.mine ? '<span class="roll-you">you</span>' : '') + '</span>'
-         + '<span class="p">' + (pct < 1 ? pct.toFixed(1) : Math.round(pct)) + '%</span></div>';
+         + '<span class="p">' + rollPct(pct) + '</span></div>';
     }
     const n = Number(st.tickets);
     if (n > d.field.length) h += '<div class="roll-note">+ ' + (n - d.field.length) + ' more (showing the first ' + d.field.length + ')</div>';
     const mine = d.field.filter(r => r.mine);
     if (mine.length) {
       const myPct = total > 0 ? 100 * mine.reduce((a, r) => a + Number(r.weight), 0) / total : 0;
-      h += '<div class="roll-note">Your ' + mine.length + ' name' + (mine.length > 1 ? 's' : '')
-         + ' · ~' + (myPct < 1 ? myPct.toFixed(1) : Math.round(myPct)) + '% combined odds.</div>';
+      h += '<div class="roll-note">You’re in with ' + mine.length + ' name' + (mine.length > 1 ? 's' : '')
+         + ' · ~' + rollPct(myPct) + ' combined odds.</div>';
     }
     h += '</div>';
   }
