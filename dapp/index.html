@@ -1219,10 +1219,16 @@ function closeRpcSettings() {
 // Probe an endpoint the same way getRpc() does, with a timeout.
 async function testRpcUrl(url) {
   const p = new ethers.JsonRpcProvider(url, ethers.Network.from(1), { staticNetwork: true });
-  return Promise.race([
-    p.getBlockNumber(),
-    new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 6000))
-  ]);
+  try {
+    return await Promise.race([
+      p.getBlockNumber(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 6000))
+    ]);
+  } finally {
+    // One probe per click, and the sheet can be poked at repeatedly. Without this
+    // each attempt leaves a live provider behind holding its connection open.
+    try { p.destroy(); } catch (_) {}
+  }
 }
 
 async function saveRpcSettings() {
@@ -4403,7 +4409,7 @@ async function doVerifyNow() {
     return;
   }
 
-  result.innerHTML = '<span style="opacity:0.5;">Checking...</span>';
+  result.innerHTML = '<span style="opacity:0.5;">' + spinnerSVG(13) + 'Checking…</span>';
   result.style.display = 'block';
 
   try {

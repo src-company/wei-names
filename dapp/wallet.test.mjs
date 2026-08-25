@@ -15,7 +15,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import url from 'node:url';
 import vm from 'node:vm';
-import { ethers } from 'ethers';
+// The vendored bundle, not the npm package: it is what the browser actually loads,
+// and it keeps the suite runnable in a bare checkout with no node_modules — as
+// roll.test.mjs and contenthash.test.mjs already are.
+const _v = await import(new URL('./vendor/ethers.min.js', import.meta.url).href);
+const ethers = _v.default ?? _v;
 
 const ADDR = '0x1111111111111111111111111111111111111111';
 
