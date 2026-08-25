@@ -686,6 +686,8 @@ body.modal-open { overflow: hidden; }
 .roll-field-rows { max-height:420px; overflow-y:auto; overflow-x:hidden; margin:0 -8px; padding:0 8px; }
 .roll-field h4 { font-size:11px; text-transform:uppercase; letter-spacing:0.06em; opacity:0.5; margin:0 0 8px; font-weight:normal; }
 .roll-mine { font-weight:600; }
+.roll-boosted { color:var(--fg); font-weight:600; }
+.roll-boost { color:var(--fg); font-weight:600; }
 .roll-you { font-size:9px; text-transform:uppercase; letter-spacing:0.06em; opacity:0.55; border:1px solid var(--border-muted); padding:1px 5px; margin-left:6px; vertical-align:1px; }
 .roll-name-link { color:inherit; text-decoration:none; border-bottom:1px solid var(--border-muted); }
 .roll-odds { padding:7px 8px; margin:0 -8px; border-bottom:1px solid var(--border-muted); }
@@ -4938,7 +4940,7 @@ function renderRoll(body, d, me) {
     h += '<label style="margin-top:4px;">Enter a name you hold</label>'
        + '<div class="input-wrap"><input type="text" id="rollNameInput" placeholder="yourname" autocomplete="off" autocapitalize="none" spellcheck="false" value="'
        + escapeHtml(_rollNameDraft) + '" oninput="rollNameChanged()"><span class="suffix">.wei</span></div>'
-       + '<div id="rollWeightPreview" style="font-size:12px;opacity:0.6;margin:-4px 0 12px;min-height:16px;"></div>'
+       + '<div id="rollWeightPreview" style="font-size:12px;color:var(--fg-muted);margin:10px 0 14px;min-height:16px;line-height:1.5;"></div>'
        + '<button onclick="rollEnter()">' + (me ? 'Enter round ' + d.round + ' \u2192' : 'Connect & enter \u2192') + '</button>'
        + '<div class="roll-note">One ticket per name. You keep the name; winning pays whoever holds it at claim time. Back a live <a href="https://etherscan.io/address/' + WEIDAO + '" target="_blank" rel="noopener" class="roll-name-link">WeiDAO</a> proposal with the same name to boost its entry automatically.</div>';
   } else if (phase === 2) {
@@ -5128,7 +5130,7 @@ function rollPreviewWeight() {
           const eff = w + w * bps / 10000n;
           const mult = 1 + Number(bps) / 10000;
           const label = Number.isInteger(mult) ? mult + '×' : '+' + (Number(bps) / 100) + '%';
-          text = 'Weight ' + fmtEth(eff, 5) + ' — ' + label + ' boost, backing proposal #' + pid + ' ✓';
+          text = 'Weight <b class="roll-boosted">' + fmtEth(eff, 5) + '</b> · <span class="roll-boost">' + label + ' boost</span> — backing proposal #' + pid + ' ✓';
         } else {
           text = 'This name’s weight: ' + fmtEth(w, 5) + ' (its share of the odds)';
         }
@@ -5138,7 +5140,7 @@ function rollPreviewWeight() {
     } catch (_) { text = ''; }
     if (thisVersion !== rollPreviewVersion) return; // superseded by a newer keystroke
     const el = document.getElementById('rollWeightPreview');
-    if (el) el.textContent = text;
+    if (el) el.innerHTML = text; // text is built from fixed strings + numbers only, no user input
   }, 300);
 }
 
