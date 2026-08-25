@@ -48,7 +48,7 @@ const LIFTED = [
   'rollTokenFor', 'rollDrawQuote', 'rollDrawValue', 'rollPanelOpen',
   'rollNameChanged', 'rollPreviewWeight', 'rollEnter', 'rollOnConnect', 'rollOnDisconnect',
   'renderRoll', 'fmtCountdown', 'fmtEth', 'escapeHtml', 'afterReceipt', 'readSideHasTx',
-  'fmtUsd', 'fmtAgo', 'rollNameLink',
+  'fmtUsd', 'fmtAgo', 'rollNameLink', 'fmtPot',
 ];
 
 function makeEl(id) {
