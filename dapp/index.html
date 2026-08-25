@@ -681,7 +681,7 @@ body.modal-open { overflow: hidden; }
 .roll-phase { display:inline-block; font-size:10px; text-transform:uppercase; letter-spacing:0.08em; padding:3px 8px; border:1px solid var(--border); margin-bottom:14px; }
 .roll-your { border:1px solid var(--free-border,var(--border)); background:var(--free-bg,transparent); padding:12px; margin-bottom:16px; font-size:13px; }
 .roll-winners, .roll-field { margin-top:20px; }
-.roll-field-rows { max-height:420px; overflow-y:auto; }
+.roll-field-rows { max-height:420px; overflow-y:auto; overflow-x:hidden; margin:0 -8px; padding:0 8px; }
 .roll-field h4 { font-size:11px; text-transform:uppercase; letter-spacing:0.06em; opacity:0.5; margin:0 0 8px; font-weight:normal; }
 .roll-mine { font-weight:600; }
 .roll-you { font-size:9px; text-transform:uppercase; letter-spacing:0.06em; opacity:0.55; border:1px solid var(--border-muted); padding:1px 5px; margin-left:6px; vertical-align:1px; }
@@ -693,9 +693,9 @@ body.modal-open { overflow: hidden; }
 .roll-add:hover { opacity:1; }
 .roll-forever { margin-top:28px; padding-top:18px; border-top:1px solid var(--border-muted); font-size:11px; line-height:1.6; opacity:0.4; text-align:center; }
 .roll-winners h4 { font-size:11px; text-transform:uppercase; letter-spacing:0.06em; opacity:0.5; margin:0 0 8px; font-weight:normal; }
-.roll-win-row { display:flex; justify-content:space-between; font-size:13px; padding:6px 0; border-bottom:1px solid var(--border-muted); }
-.roll-win-row .n { opacity:0.85; }
-.roll-win-row .p { font-variant-numeric:tabular-nums; opacity:0.6; }
+.roll-win-row { display:flex; justify-content:space-between; align-items:baseline; gap:12px; font-size:13px; padding:6px 0; border-bottom:1px solid var(--border-muted); }
+.roll-win-row .n { opacity:0.85; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.roll-win-row .p { font-variant-numeric:tabular-nums; opacity:0.6; flex:0 0 auto; }
 .roll-note { font-size:10px; opacity:0.45; line-height:1.5; margin-top:14px; }
 
 </style>
@@ -4524,6 +4524,11 @@ function initFromHash() {
   let name;
   try { name = decodeURIComponent(hash); } catch (_) { name = hash; }
   if (name.endsWith('.wei')) name = name.slice(0, -4);
+  // Deeplink to the lottery: #roll / #lottery (with or without .wei) opens the panel.
+  const token = name.toLowerCase();
+  if (token === 'roll' || token === 'lottery') {
+    if (typeof openRoll === 'function' && LOTTERY) { openRoll(true); return; }
+  }
   if (name) {
     $('nameInput').value = name;
     checkName();
@@ -4662,18 +4667,41 @@ function rollDrawValue(quote) {
 try { if (!LOTTERY) { var _rs = document.getElementById('rollSection'); if (_rs) _rs.style.display = 'none'; } } catch (_) {}
 
 function toggleRoll(event) {
-  event.preventDefault();
+  if (event) event.preventDefault();
+  if (rollPanelOpen()) closeRoll(); else openRoll(true);
+}
+
+// Open the lottery panel, reflect it in the URL (so the page is shareable straight to the
+// lottery), and optionally scroll it into view — used by the toggle and by the #roll deeplink.
+function openRoll(scroll) {
   const panel = $('rollPanel');
   const toggle = $('rollToggle');
-  if (panel.classList.contains('show')) {
-    panel.classList.remove('show');
-    toggle.textContent = '🎲 roll.wei →';
-    if (_rollTimer) { clearInterval(_rollTimer); _rollTimer = null; }
-  } else {
+  if (!panel) return;
+  if (!panel.classList.contains('show')) {
     panel.classList.add('show');
-    toggle.textContent = '← hide';
+    if (toggle) toggle.textContent = '← hide';
     refreshRoll();
     if (!_rollTimer) _rollTimer = setInterval(rollTick, 1000);
+  }
+  if (window.location.hash !== '#roll') history.replaceState(null, '', '#roll');
+  document.title = 'roll.wei — WNS';
+  if (scroll) {
+    const el = $('rollSection') || panel;
+    try { el.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch (_) {}
+  }
+}
+
+function closeRoll() {
+  const panel = $('rollPanel');
+  const toggle = $('rollToggle');
+  if (panel) panel.classList.remove('show');
+  if (toggle) toggle.textContent = '🎲 roll.wei →';
+  if (_rollTimer) { clearInterval(_rollTimer); _rollTimer = null; }
+  // Only clear the hash if it is ours, so closing the panel never clobbers a name deeplink.
+  const h = window.location.hash.slice(1).toLowerCase().replace(/\.wei$/, '');
+  if (h === 'roll' || h === 'lottery') {
+    history.replaceState(null, '', window.location.pathname);
+    document.title = 'WNS';
   }
 }
 
