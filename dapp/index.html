@@ -889,7 +889,7 @@ try{if(localStorage.getItem('wns_dao_banner')==='1'){var _db=document.getElement
 <div id="rollSection" class="send-section">
   <a href="#" onclick="toggleRoll(event)" class="send-toggle" id="rollToggle">🎲 roll.wei →</a>
   <div id="rollPanel" class="roll-panel">
-    <div style="font-size:11px;opacity:0.5;margin-bottom:12px;line-height:1.5;">An on-chain lottery for .wei holders. The pot is staked in Lido and earns while it waits; a random holder wins it, weighted by what their name costs to hold. Funded by WeiDAO, drawn with Chainlink VRF, owned by no one.</div>
+    <div style="font-size:11px;opacity:0.5;margin-bottom:12px;line-height:1.5;"><a href="https://etherscan.io/address/0x0000C82AA4D72871568eF3859D2b0E7CF37e45f2" target="_blank" rel="noopener" class="roll-name-link">roll.wei</a> is an on-chain lottery for .wei holders. The pot is staked in Lido and earns while it waits; a random holder wins it, weighted by what their name costs to hold. Funded by WeiDAO, drawn with Chainlink VRF, owned by no one.</div>
     <div id="rollBody"></div>
   </div>
 </div>
@@ -4997,7 +4997,7 @@ function renderRoll(body, d, me) {
      + '<div class="input-wrap"><input type="text" id="rollDonateInput" placeholder="0.01" inputmode="decimal" autocomplete="off" spellcheck="false" value="'
      + escapeHtml(_rollDonateDraft) + '" oninput="rollDonateChanged()"><span class="suffix">ETH</span></div>'
      + '<button class="roll-add" onclick="rollDonate()">' + (me ? 'add to pot \u2192' : 'connect & add \u2192') + '</button>'
-     + '<div class="roll-note">A direct send to roll.wei — staked into Lido and added to the prize. One-way: it grows whoever wins this round.</div></div>';
+     + '<div class="roll-note">A direct send to <a href="https://etherscan.io/address/' + LOTTERY + '" target="_blank" rel="noopener" class="roll-name-link">roll.wei</a> — staked into Lido and added to the prize. One-way: it grows whoever wins this round.</div></div>';
 
   // A quiet statement about what this is.
   h += '<div class="roll-forever">An ownerless machine. Each round runs ~30 days, then a random '
