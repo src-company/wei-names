@@ -1787,4 +1787,44 @@ contract WeiRollTest is Test {
         tokenId = nft.reveal{value: fee}(label, secret);
         vm.stopPrank();
     }
+
+    /// @dev DOCUMENTED BEHAVIOR (accepted as design; see audit/weiroll.md addendum): draw() has no
+    ///      upper time bound and claimBy = drawTime + CLAIM_WINDOW. If a round sits undrawn until a
+    ///      winning name lapses PAST its 90d grace, whoever re-registers it (same namehash) becomes
+    ///      ownerOf and can claim. "Hold your name or forfeit" at its limit — no diligent owner is
+    ///      harmed (renew before grace ends). Pinned so the behavior stays explicit.
+    function testALateDrawLapsedNameForfeit() public {
+        // Victim enters a name that is about to expire (active now, exp = ~1 year out by default).
+        // To make the window reachable, renew nothing; instead pick timing so grace ends before draw.
+        // alice's "ab" was registered in setUp with a 1yr expiry. Enter it, then let the round sit.
+        address attacker = makeAddr("attacker");
+
+        vm.prank(alice);
+        roll.enter(tAlice, 0);
+        vm.prank(bob);
+        roll.enter(tBob, 0);
+
+        // The round is Ready after ROUND_LENGTH, but nobody draws. Meanwhile alice's name expires
+        // and passes its 90d grace (expiresAt + 90d). Warp there.
+        uint256 exp = nft.expiresAt(tAlice);
+        vm.warp(exp + 90 days + 21 days + 1); // past grace + premium decay: freely re-registerable
+
+        // A stranger re-registers "ab" to themselves — same namehash tokenId, new owner, new epoch.
+        assertEq(_register("ab", attacker), tAlice, "same namehash");
+        assertEq(nft.ownerOf(tAlice), attacker, "attacker now owns the winning name");
+
+        // Now the long-delayed draw happens and alice's stale ticket wins.
+        _draw();
+        wrapper.fulfill(address(roll), roll.requestId(), 0); // seed 0 -> ticket 0 = tAlice
+        assertEq(roll.winnerOf(0), tAlice);
+
+        // The attacker, as current owner of the winning namehash, claims the prize.
+        uint256 prize = roll.prizeOf(0);
+        uint256 before = steth.balanceOf(attacker);
+        vm.prank(attacker);
+        roll.claim(0);
+        assertEq(
+            steth.balanceOf(attacker) - before, prize, "re-registrant of a fully-lapsed name claims"
+        );
+    }
 }

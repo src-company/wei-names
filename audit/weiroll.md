@@ -170,3 +170,26 @@ disclosed in the contract caveats and README.
 360 unit tests + 7 mainnet-fork tests pass; 100% branch and function coverage. Contract 11,868 bytes
 runtime. A formal/machine-checked pass on the callback gas bound against current mainnet Lido, and an
 independent review of the `rescue` sweep, remain recommended before large value accrues.
+
+---
+
+## Addendum (2026-08-25) — late-draw lapsed-name forfeiture
+
+A later independent pass surfaced one **caveat** — not an exploit — not covered in the original review, pinned with a passing test
+(`testALateDrawLapsedNameForfeit` in the suite): `draw()` has no upper time bound, and
+`claimBy = drawTime + CLAIM_WINDOW`. So if a round sits **undrawn for ~60–90+ days** and a winning
+name **lapses past its 90-day grace** in the meantime, whoever re-registers that name (same
+namehash tokenId, new owner) passes `claim`'s only test — `ownerOf(tokenId) == msg.sender` — and
+takes the prize. The invariant note at `CLAIM_WINDOW` silently assumed prompt draws; it does not hold
+for arbitrarily-delayed ones. This is a design caveat, not an exploit — the name legitimately changed
+hands under the "hold your name or forfeit" rule; nothing is stolen through a flaw. Not a drain, and
+not attacker-forced (any honest party can draw promptly).
+
+**Disposition — caveat, accepted as design.** The deployer's call: this is the same rule as
+"selling forfeits to the buyer" taken to its limit — *hold your name or forfeit.* No diligent owner
+is ever harmed (renewing any time before `expiresAt + 90d` keeps the name, so you're untouchable);
+only a name abandoned for 90+ days past expiry can be taken. The contract is immutable, so the code
+stands; the natspec lines claiming a lapsed name is "un-re-registerable in-window" and "lapsing does
+not forfeit" are **inaccurate for the late-draw case** and should be read as: *keep your name renewed
+or the prize goes to whoever revives it.* Operational mitigation: draw rounds promptly (within their
+window), which keeps every name inside its grace and the vector shut.

@@ -818,6 +818,9 @@ AI-assisted audits performed on the codebase:
 | [Plainshift AI](audit/plainshift.md) | NameNFT, SubdomainRegistrar | 1 High, 1 Medium | All fixed |
 | [Cantina Apex](audit/cantina.md) | NameNFT, Dapp | 3 Medium | All patched |
 | [Zellic V12](audit/zellic/weinames_findings_2026-03-08-findings.md) | NameNFT, SubdomainRegistrar | 1 Medium, 1 Low | Both invalid |
+| [WeiRoll AI](audit/weiroll.md) | WeiRoll | 1 High, 3 Med (fixed) + late-draw (accepted) | Fixed / accepted |
+| [WeiDAO AI](audit/weidao.md) | WeiDAO | 2 Med, 2 Low (all gov/operational) | No code bug |
+| [ConvictionVeto AI](audit/convictionveto.md) | ConvictionVeto | 2 Med (griefing, exec-recoverable) | No theft |
 
 **Plainshift AI** found two valid SubdomainRegistrar issues: subdomain hijacking via missing `isAvailable` check (High), and stale escrow controller enabling NFT theft via epoch mismatch (Medium). Both were fixed in the redeployed SubdomainRegistrar.
 
