@@ -673,6 +673,8 @@ body.modal-open { overflow: hidden; }
 .roll-pot { border:1px solid var(--border); padding:24px 20px; text-align:center; margin-bottom:16px; }
 .roll-pot-label { font-size:11px; text-transform:uppercase; letter-spacing:0.08em; opacity:0.5; }
 .roll-pot-amount { font-size:38px; line-height:1.1; margin:8px 0 4px; font-variant-numeric:tabular-nums; }
+.roll-steth { width:30px; height:30px; vertical-align:-5px; margin-right:10px; }
+@media (max-width: 380px) { .roll-steth { width:24px; height:24px; vertical-align:-4px; margin-right:7px; } }
 .roll-pot-sub { font-size:11px; opacity:0.5; }
 .roll-meta { display:flex; gap:10px; margin-bottom:16px; }
 .roll-meta > div { flex:1; border:1px solid var(--border-muted); padding:12px; text-align:center; }
@@ -4580,6 +4582,8 @@ const ROLL_PHASE = ['Idle', 'Open', 'Ready', 'Drawing'];
 const ROLL_FIELD_MAX = 2000;    // ticketsIn cap — reads every ticket as numbers (cheap), for the true sort
 const ROLL_FIELD_RESOLVE = 40;  // names resolved + shown for the top entrants; the rest roll into '+N more'
 const CHAINLINK_ETHUSD = '0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419'; // ETH/USD, 8 decimals
+// The Lido stETH glyph — the pot is held in stETH, so a dash of its blue signals the asset at a glance.
+const STETH_MARK = "<svg class='roll-steth' viewBox='0 0 32 32' aria-hidden='true' focusable='false'><g fill='none'><circle fill='#00A3FF' cx='16' cy='16' r='16'/><path d='M9.437 14.864l-.181.275c-2.048 3.097-1.603 7.253 1.034 9.824 1.561 1.521 3.622 2.353 5.683 2.353 0 0 0 0-6.536-12.452z' fill='#FFF'/><path opacity='.6' d='M15.997 18.611l-6.56-3.747c6.56 12.452 6.56 12.452 6.56 12.452 0-2.683 0-5.623 0-8.705z' fill='#FFF'/><path opacity='.6' d='M22.563 14.864l.181.275c2.048 3.097 1.603 7.253-1.034 9.824-1.561 1.521-3.622 2.353-5.683 2.353 0 0 0 0 6.536-12.452z' fill='#FFF'/><path opacity='.2' d='M16.003 18.611l6.56-3.747c-6.56 12.452-6.56 12.452-6.56 12.452 0-2.683 0-5.623 0-8.705z' fill='#FFF'/><path opacity='.2' d='M16.004 10.239v6.459l5.654-3.23-5.654-3.229z' fill='#FFF'/><path opacity='.6' d='M16.005 10.239l-5.655 3.229 5.655 3.23v-6.46z' fill='#FFF'/><path d='M16.005 4.805l-5.655 8.668 5.655-3.233V4.805z' fill='#FFF'/><path opacity='.6' d='M16.004 10.238l5.658 3.23-5.658-8.674v5.444z' fill='#FFF'/></g></svg>";
 let _rollRound = null;           // current round, cached for the entry preview's already-entered check
 let _rollEthUsd = { v: null, at: 0 }; // ~60s-cached ETH price for the pot's USD readout
 let _rollTimer = null;
@@ -4895,7 +4899,7 @@ function renderRoll(body, d, me) {
   const usd = d.usd ? fmtUsd(st.pot, d.usd) : '';
   h += '<div class="roll-pot">'
      + '<div class="roll-pot-label">Pot</div>'
-     + '<div class="roll-pot-amount">' + fmtPot(st.pot) + '</div>'
+     + '<div class="roll-pot-amount">' + STETH_MARK + fmtPot(st.pot) + '</div>'
      + '<div class="roll-pot-sub">stETH · earning via Lido' + (usd ? ' · ≈ ' + usd : '') + '</div></div>';
 
   // Round meta

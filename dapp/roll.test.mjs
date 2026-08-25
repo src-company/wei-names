@@ -94,6 +94,7 @@ function sandbox({ signer = null, address = null, panelOpen = true } = {}) {
     LOTTERY_ABI: ['function drawPrice() view returns (uint256)', 'function enter(uint256,uint256)'],
     CONTRACT: '0x0000000000696760E15f265e828DB644A0c242EB',
     ROLL_PHASE: ['Idle', 'Open', 'Ready', 'Drawing'],
+    STETH_MARK: '<svg class="roll-steth"></svg>',
     ens_normalize: undefined,           // exercises the contract-compatible fallback
     isProcessing: false,
     textEncoder: new TextEncoder(),
