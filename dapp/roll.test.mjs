@@ -214,6 +214,27 @@ function eq(name, got, want) {
   ok('rows carry an odds bar', html.includes('linear-gradient'));
 }
 
+// ── at scale: only the top slice is shown, but combined odds count ALL your names ─────
+{
+  const { run, els } = sandbox({ address: '0xME' });
+  const now = Math.floor(Date.now() / 1000);
+  const st = `{ phase: 1, round: 5, roundEnd: ${now + 86400}, pot: 1000000000000000000n,
+                totalWeight: 1000000000000n, tickets: 100, drawPrice: 0n, drawSettles: false, resetAt: 0 }`;
+  // 3 rows rendered (the top slice), but rollBuildField reports the viewer holds 5 names field-wide.
+  const field = `Object.assign([
+    { tokenId: 1n, weight: 500000000000n, name: '0x.wei', mine: false },
+    { tokenId: 2n, weight: 120000000000n, name: 'me1.wei', mine: true },
+    { tokenId: 3n, weight: 80000000000n, name: 'other.wei', mine: false }
+  ], { total: 100, mineCount: 5, mineWeight: 250000000000n })`;
+  run(`renderRoll($('rollBody'), { st: ${st}, round: 5, infos: [], claimable: [], names: {},
+        draw: null, field: ${field}, usd: 2500 }, '0xME')`);
+  const html = els.get('rollBody').innerHTML;
+  ok('shows +N more with top-by-odds framing', /\+ 97 more · showing the top 3 by odds/.test(html));
+  ok('combined odds counts all 5 names, not the 1 visible', /in with 5 names/.test(html), html);
+  ok('combined odds uses the field-wide weight (25%)', /~25% combined/.test(html));
+  ok('rows sit in a scrollable container', html.includes('roll-field-rows'));
+}
+
 // ── "Connect & enter" actually enters ────────────────────────────────────────
 {
   const { run, els, calls, ctx } = sandbox({ signer: null, address: null });

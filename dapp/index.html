@@ -681,6 +681,7 @@ body.modal-open { overflow: hidden; }
 .roll-phase { display:inline-block; font-size:10px; text-transform:uppercase; letter-spacing:0.08em; padding:3px 8px; border:1px solid var(--border); margin-bottom:14px; }
 .roll-your { border:1px solid var(--free-border,var(--border)); background:var(--free-bg,transparent); padding:12px; margin-bottom:16px; font-size:13px; }
 .roll-winners, .roll-field { margin-top:20px; }
+.roll-field-rows { max-height:420px; overflow-y:auto; }
 .roll-field h4 { font-size:11px; text-transform:uppercase; letter-spacing:0.06em; opacity:0.5; margin:0 0 8px; font-weight:normal; }
 .roll-mine { font-weight:600; }
 .roll-you { font-size:9px; text-transform:uppercase; letter-spacing:0.06em; opacity:0.55; border:1px solid var(--border-muted); padding:1px 5px; margin-left:6px; vertical-align:1px; }
@@ -4571,7 +4572,8 @@ window.addEventListener('hashchange', initFromHash);
 // Self-contained. Every path guards on LOTTERY being set and swallows its
 // own errors, so nothing here can affect the rest of the dapp.
 const ROLL_PHASE = ['Idle', 'Open', 'Ready', 'Drawing'];
-const ROLL_FIELD_CAP = 24; // max entrants rendered with odds; more shows a "+N more" line
+const ROLL_FIELD_MAX = 2000;    // ticketsIn cap — reads every ticket as numbers (cheap), for the true sort
+const ROLL_FIELD_RESOLVE = 40;  // names resolved + shown for the top entrants; the rest roll into '+N more'
 const CHAINLINK_ETHUSD = '0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419'; // ETH/USD, 8 decimals
 let _rollRound = null;           // current round, cached for the entry preview's already-entered check
 let _rollEthUsd = { v: null, at: 0 }; // ~60s-cached ETH price for the pot's USD readout
@@ -4777,7 +4779,7 @@ async function refreshRoll() {
           ? rollDrawQuote(p).catch(() => null)
           : Promise.resolve(null),
         // Whole field in one call; per-name weight is derived from the cum deltas (no per-name read).
-        liveField ? c.ticketsIn(round, 0, ROLL_FIELD_CAP).catch(() => null) : Promise.resolve(null)
+        liveField ? c.ticketsIn(round, 0, ROLL_FIELD_MAX).catch(() => null) : Promise.resolve(null)
       ]);
 
       const infos = rounds.map((r, i) => [r, infoList[i]]);
@@ -4809,23 +4811,40 @@ async function refreshRoll() {
 // the field section simply isn't rendered.
 async function rollBuildField(tickets, me) {
   if (!tickets || !tickets.length) return null;
-  const calls = [];
-  for (const t of tickets) {
-    calls.push({ target: CONTRACT, iface: iface, fn: 'getFullName', args: [t.tokenId] });
-    calls.push({ target: CONTRACT, iface: ownerOfIface, fn: 'ownerOf', args: [t.tokenId] });
-  }
-  const res = await aggregate3(calls);
-  const meLc = (me || '').toLowerCase();
+  // Weight per ticket is the cumulative-weight delta (tickets come in entry order, cum ascending).
   let prevCum = 0n;
-  return tickets.map((t, i) => {
+  const all = tickets.map(t => {
     const cum = BigInt(t.cum);
     const weight = cum - prevCum;
     prevCum = cum;
-    const name = res[2 * i] ? res[2 * i][0] : null;
-    const ownerRaw = res[2 * i + 1] ? res[2 * i + 1][0] : null;
-    const mine = !!meLc && ownerRaw && String(ownerRaw).toLowerCase() === meLc;
-    return { tokenId: t.tokenId, weight, name, mine };
+    return { tokenId: t.tokenId, weight };
   });
+  all.sort((a, b) => (b.weight > a.weight ? 1 : b.weight < a.weight ? -1 : 0));
+  const shown = all.slice(0, ROLL_FIELD_RESOLVE);
+  // One multicall: an owner for EVERY ticket (so the viewer's own odds sum correctly even when
+  // their names rank below the shown slice), plus a name only for the top slice we render.
+  const calls = [];
+  for (const t of all) calls.push({ target: CONTRACT, iface: ownerOfIface, fn: 'ownerOf', args: [t.tokenId] });
+  for (const t of shown) calls.push({ target: CONTRACT, iface: iface, fn: 'getFullName', args: [t.tokenId] });
+  const res = await aggregate3(calls);
+
+  const meLc = (me || '').toLowerCase();
+  const owners = all.map((_, i) => (res[i] ? String(res[i][0]).toLowerCase() : null));
+  // Viewer's total, over the WHOLE field — this is the honest "your combined odds".
+  let mineCount = 0, mineWeight = 0n;
+  all.forEach((t, i) => { if (meLc && owners[i] === meLc) { mineCount++; mineWeight += t.weight; } });
+
+  const nameBase = all.length;
+  const rows = shown.map((t, i) => ({
+    tokenId: t.tokenId,
+    weight: t.weight,
+    name: res[nameBase + i] ? res[nameBase + i][0] : null,
+    mine: !!meLc && owners[i] === meLc
+  }));
+  rows.total = all.length;      // full field size (for "+N more")
+  rows.mineCount = mineCount;   // viewer's entries across the whole field
+  rows.mineWeight = mineWeight;
+  return rows;
 }
 
 // Chainlink ETH/USD, ~60s cached. Optional — a failure just hides the USD readout.
@@ -4902,24 +4921,28 @@ function renderRoll(body, d, me) {
   // Current round field — who's in and their odds, from the cum-weight deltas.
   if (d.field && d.field.length) {
     const total = Number(st.totalWeight);
-    // Biggest odds first — reads as a leaderboard rather than raw entry order.
+    // Biggest odds first (rollBuildField pre-sorts; re-sort keeps render robust to any input order).
     const field = d.field.slice().sort((a, b) => (b.weight > a.weight ? 1 : b.weight < a.weight ? -1 : 0));
     h += '<div class="roll-field"><h4>This round · ' + Number(st.tickets) + ' in</h4>';
+    h += '<div class="roll-field-rows">';
     for (const row of field) {
       const pct = total > 0 ? (100 * Number(row.weight) / total) : 0;
       const nm = row.name ? rollNameLink(row.name) : ('#' + row.tokenId.toString().slice(0, 8) + '…');
-      // Faint fill proportional to odds, so dominance reads at a glance.
       const bar = 'background:linear-gradient(90deg,rgba(128,128,128,0.13) ' + pct.toFixed(2) + '%,transparent 0)';
       h += '<div class="roll-win-row roll-odds' + (row.mine ? ' roll-mine' : '') + '" style="' + bar + '">'
          + '<span class="n">' + nm + (row.mine ? '<span class="roll-you">you</span>' : '') + '</span>'
          + '<span class="p">' + rollPct(pct) + '</span></div>';
     }
-    const n = Number(st.tickets);
-    if (n > d.field.length) h += '<div class="roll-note">+ ' + (n - d.field.length) + ' more (showing the first ' + d.field.length + ')</div>';
-    const mine = d.field.filter(r => r.mine);
-    if (mine.length) {
-      const myPct = total > 0 ? 100 * mine.reduce((a, r) => a + Number(r.weight), 0) / total : 0;
-      h += '<div class="roll-note">You’re in with ' + mine.length + ' name' + (mine.length > 1 ? 's' : '')
+    h += '</div>';
+    const shownN = field.length, fullN = Number(st.tickets);
+    if (fullN > shownN) h += '<div class="roll-note">+ ' + (fullN - shownN) + ' more · showing the top ' + shownN + ' by odds</div>';
+    // Viewer's combined odds over the whole field (precomputed in rollBuildField; falls back to the
+    // shown rows if absent, so a plain array still renders).
+    const mineCount = d.field.mineCount != null ? d.field.mineCount : field.filter(r => r.mine).length;
+    const mineWeight = d.field.mineWeight != null ? Number(d.field.mineWeight) : field.filter(r => r.mine).reduce((a, r) => a + Number(r.weight), 0);
+    if (mineCount) {
+      const myPct = total > 0 ? 100 * mineWeight / total : 0;
+      h += '<div class="roll-note">You’re in with ' + mineCount + ' name' + (mineCount > 1 ? 's' : '')
          + ' · ~' + rollPct(myPct) + ' combined odds.</div>';
     }
     h += '</div>';
