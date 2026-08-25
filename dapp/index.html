@@ -3184,6 +3184,39 @@ function base36Decode(str) {
   return new Uint8Array(bytes.reverse());
 }
 
+// Is this a structurally complete CIDv1? version(0x01) + codec + multihash, where a
+// multihash is hashFn + digestLength + digest.
+//
+// Nothing used to check that the digest is as long as it claims, so a truncated or
+// mistyped CID decoded to a few stray bytes and sailed straight through: "bafZZZ"
+// became 0xe30101739c, which setContenthash then wrote on-chain for real gas. The
+// site was dead, the manage panel rendered the junk back as a plausible-looking
+// "bafzzy", and nothing anywhere said the value was wrong. Set Website is the only
+// field with a parsed binary encoding, and the only one that wasn't validated.
+//
+// Structural only, deliberately: any codec and any hash function are fine, the
+// digest just has to be the length it says it is. Being stricter risks rejecting a
+// perfectly good CID someone is trying to set.
+function isWellFormedCidV1(bytes) {
+  if (!bytes || bytes.length < 4 || bytes[0] !== 0x01) return false;
+  let i = 1;
+  const uvarint = () => {
+    let v = 0, shift = 0;
+    while (i < bytes.length) {
+      const b = bytes[i++];
+      v |= (b & 0x7f) << shift;
+      if (!(b & 0x80)) return v;
+      shift += 7;
+      if (shift > 28) return -1; // absurdly long varint — treat as malformed
+    }
+    return -1; // ran off the end mid-varint
+  };
+  if (uvarint() < 0) return false;   // codec
+  if (uvarint() < 0) return false;   // hash function
+  const len = uvarint();
+  return len > 0 && bytes.length - i === len;
+}
+
 // Decode an ENSIP-7 contenthash into { ns: 'ipfs'|'ipns', id }, or null.
 //   ipfs -> id is a base32 CIDv1 (bafy...)
 //   ipns -> id is a base36 IPNS name (k51...)
@@ -3208,12 +3241,16 @@ function decodeContenthash(hex) {
         if (cidBytes[0] !== 0x12 || cidBytes[1] !== 0x20 || cidBytes.length !== 34) return null;
         cidBytes = new Uint8Array([0x01, 0x70, ...cidBytes]);
       }
+      // The wrap path above was checked; a stored CIDv1 never was, so a truncated
+      // one rendered as a short bogus CID ("0xe30101" showed up as "bae").
+      if (!isWellFormedCidV1(cidBytes)) return null;
       return { ns: 'ipfs', id: 'b' + base32Encode(cidBytes) };
     }
     if (proto === 0xe5) {
       // IPNS: libp2p-key CIDv1. Legacy encoders may store a bare peer-id
       // multihash; wrap it as CIDv1 codec 0x72 (libp2p-key).
       if (cidBytes[0] !== 0x01) cidBytes = new Uint8Array([0x01, 0x72, ...cidBytes]);
+      if (!isWellFormedCidV1(cidBytes)) return null;
       return { ns: 'ipns', id: 'k' + base36Encode(cidBytes) };
     }
     return null;
@@ -3247,7 +3284,11 @@ function encodeContenthash(input) {
   else if (cid.startsWith('/ipns/')) ipnsName = cid.slice(6);
   else if (/^k(51|2k)/.test(cid)) ipnsName = cid;
   if (ipnsName !== null) {
-    return ethers.concat([encodeUvarint(0xe5), encodeIpnsCid(ipnsName)]);
+    const ipnsBytes = encodeIpnsCid(ipnsName);
+    if (!isWellFormedCidV1(ipnsBytes)) {
+      throw new Error('That IPNS name looks incomplete or mistyped — check the full k51… value.');
+    }
+    return ethers.concat([encodeUvarint(0xe5), ipnsBytes]);
   }
 
   // Strip ipfs:// prefix
@@ -3270,6 +3311,13 @@ function encodeContenthash(input) {
     cidBytes = ethers.getBytes('0x' + cid.slice(1));
   } else {
     throw new Error('Unsupported CID format. Use Qm.../baf... (IPFS) or ipns://k51... (IPNS).');
+  }
+
+  // Reject a CID that decoded to the wrong number of bytes BEFORE it costs a
+  // transaction. "bafZZZ" used to encode happily to 0xe30101739c and get written
+  // on-chain, leaving a dead website and no error anywhere.
+  if (!isWellFormedCidV1(cidBytes)) {
+    throw new Error('That CID looks incomplete or mistyped — check you copied the whole value.');
   }
 
   // ENSIP-7 contenthash format: uvarint(protoCode) + CID bytes
@@ -3313,7 +3361,7 @@ async function doSetContent() {
     $('manageForm').classList.remove('show');
     refreshAfterTx(currentTokenName, panelRepainted, receipt); // Refresh to show updated website link
   } catch (e) {
-    if (e.message?.includes('Unsupported CID')) {
+    if (e.message?.includes('CID') || e.message?.includes('IPNS name')) {
       showStatus(e.message, 'error');
     } else {
       handleError(e);

@@ -3,6 +3,6 @@
     "ethers": "^6.17.0"
   },
   "scripts": {
-    "test:dapp": "node dapp/wallet.test.mjs && node dapp/roll.test.mjs"
+    "test:dapp": "node dapp/wallet.test.mjs && node dapp/roll.test.mjs && node dapp/contenthash.test.mjs"
   }
 }
