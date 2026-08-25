@@ -889,7 +889,7 @@ try{if(localStorage.getItem('wns_dao_banner')==='1'){var _db=document.getElement
 <div id="rollSection" class="send-section">
   <a href="#" onclick="toggleRoll(event)" class="send-toggle" id="rollToggle">🎲 roll.wei →</a>
   <div id="rollPanel" class="roll-panel">
-    <div style="font-size:11px;opacity:0.5;margin-bottom:12px;line-height:1.5;"><a href="https://etherscan.io/address/0x0000C82AA4D72871568eF3859D2b0E7CF37e45f2" target="_blank" rel="noopener" class="roll-name-link">roll.wei</a> is an on-chain lottery for .wei holders. The pot is staked in Lido and earns while it waits; a random holder wins it, weighted by what their name costs to hold. Funded by WeiDAO, drawn with Chainlink VRF, owned by no one.</div>
+    <div style="font-size:11px;opacity:0.5;margin-bottom:12px;line-height:1.5;"><a href="https://etherscan.io/address/0x0000C82AA4D72871568eF3859D2b0E7CF37e45f2" target="_blank" rel="noopener" class="roll-name-link">roll.wei</a> is an on-chain lottery for .wei holders. The pot is staked in Lido and earns while it waits; a random holder wins it, weighted by what their name costs to hold. Funded by WeiDAO, owned by no one. When a round closes its entries freeze, then <a href="https://docs.chain.link/vrf" target="_blank" rel="noopener" class="roll-name-link">Chainlink VRF</a> delivers a public random seed no one — not even the caller who triggers the draw — can predict or grind, so the winner can’t be gamed.</div>
     <div id="rollBody"></div>
   </div>
 </div>
