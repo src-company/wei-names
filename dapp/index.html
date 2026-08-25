@@ -889,7 +889,7 @@ try{if(localStorage.getItem('wns_dao_banner')==='1'){var _db=document.getElement
 <div id="rollSection" class="send-section">
   <a href="#" onclick="toggleRoll(event)" class="send-toggle" id="rollToggle">🎲 roll.wei →</a>
   <div id="rollPanel" class="roll-panel">
-    <div style="font-size:11px;opacity:0.5;margin-bottom:12px;line-height:1.5;"><a href="https://etherscan.io/address/0x0000C82AA4D72871568eF3859D2b0E7CF37e45f2" target="_blank" rel="noopener" class="roll-name-link">roll.wei</a> is an on-chain lottery for .wei holders. The pot is staked in Lido and earns while it waits; a random holder wins it, weighted by what their name costs to hold. Funded by WeiDAO, owned by no one. When a round closes its entries freeze, then <a href="https://docs.chain.link/vrf" target="_blank" rel="noopener" class="roll-name-link">Chainlink VRF</a> delivers a public random seed no one — not even the caller who triggers the draw — can predict or grind, so the winner can’t be gamed.</div>
+    <div style="font-size:11px;opacity:0.5;margin-bottom:12px;line-height:1.5;"><a href="https://etherscan.io/address/0x0000C82AA4D72871568eF3859D2b0E7CF37e45f2" target="_blank" rel="noopener" class="roll-name-link">roll.wei</a> is an ownerless on-chain lottery for .wei holders, funded by WeiDAO. The pot earns in Lido while it waits, then goes to one random holder — odds weighted by what each name costs to hold. Entries freeze when the round closes and <a href="https://docs.chain.link/vrf" target="_blank" rel="noopener" class="roll-name-link">Chainlink VRF</a> picks the winner, so the draw can’t be predicted or gamed.</div>
     <div id="rollBody"></div>
   </div>
 </div>
@@ -4940,7 +4940,7 @@ function renderRoll(body, d, me) {
        + escapeHtml(_rollNameDraft) + '" oninput="rollNameChanged()"><span class="suffix">.wei</span></div>'
        + '<div id="rollWeightPreview" style="font-size:12px;opacity:0.6;margin:-4px 0 12px;min-height:16px;"></div>'
        + '<button onclick="rollEnter()">' + (me ? 'Enter round ' + d.round + ' \u2192' : 'Connect & enter \u2192') + '</button>'
-       + '<div class="roll-note">Odds are proportional to what your name costs to hold for its remaining term. One ticket per name. You keep the name; winning pays whoever holds it at claim time. Back a live <a href="https://etherscan.io/address/' + WEIDAO + '" target="_blank" rel="noopener" class="roll-name-link">WeiDAO</a> proposal with the same name and its entry is boosted automatically.</div>';
+       + '<div class="roll-note">One ticket per name. You keep the name; winning pays whoever holds it at claim time. Back a live <a href="https://etherscan.io/address/' + WEIDAO + '" target="_blank" rel="noopener" class="roll-name-link">WeiDAO</a> proposal with the same name to boost its entry automatically.</div>';
   } else if (phase === 2) {
     if (st.drawSettles) {
       // st.drawPrice comes from state(), i.e. an eth_call at tx.gasprice 0, where the
@@ -5011,9 +5011,8 @@ function renderRoll(body, d, me) {
      + '<div class="roll-note">A direct send to <a href="https://etherscan.io/address/' + LOTTERY + '" target="_blank" rel="noopener" class="roll-name-link">roll.wei</a> — staked into Lido and added to the prize. One-way: it grows whoever wins this round.</div></div>';
 
   // A quiet statement about what this is.
-  h += '<div class="roll-forever">An ownerless machine. Each round runs ~30 days, then a random '
-     + '.wei holder wins the pot and the next one opens — forever, with no operator and no off switch. '
-     + 'It keeps rolling as long as the pot is fed and Ethereum runs.</div>';
+  h += '<div class="roll-forever">A perpetual machine: each ~30-day round pays a random holder, then '
+     + 'the next opens — no operator, no off switch, for as long as the pot is fed and Ethereum runs.</div>';
 
   body.innerHTML = h;
   rollPreviewWeight();
