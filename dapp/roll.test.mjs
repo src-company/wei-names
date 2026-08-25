@@ -47,7 +47,7 @@ const LIFTED = [
   'normalizeLabelContract', 'normalizeLabel', 'normalizeFullName', 'computeIdFull',
   'rollTokenFor', 'rollDrawQuote', 'rollDrawValue', 'rollPanelOpen',
   'rollNameChanged', 'rollPreviewWeight', 'rollEnter', 'rollOnConnect', 'rollOnDisconnect',
-  'renderRoll', 'fmtCountdown', 'fmtEth', 'escapeHtml',
+  'renderRoll', 'fmtCountdown', 'fmtEth', 'escapeHtml', 'afterReceipt',
 ];
 
 function makeEl(id) {
@@ -78,6 +78,8 @@ function sandbox({ signer = null, address = null, panelOpen = true } = {}) {
   fakeEthers.Contract = class {
     constructor(addr) { this.addr = addr; }
     async enter(tokenId, boostPid) { calls.enter.push({ tokenId, boostPid }); return { hash: '0xtx' }; }
+    async draw() { return { hash: '0xtx' }; }
+    async claim(r) { return { hash: '0xtx' }; }
   };
 
   const ctx = {
@@ -101,11 +103,12 @@ function sandbox({ signer = null, address = null, panelOpen = true } = {}) {
     spinnerSVG: () => '',
     showStatus: (m, t) => calls.status.push([m, t]),
     handleError: e => calls.status.push(['error', e?.message || String(e)]),
-    waitForTx: async () => ({ status: 1 }),
+    waitForTx: async () => ({ status: 1, blockNumber: 100 }),
     wcTransaction: async p => p,
     toggleWallet: () => { calls.toggleWallet = (calls.toggleWallet || 0) + 1; },
     refreshRoll: () => { calls.refreshRoll++; },
     withRpc: async fn => fn(ctx.__provider),
+    getRpc: async () => ctx.__provider,
     __provider: null,
   };
   ctx.globalThis = ctx;
@@ -205,6 +208,33 @@ function eq(name, got, want) {
   eq('the entry is submitted after connecting', calls.enter.length, 1);
   eq('and for the name that was typed', calls.enter[0]?.tokenId, run(`computeIdFull('vitalik')`));
   ok('the intent is consumed, not left armed', run(`_rollPendingEnter === null`));
+  // The post-tx refresh must actually reach refreshRoll (it is gated through
+  // afterReceipt now, and a missing symbol there would vanish into rollEnter's catch).
+  ok('the panel is refreshed after the entry lands', calls.refreshRoll >= 1,
+     `refreshRoll called ${calls.refreshRoll} times; last status: ${JSON.stringify(calls.status.at(-1))}`);
+}
+
+// ── afterReceipt: don't repaint from a node that is behind the tx ─────────────
+{
+  const { run, ctx } = sandbox();
+  let height = 100;
+  ctx.__provider = { getBlockNumber: async () => height };
+
+  let ran = 0;
+  ctx.noop = () => { ran++; };
+
+  // No block number on the receipt -> nothing to wait for, run straight away.
+  await run(`afterReceipt({}, () => { noop(); }, { tries: 2, delayMs: 5 })`);
+  eq('receipt with no block runs the refresh immediately', ran, 1);
+
+  // Read node behind the tx: the refresh waits, then fires once it catches up.
+  ran = 0;
+  const pending = run(`afterReceipt({ blockNumber: 105 }, () => { noop(); }, { tries: 20, delayMs: 10 })`);
+  await new Promise(r => setTimeout(r, 60));
+  eq('behind the tx block: refresh withheld', ran, 0);
+  height = 105;
+  await pending;
+  eq('caught up: refresh fires', ran, 1);
 }
 
 // ── a dismissed modal must not arm a surprise transaction ────────────────────

@@ -31,7 +31,10 @@ function makeEl(id) {
   return el;
 }
 
-function harness({ hangSilent }) {
+function harness({ hangSilent, chain }) {
+  // Scriptable chain for the reverse-resolve tests: `height` is what the read
+  // provider reports, `reverse()` what reverseResolve() answers on each call.
+  chain = chain || { height: 0, reverse: () => '' };
   const els = new Map();
   for (const id of ['walletBtn', 'walletModal', 'walletOptions']) els.set(id, makeEl(id));
   const body = makeEl('body');
@@ -67,10 +70,15 @@ function harness({ hangSilent }) {
     on() {}, removeListener() {},
   };
 
+  // Providers are stubbed too: resolveWeiName() calls getBlockNumber() on whatever
+  // getRpcProvider() hands back, and a real one would reach for the network.
+  const stubProvider = class { constructor() {} async getBlockNumber() { return chain.height; } };
   const fakeEthers = {
     ...ethers,
     BrowserProvider: class { async getSigner() { return { getAddress: async () => ADDR }; } },
-    Contract: class { async reverseResolve() { return ''; } },
+    JsonRpcProvider: stubProvider,
+    FallbackProvider: stubProvider,
+    Contract: class { async reverseResolve() { return chain.reverse(); } },
   };
 
   const listeners = {};
@@ -95,7 +103,7 @@ function harness({ hangSilent }) {
   const ctx = vm.createContext(win);
   const here = path.dirname(url.fileURLToPath(import.meta.url));
   vm.runInContext(fs.readFileSync(path.join(here, 'wallet.js'), 'utf8'), ctx, { filename: 'wallet.js' });
-  return { ctx, win, els, store, setSaved: k => { store['zfi_wallet'] = k; } };
+  return { ctx, win, els, store, chain, setSaved: k => { store['zfi_wallet'] = k; } };
 }
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -146,6 +154,66 @@ function eq(label, got, want) {
   // The invariant: .connected on the corner button means "there is a signer".
   eq('wedged auto-connect never wears the connected class',
      h.els.get('walletBtn').classList.contains('connected'), false);
+}
+
+// ── resolveWeiName: a read-after-write must not paint the pre-tx answer ───────
+//
+// setPrimaryName's receipt comes from tx.wait(), i.e. the WALLET's node, while this
+// reads over the public endpoints. Ungated, the read landed on a node still a block
+// behind, answered with the OLD primary name, and that stale answer was cached under
+// wns_rev AND painted — flipping the corner back to a bare 0x… address, with nothing
+// re-polling to correct it before the next page load.
+async function reverseHarness(chain) {
+  const h = harness({ hangSilent: false, chain });
+  h.setSaved('injected');
+  h.win.walletInit({ appName: 't', onConnect: [], onDisconnect: [] });
+  await sleep(120);
+  await h.win.__WALLET_TEST_API__?.connectWithWallet?.('injected');
+  await sleep(300); // let the connect-time resolve finish its read AND its 130ms fade
+  return h;
+}
+
+{
+  // The read node is a block behind, so it still serves the pre-tx answer — exactly
+  // what a public endpoint does when the receipt came from the wallet's own node.
+  // Nothing may be painted or cached until it catches up.
+  const chain = { height: 100, reverse: () => (chain.height >= 101 ? 'new.wei' : 'old.wei') };
+  const h = await reverseHarness(chain);
+  h.els.get('walletBtn').textContent = 'new.wei';       // the optimistic paint
+  h.store['wns_rev:' + ADDR.toLowerCase()] = 'old.wei';
+
+  h.win.resolveWeiName(ADDR, { minBlock: 101, expect: 'new.wei', tries: 6, delayMs: 20 });
+  await sleep(30);
+  eq('behind the tx block: label untouched', h.els.get('walletBtn').textContent, 'new.wei');
+  eq('behind the tx block: stale name not cached', h.store['wns_rev:' + ADDR.toLowerCase()], 'old.wei');
+
+  chain.height = 101;                                    // node catches up
+  await sleep(300);
+  eq('caught up: the new name is cached', h.store['wns_rev:' + ADDR.toLowerCase()], 'new.wei');
+  eq('caught up: the label is the new name', h.els.get('walletBtn').textContent, 'new.wei');
+}
+
+{
+  // Graceful degradation: setPrimaryName only needs ownership, but reverseResolve
+  // also needs resolve() to point back at you — an owner who set the record
+  // elsewhere really does get "". The last attempt must accept that.
+  const h = await reverseHarness({ height: 5, reverse: () => '' });
+  h.els.get('walletBtn').textContent = 'mine.wei';
+  h.win.resolveWeiName(ADDR, { minBlock: 5, expect: 'mine.wei', tries: 3, delayMs: 20 });
+  await sleep(400);
+  eq('a name that never reverse-resolves still settles',
+     h.els.get('walletBtn').textContent, ADDR.slice(0, 6) + '...' + ADDR.slice(-4));
+}
+
+{
+  // The bare call (connect / account switch) is still a single unconditional read.
+  let calls = 0;
+  const h = await reverseHarness({ height: 9, reverse: () => { calls++; return 'a.wei'; } });
+  calls = 0;
+  h.win.resolveWeiName(ADDR);
+  await sleep(250);
+  eq('bare call reads exactly once', calls, 1);
+  eq('bare call paints what it read', h.els.get('walletBtn').textContent, 'a.wei');
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

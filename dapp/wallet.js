@@ -463,26 +463,76 @@ function setWalletLabel(addr) {
 }
 window.setWalletLabel = setWalletLabel;
 
-function resolveWeiName(addr) {
-  try {
-    const ns = new ethers.Contract(WEINS, WEINS_ABI, getRpcProvider());
-    ns.reverseResolve(addr).then(name => {
-      if (_connectedAddress !== addr) return;
-      const btn = document.getElementById('walletBtn');
-      if (!btn) return;
-      const label = name ? name.toLowerCase() : '';
-      _cacheWeiName(addr, label);
-      const target = label || _shortAddr(addr);
-      if (btn.textContent === target) return; // already correct (e.g. from cache) — no flash
-      // Gentle cross-fade only when the visible label actually changes.
-      btn.style.opacity = '0';
-      setTimeout(() => {
-        if (_connectedAddress !== addr) return;
-        btn.textContent = target;
-        btn.style.opacity = '';
-      }, 130);
-    }).catch(() => {});
-  } catch (e) {}
+let _resolveSeq = 0;
+
+// Paint the corner label from what the chain says the address reverse-resolves to.
+//
+// Called bare (on connect / account switch) this is a single read, as it always was.
+// `opts.minBlock` and `opts.expect` are for the read-after-write case, which used to
+// undo itself: waitForTx() gets its receipt from tx.wait(), i.e. the WALLET's own
+// node, while this reads over the public endpoints through a different provider
+// entirely. Asking them the instant a setPrimaryName receipt lands routinely returns
+// the PRE-tx answer — and the old code took it at face value, writing that stale name
+// into the wns_rev cache and painting it. So the corner flipped from the name the user
+// had just set back to a bare 0x… address, nothing re-polled, and it stayed wrong
+// until the next page load re-resolved it.
+//
+// minBlock waits for this provider to reach the block the tx landed in; expect keeps
+// asking until the chain actually agrees. The last attempt accepts whatever it gets,
+// so a name that legitimately does NOT reverse-resolve still settles correctly —
+// setPrimaryName only needs ownership, but reverseResolve also requires resolve() to
+// point back at you, so an owner who set the record elsewhere really does get "".
+function resolveWeiName(addr, opts) {
+  const expect = opts && opts.expect ? String(opts.expect).toLowerCase() : null;
+  const minBlock = Number(opts && opts.minBlock) || 0;
+  const tries = (opts && opts.tries) || ((expect || minBlock) ? 10 : 1);
+  const delayMs = (opts && opts.delayMs) || 1200;
+  const seq = ++_resolveSeq;
+  const live = () => seq === _resolveSeq && _connectedAddress === addr;
+
+  const paint = (label) => {
+    const btn = document.getElementById('walletBtn');
+    if (!btn) return;
+    _cacheWeiName(addr, label);
+    const target = label || _shortAddr(addr);
+    if (btn.textContent === target) return; // already correct (e.g. from cache) — no flash
+    // Gentle cross-fade only when the visible label actually changes.
+    btn.style.opacity = '0';
+    setTimeout(() => {
+      if (!live()) return;
+      btn.textContent = target;
+      btn.style.opacity = '';
+    }, 130);
+  };
+
+  (async () => {
+    let p, ns;
+    try { p = getRpcProvider(); ns = new ethers.Contract(WEINS, WEINS_ABI, p); } catch (e) { return; }
+
+    for (let i = 0; i < tries; i++) {
+      if (i) await new Promise(r => setTimeout(r, delayMs));
+      if (!live()) return;
+      const last = i === tries - 1;
+
+      // Skip the read while the node is provably behind the tx — but never on the
+      // last attempt, so a stuck or unreadable height can't starve it entirely.
+      if (minBlock && !last) {
+        let height = minBlock;
+        try { height = await p.getBlockNumber(); } catch (_) {}
+        if (!live()) return;
+        if (height < minBlock) continue;
+      }
+
+      let label;
+      try { label = ((await ns.reverseResolve(addr)) || '').toLowerCase(); }
+      catch (_) { continue; }
+      if (!live()) return;
+      // Still the pre-tx answer: don't cache it, don't paint it, just ask again.
+      if (expect && label !== expect && !last) continue;
+      paint(label);
+      return;
+    }
+  })();
 }
 window.resolveWeiName = resolveWeiName;
 

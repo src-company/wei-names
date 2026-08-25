@@ -1928,6 +1928,23 @@ async function refreshAfterTx(name, settled, receipt, { tries = 10, delayMs = 15
   }
 }
 
+// The same read-after-write wait as refreshAfterTx, for the one-shot refreshes that
+// have no verdict to poll on. A receipt only proves the tx landed on whichever node
+// answered it — for a wallet tx that's the WALLET's own node, while every read here
+// goes out over the public endpoints. Refreshing the instant a receipt arrives
+// therefore repaints pre-tx state, and with nothing re-polling behind it, that stale
+// paint is simply what the user is left looking at. Fire-and-forget.
+async function afterReceipt(receipt, fn, { tries = 8, delayMs = 1000 } = {}) {
+  const minBlock = Number(receipt && receipt.blockNumber) || 0;
+  for (let i = 0; minBlock && i < tries; i++) {
+    try {
+      if (await (await getRpc()).getBlockNumber() >= minBlock) break;
+    } catch (_) { break; } // unreadable height: don't starve the refresh
+    await new Promise(r => setTimeout(r, delayMs));
+  }
+  try { return await fn(); } catch (_) {}
+}
+
 // Placeholder for a lookup whose result we know to be pre-tx. Returns the verdict shape
 // doCheckName's callers expect, with managed:false so no predicate treats it as settled.
 function paintConfirming(kind, name) {
@@ -3309,19 +3326,31 @@ async function doSetContent() {
 
 async function doSetPrimary() {
   if (isProcessing || !contract || !currentTokenId) return;
+  // Capture up front: a doCheckName landing mid-flight can call hideManage(), which
+  // nulls currentTokenName — and the label painted below would then read "null.wei".
+  const tokenId = currentTokenId;
+  const name = currentTokenName;
+  const addr = _connectedAddress;
 
   isProcessing = true;
   const btn = (typeof event !== 'undefined' && event?.target) || null; if (btn) btn.disabled = true;
   try {
-    showStatus('Setting ' + currentTokenName + '.wei as your display name...', '');
-    const tx = await wcTransaction(contract.setPrimaryName(currentTokenId), 'Approve primary name');
+    showStatus('Setting ' + name + '.wei as your display name...', '');
+    const tx = await wcTransaction(contract.setPrimaryName(tokenId), 'Approve primary name');
     showStatus('Waiting for confirmation...', '', tx.hash);
-    await waitForTx(tx);
-    showStatus(currentTokenName + '.wei is now your display name!', 'success', tx.hash);
-    $('walletBtn').textContent = currentTokenName + '.wei';
+    const receipt = await waitForTx(tx);
+    showStatus(name + '.wei is now your display name!', 'success', tx.hash);
+    $('walletBtn').textContent = name + '.wei';
     // Re-resolve through wallet.js so its wns_rev cache picks up the new primary name.
     // Writing textContent alone leaves the previous name cached, to flash on next load.
-    if (typeof resolveWeiName === 'function') resolveWeiName(_connectedAddress);
+    // Gate that read on the tx's block AND on seeing the new name: it goes out over
+    // the public endpoints while the receipt came from the wallet's own node, so an
+    // ungated read came back with the OLD primary name — which then got cached and
+    // painted straight over the one just set, flipping the corner back to a bare
+    // address until the next page load.
+    if (typeof resolveWeiName === 'function') {
+      resolveWeiName(addr, { minBlock: receipt && receipt.blockNumber, expect: name + '.wei' });
+    }
   } catch (e) {
     handleError(e);
   } finally {
@@ -3658,10 +3687,10 @@ async function doWithdrawRegFees() {
       'Approve withdrawal'
     );
     showStatus('Waiting for confirmation...', '', tx.hash);
-    await waitForTx(tx);
+    const receipt = await waitForTx(tx);
 
     showStatus('Fees withdrawn!', 'success', tx.hash);
-    showSubSalesForm();
+    afterReceipt(receipt, showSubSalesForm);
   } catch (e) {
     handleError(e);
   } finally {
@@ -4682,10 +4711,10 @@ async function rollEnter() {
     const c = new ethers.Contract(LOTTERY, LOTTERY_ABI, window._signer);
     const tx = await wcTransaction(c.enter(target.id, 0), 'Confirm lottery entry');
     showStatus('Entering ' + target.name + '.wei…', '', tx.hash);
-    await waitForTx(tx);
+    const receipt = await waitForTx(tx);
     showStatus('Entered ' + target.name + '.wei into the round', 'success', tx.hash);
     _rollNameDraft = '';
-    refreshRoll();
+    afterReceipt(receipt, refreshRoll);
   } catch (e) { handleError(e); }
   finally { isProcessing = false; }
 }
@@ -4724,9 +4753,9 @@ async function rollDraw() {
     const c = new ethers.Contract(LOTTERY, LOTTERY_ABI, window._signer);
     const tx = await wcTransaction(c.draw({ value }), 'Confirm draw (VRF fee, excess refunded)');
     showStatus('Requesting the random draw…', '', tx.hash);
-    await waitForTx(tx);
+    const receipt = await waitForTx(tx);
     showStatus('Draw requested — winner lands in ~13 min', 'success', tx.hash);
-    refreshRoll();
+    afterReceipt(receipt, refreshRoll);
   } catch (e) { handleError(e); }
   finally { isProcessing = false; }
 }
@@ -4739,9 +4768,9 @@ async function rollClaim(r) {
     const c = new ethers.Contract(LOTTERY, LOTTERY_ABI, window._signer);
     const tx = await wcTransaction(c.claim(r), 'Claim your prize');
     showStatus('Claiming round ' + r + '…', '', tx.hash);
-    await waitForTx(tx);
+    const receipt = await waitForTx(tx);
     showStatus('Prize claimed — paid in stETH', 'success', tx.hash);
-    refreshRoll();
+    afterReceipt(receipt, refreshRoll);
   } catch (e) { handleError(e); }
   finally { isProcessing = false; }
 }
