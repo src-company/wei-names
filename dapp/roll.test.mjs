@@ -48,6 +48,7 @@ const LIFTED = [
   'rollTokenFor', 'rollDrawQuote', 'rollDrawValue', 'rollPanelOpen',
   'rollNameChanged', 'rollPreviewWeight', 'rollEnter', 'rollOnConnect', 'rollOnDisconnect',
   'renderRoll', 'fmtCountdown', 'fmtEth', 'escapeHtml', 'afterReceipt', 'readSideHasTx',
+  'fmtUsd', 'fmtAgo', 'rollNameLink',
 ];
 
 function makeEl(id) {
@@ -186,6 +187,28 @@ function eq(name, got, want) {
   const html = els.get('rollBody').innerHTML;
   ok('repaint refills the entry box with the draft', html.includes('value="vitalik"'),
      'input rendered as: ' + (html.match(/<input[^>]*rollNameInput[^>]*>/) || ['(none)'])[0]);
+}
+
+// ── the current-round field renders odds, highlights you, and shows USD ───────
+{
+  const { run, els } = sandbox({ address: '0xME' });
+  const now = Math.floor(Date.now() / 1000);
+  const st = `{ phase: 1, round: 7, roundEnd: ${now + 5 * 86400}, pot: 2418800000000000000n,
+                totalWeight: 50000000000000n, tickets: 3, drawPrice: 0n, drawSettles: false, resetAt: 0 }`;
+  const field = `[
+    { tokenId: 1n, weight: 48000000000000n, name: '0x.wei', mine: false },
+    { tokenId: 2n, weight: 1500000000000n, name: 'rudxane.wei', mine: false },
+    { tokenId: 3n, weight: 500000000000n, name: 'majdao.wei', mine: true }
+  ]`;
+  run(`renderRoll($('rollBody'), { st: ${st}, round: 7, infos: [], claimable: [], names: {},
+        draw: null, field: ${field}, usd: 3000 }, '0xME')`);
+  const html = els.get('rollBody').innerHTML;
+  ok('field header shows the count', html.includes('This round · 3 in'));
+  ok('odds derived from cum weights', /0x\.wei[\s\S]{0,140}?9[0-9]%/.test(html), html);
+  ok('the wallet\'s own name is marked', html.includes('roll-mine') && html.includes('roll-you'));
+  ok('combined odds line for you', /Your 1 name/.test(html));
+  ok('pot shows a USD estimate', /\$7,2\d\d/.test(html));
+  ok('names link to their profile', html.includes('href="#majdao"'));
 }
 
 // ── "Connect & enter" actually enters ────────────────────────────────────────

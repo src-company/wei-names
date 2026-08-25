@@ -680,7 +680,11 @@ body.modal-open { overflow: hidden; }
 .roll-meta-v { font-size:16px; margin-top:4px; font-variant-numeric:tabular-nums; }
 .roll-phase { display:inline-block; font-size:10px; text-transform:uppercase; letter-spacing:0.08em; padding:3px 8px; border:1px solid var(--border); margin-bottom:14px; }
 .roll-your { border:1px solid var(--free-border,var(--border)); background:var(--free-bg,transparent); padding:12px; margin-bottom:16px; font-size:13px; }
-.roll-winners { margin-top:20px; }
+.roll-winners, .roll-field { margin-top:20px; }
+.roll-field h4 { font-size:11px; text-transform:uppercase; letter-spacing:0.06em; opacity:0.5; margin:0 0 8px; font-weight:normal; }
+.roll-mine { font-weight:600; }
+.roll-you { font-size:9px; text-transform:uppercase; letter-spacing:0.06em; opacity:0.55; border:1px solid var(--border-muted); padding:1px 5px; margin-left:6px; vertical-align:1px; }
+.roll-name-link { color:inherit; text-decoration:none; border-bottom:1px solid var(--border-muted); }
 .roll-winners h4 { font-size:11px; text-transform:uppercase; letter-spacing:0.06em; opacity:0.5; margin:0 0 8px; font-weight:normal; }
 .roll-win-row { display:flex; justify-content:space-between; font-size:13px; padding:6px 0; border-bottom:1px solid var(--border-muted); }
 .roll-win-row .n { opacity:0.85; }
@@ -809,7 +813,7 @@ try{if(localStorage.getItem('wns_dao_banner')==='1'){var _db=document.getElement
       <span onclick="toggleFreePanel()" style="cursor:pointer;font-size:18px;line-height:1;opacity:0.4;">&times;</span>
     </div>
     <div class="free-input-wrap">
-      <input type="text" id="freeLabelInput" placeholder="yourname">
+      <input type="text" id="freeLabelInput" placeholder="yourname" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" oninput="checkFreeLabel()">
       <span class="free-suffix">.id.wei</span>
     </div>
     <button id="freeMintBtn" onclick="doFreeMint()">Mint</button>
@@ -1023,6 +1027,8 @@ const LOTTERY_ABI = [
   'function drawPrice() view returns (uint256)',
   'function canClaim(uint256 r, address who) view returns (bool)',
   'function ticketOf(uint256 r, uint256 tokenId) view returns (uint256)',
+  'function ticketCount(uint256 r) view returns (uint256)',
+  'function ticketsIn(uint256 r, uint256 offset, uint256 limit) view returns ((uint256 tokenId, uint128 cum, uint128 boostPid)[])',
   'function enter(uint256 tokenId, uint256 boostPid)',
   'function draw() payable',
   'function claim(uint256 r)'
@@ -3880,16 +3886,41 @@ function toggleFreePanel() {
   if (panel.classList.contains('show')) {
     $('freeLabelInput').focus();
   }
-  // Reset status when toggling
+  // Reset status when toggling, then re-flag whatever is already in the box.
   const st = $('freeStatus');
   st.className = 'free-status';
   st.textContent = '';
+  if (panel.classList.contains('show')) checkFreeLabel();
 }
 
+// type '' means "step in progress" and leads with a spinner; 'info' is the same
+// neutral styling with no spinner, for a message that isn't waiting on anything.
 function showFreeStatus(msg, type) {
   const el = $('freeStatus');
-  el.innerHTML = (type ? '' : spinnerSVG()) + escapeHtml(msg);
-  el.className = 'free-status show' + (type ? ' ' + type : '');
+  const spin = type ? '' : spinnerSVG();
+  const cls = type && type !== 'info' ? ' ' + type : '';
+  el.innerHTML = spin + escapeHtml(msg);
+  el.className = 'free-status show' + cls;
+}
+
+// The free panel validates only on click, so a lookalike label got no feedback at
+// all until after the user committed to minting. Mirror the search box: flag a name
+// ENSIP-15 rejects as they type, without blocking it.
+function checkFreeLabel() {
+  const raw = $('freeLabelInput').value;
+  if (!raw.trim()) {
+    const el = $('freeStatus');
+    el.textContent = '';
+    el.className = 'free-status';
+    return;
+  }
+  const nonStandard = getNormalizationError(raw);
+  if (nonStandard) showFreeStatus('Non-standard name — ENSIP-15 rejects it (' + nonStandard + ')', 'info');
+  else {
+    const el = $('freeStatus');
+    el.textContent = '';
+    el.className = 'free-status';
+  }
 }
 
 async function doFreeMint() {
@@ -3906,7 +3937,7 @@ async function doFreeMint() {
   try {
     // Ensure wallet
     if (!_signer) {
-      showFreeStatus('Connect your wallet first', '');
+      showFreeStatus('Connect your wallet first', 'info');
       toggleWallet();
       btn.disabled = false;
       return;
@@ -4528,6 +4559,10 @@ window.addEventListener('hashchange', initFromHash);
 // Self-contained. Every path guards on LOTTERY being set and swallows its
 // own errors, so nothing here can affect the rest of the dapp.
 const ROLL_PHASE = ['Idle', 'Open', 'Ready', 'Drawing'];
+const ROLL_FIELD_CAP = 24; // max entrants rendered with odds; more shows a "+N more" line
+const CHAINLINK_ETHUSD = '0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419'; // ETH/USD, 8 decimals
+let _rollRound = null;           // current round, cached for the entry preview's already-entered check
+let _rollEthUsd = { v: null, at: 0 }; // ~60s-cached ETH price for the pot's USD readout
 let _rollTimer = null;
 const rollIface = new ethers.Interface(LOTTERY_ABI);
 
@@ -4649,6 +4684,27 @@ function fmtCountdown(secs) {
   return s + 's';
 }
 
+function fmtUsd(wei, ethUsd) {
+  if (!ethUsd) return '';
+  const usd = parseFloat(ethers.formatEther(wei)) * ethUsd;
+  if (usd < 0.01) return '';
+  return '$' + usd.toLocaleString('en-US', { maximumFractionDigits: usd < 100 ? 2 : 0 });
+}
+
+function fmtAgo(secs) {
+  if (secs < 60) return 'just now';
+  const d = Math.floor(secs / 86400), h = Math.floor((secs % 86400) / 3600), m = Math.floor((secs % 3600) / 60);
+  if (d) return d + 'd ago';
+  if (h) return h + 'h ago';
+  return m + 'm ago';
+}
+
+// A field/winner name that links to its profile via the dapp's #name view.
+function rollNameLink(full) {
+  const label = full.endsWith('.wei') ? full.slice(0, -4) : full;
+  return '<a href="#' + encodeURIComponent(label) + '" class="roll-name-link">' + escapeHtml(full) + '</a>';
+}
+
 function fmtEth(wei, dp = 4) {
   try {
     const n = parseFloat(ethers.formatEther(wei));
@@ -4674,20 +4730,25 @@ async function refreshRoll() {
       const c = rollRead(p);
       const st = await c.state();
       const round = Number(st.round);
+      _rollRound = round; // for the entry preview's already-entered check
       // Recent settled rounds for the winners list, and claimable rounds for me.
       const from = Math.max(0, round - 6);
       const rounds = [];
       for (let r = round - 1; r >= from; r--) rounds.push(r);
       const claimRounds = [];
       for (let r = round; r >= from; r--) claimRounds.push(r);
+      // The current round's field is worth showing while there's a live round with entrants.
+      const liveField = [1, 2, 3].includes(Number(st.phase)) && Number(st.tickets) > 0;
 
-      const [infoList, claimFlags, draw] = await Promise.all([
+      const [infoList, claimFlags, draw, tickets] = await Promise.all([
         Promise.all(rounds.map(r => c.roundInfo(r))),
         me ? Promise.all(claimRounds.map(r => c.canClaim(r, me))) : Promise.resolve([]),
         // Only worth a quote when a draw is actually on offer.
         Number(st.phase) === 2 && st.drawSettles
           ? rollDrawQuote(p).catch(() => null)
-          : Promise.resolve(null)
+          : Promise.resolve(null),
+        // Whole field in one call; per-name weight is derived from the cum deltas (no per-name read).
+        liveField ? c.ticketsIn(round, 0, ROLL_FIELD_CAP).catch(() => null) : Promise.resolve(null)
       ]);
 
       const infos = rounds.map((r, i) => [r, infoList[i]]);
@@ -4701,13 +4762,51 @@ async function refreshRoll() {
           try { names[r] = await nft.getFullName(info.winner); } catch (_) { names[r] = null; }
         }
       }));
-      return { st, round, infos, claimable, names, draw };
+      return { st, round, infos, claimable, names, draw, tickets };
     });
+    // Resolve the field's names + owners in one multicall, and the ETH price — both optional.
+    data.field = await rollBuildField(data.tickets, me).catch(() => null);
+    data.usd = await rollEthUsd().catch(() => null);
     renderRoll(body, data, me);
   } catch (e) {
     body.innerHTML = '<div class="roll-note" style="font-size:12px;opacity:0.6;">Couldn’t reach the lottery contract. It may not be deployed on this network yet.</div>';
     console.error('refreshRoll:', e);
   }
+}
+
+// Turn raw tickets into display rows: derive each name's weight from the cumulative-weight
+// deltas (so the whole field costs one ticketsIn call), then batch-resolve names + owners via a
+// single aggregate3. Marks the connected wallet's own entries. Any read failure returns null and
+// the field section simply isn't rendered.
+async function rollBuildField(tickets, me) {
+  if (!tickets || !tickets.length) return null;
+  const calls = [];
+  for (const t of tickets) {
+    calls.push({ target: CONTRACT, iface: iface, fn: 'getFullName', args: [t.tokenId] });
+    calls.push({ target: CONTRACT, iface: ownerOfIface, fn: 'ownerOf', args: [t.tokenId] });
+  }
+  const res = await aggregate3(calls);
+  const meLc = (me || '').toLowerCase();
+  let prevCum = 0n;
+  return tickets.map((t, i) => {
+    const cum = BigInt(t.cum);
+    const weight = cum - prevCum;
+    prevCum = cum;
+    const name = res[2 * i] ? res[2 * i][0] : null;
+    const ownerRaw = res[2 * i + 1] ? res[2 * i + 1][0] : null;
+    const mine = !!meLc && ownerRaw && String(ownerRaw).toLowerCase() === meLc;
+    return { tokenId: t.tokenId, weight, name, mine };
+  });
+}
+
+// Chainlink ETH/USD, ~60s cached. Optional — a failure just hides the USD readout.
+async function rollEthUsd() {
+  if (_rollEthUsd.v && Date.now() - _rollEthUsd.at < 60000) return _rollEthUsd.v;
+  const answer = await withRpc(p =>
+    new ethers.Contract(CHAINLINK_ETHUSD, ['function latestAnswer() view returns (int256)'], p).latestAnswer());
+  const usd = Number(answer) / 1e8;
+  if (usd > 0) _rollEthUsd = { v: usd, at: Date.now() };
+  return usd > 0 ? usd : null;
 }
 
 function renderRoll(body, d, me) {
@@ -4717,10 +4816,11 @@ function renderRoll(body, d, me) {
   let h = '';
 
   h += '<div class="roll-phase">' + (ROLL_PHASE[phase] || '—') + ' · round ' + d.round + '</div>';
+  const usd = d.usd ? fmtUsd(st.pot, d.usd) : '';
   h += '<div class="roll-pot">'
      + '<div class="roll-pot-label">Pot</div>'
      + '<div class="roll-pot-amount">' + fmtEth(st.pot) + '</div>'
-     + '<div class="roll-pot-sub">stETH · earning via Lido</div></div>';
+     + '<div class="roll-pot-sub">stETH · earning via Lido' + (usd ? ' · ≈ ' + usd : '') + '</div></div>';
 
   // Round meta
   const endTs = Number(st.roundEnd);
@@ -4760,7 +4860,7 @@ function renderRoll(body, d, me) {
         ? ' (≈ ' + fmtEth(rollDrawValue(d.draw), 4) + ' ETH at current gas, any excess refunded)'
         : ' (any excess is refunded)';
       h += '<button onclick="rollDraw()">Draw the winner</button>'
-         + '<div class="roll-note">Entries are closed. Anyone can trigger the draw. You pay the Chainlink VRF fee' + fee + ', the pot stays whole.</div>';
+         + '<div class="roll-note">Entries closed ' + fmtAgo(now - endTs) + ' — anyone can trigger the draw. You pay the Chainlink VRF fee' + fee + ', the pot stays whole.</div>';
     } else {
       h += '<div class="roll-note">This round had too few entries to draw, so calling draw will simply start a fresh one.</div>'
          + '<button class="secondary" onclick="rollDraw()">Start next round</button>';
@@ -4770,13 +4870,35 @@ function renderRoll(body, d, me) {
        + (Number(st.resetAt) && now > Number(st.resetAt) ? ' The request has stalled — anyone may reset it and redraw.' : '') + '</div>';
   }
 
+  // Current round field — who's in and their odds, from the cum-weight deltas.
+  if (d.field && d.field.length) {
+    const total = Number(st.totalWeight);
+    h += '<div class="roll-field"><h4>This round · ' + Number(st.tickets) + ' in</h4>';
+    for (const row of d.field) {
+      const pct = total > 0 ? (100 * Number(row.weight) / total) : 0;
+      const nm = row.name ? rollNameLink(row.name) : ('#' + row.tokenId.toString().slice(0, 8) + '…');
+      h += '<div class="roll-win-row' + (row.mine ? ' roll-mine' : '') + '">'
+         + '<span class="n">' + nm + (row.mine ? '<span class="roll-you">you</span>' : '') + '</span>'
+         + '<span class="p">' + (pct < 1 ? pct.toFixed(1) : Math.round(pct)) + '%</span></div>';
+    }
+    const n = Number(st.tickets);
+    if (n > d.field.length) h += '<div class="roll-note">+ ' + (n - d.field.length) + ' more (showing the first ' + d.field.length + ')</div>';
+    const mine = d.field.filter(r => r.mine);
+    if (mine.length) {
+      const myPct = total > 0 ? 100 * mine.reduce((a, r) => a + Number(r.weight), 0) / total : 0;
+      h += '<div class="roll-note">Your ' + mine.length + ' name' + (mine.length > 1 ? 's' : '')
+         + ' · ~' + (myPct < 1 ? myPct.toFixed(1) : Math.round(myPct)) + '% combined odds.</div>';
+    }
+    h += '</div>';
+  }
+
   // Recent winners
   const settled = d.infos.filter(([r, i]) => i.settled && i.winner !== 0n);
   if (settled.length) {
     h += '<div class="roll-winners"><h4>Recent winners</h4>';
     for (const [r, i] of settled) {
-      const nm = d.names[r] || ('#' + i.winner.toString().slice(0, 8) + '…');
-      h += '<div class="roll-win-row"><span class="n">' + escapeHtml(nm) + '</span>'
+      const nm = d.names[r] ? rollNameLink(d.names[r]) : ('#' + i.winner.toString().slice(0, 8) + '…');
+      h += '<div class="roll-win-row"><span class="n">' + nm + '</span>'
          + '<span class="p">' + fmtEth(i.prize) + ' stETH' + (i.resolved ? '' : ' · unclaimed') + '</span></div>';
     }
     h += '</div>';
@@ -4813,10 +4935,19 @@ function rollPreviewWeight() {
   rollPreviewDebounce = setTimeout(async () => {
     let text = '';
     try {
-      const w = await withRpc((p) => rollRead(p).weightOf(target.id));
-      text = w > 0n
-        ? 'This name’s weight: ' + fmtEth(w, 5) + ' (its share of the odds)'
-        : 'Not an active top-level name — subdomains and expired names can’t enter.';
+      // One round-trip: weight, and whether this name is already in the current round.
+      const [w, entered] = await withRpc((p) => {
+        const c = rollRead(p);
+        return Promise.all([
+          c.weightOf(target.id),
+          _rollRound != null ? c.ticketOf(_rollRound, target.id).catch(() => 0n) : Promise.resolve(0n)
+        ]);
+      });
+      text = entered && entered > 0n
+        ? 'Already entered this round ✓'
+        : (w > 0n
+            ? 'This name’s weight: ' + fmtEth(w, 5) + ' (its share of the odds)'
+            : 'Not an active top-level name — subdomains and expired names can’t enter.');
     } catch (_) { text = ''; }
     if (thisVersion !== rollPreviewVersion) return; // superseded by a newer keystroke
     const el = document.getElementById('rollWeightPreview');
