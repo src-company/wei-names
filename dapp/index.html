@@ -10,6 +10,14 @@
 <link rel="stylesheet" href="theme.css">
 <link rel="stylesheet" href="wallet.css">
 <link rel="modulepreload" href="vendor/ens-normalize.min.js">
+<!-- Warm the TCP+TLS handshake to the top read endpoints while the page is still
+     parsing. Every load kicks off chain reads (initPending, and doCheckName when
+     the URL carries a #name), so the first eth_call otherwise pays DNS + connect
+     before it can send a byte. Only the first two: FallbackProvider's happy path
+     (quorum 1, priority order) touches the head of the list, and opening six idle
+     TLS connections costs mobile users more than it saves. -->
+<link rel="preconnect" href="https://ethereum-rpc.publicnode.com" crossorigin>
+<link rel="preconnect" href="https://cloudflare-eth.com" crossorigin>
 <script>
 // Prevent dark-mode FOUC: apply class before first paint
 try{var d=localStorage.getItem('dark');if(d==='1'||(d===null&&matchMedia('(prefers-color-scheme:dark)').matches))document.documentElement.classList.add('dark')}catch(_){}
@@ -17,7 +25,10 @@ try{var d=localStorage.getItem('dark');if(d==='1'||(d===null&&matchMedia('(prefe
 // including the manual dark toggle (not just the system preference).
 (function(){function s(){var m=document.getElementById('metaTheme');if(m)m.content=document.documentElement.classList.contains('dark')?'#0a0a0a':'#ffffff';}s();try{new MutationObserver(s).observe(document.documentElement,{attributes:true,attributeFilter:['class']});}catch(_){}})();
 </script>
-<script src="theme.js"></script>
+<!-- defer: nothing in this page references theme.js at parse time, and its own
+     nav render already waited for DOMContentLoaded, so blocking the parser on
+     it bought nothing. -->
+<script src="theme.js" defer></script>
 <script>
 // Load ens-normalize from local vendor bundle (committed — no CDN dependency)
 (async () => {
@@ -523,8 +534,11 @@ body.modal-open { overflow: hidden; }
     width: 38px; height: 38px;
     border-radius: 50%;
     border: 1px solid var(--border);
-    background: color-mix(in srgb, var(--bg) 80%, transparent);
-    -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
+    /* Was 80% + backdrop-filter: blur(8px). Both controls are position:fixed and
+       always on screen, so the blur was re-sampling their backdrop every scrolled
+       frame for an effect 20% transparency barely showed. A touch more opacity
+       reads the same and costs the compositor nothing. */
+    background: color-mix(in srgb, var(--bg) 92%, transparent);
     opacity: 0.8;
     transition: opacity 0.2s, background 0.15s, border-color 0.15s;
   }
@@ -879,7 +893,7 @@ try{if(localStorage.getItem('wns_dao_banner')==='1'){var _db=document.getElement
 <div class="featured">
   <span class="featured-label">featured on</span>
   <a href="https://www.bankless.com/read/getting-started-with-the-wei-name-service" target="_blank" rel="noopener" class="featured-card">
-    <img class="featured-thumb" src="assets/bankless-article.jpg" alt="" width="120" height="63" loading="lazy">
+    <img class="featured-thumb" src="assets/bankless-article.jpg" alt="" width="120" height="63" loading="lazy" decoding="async">
     <span class="featured-text">
       <span class="featured-site">Bankless</span>
       <span class="featured-title">Getting Started with the Wei Name Service</span>
@@ -892,22 +906,22 @@ try{if(localStorage.getItem('wns_dao_banner')==='1'){var _db=document.getElement
   <span class="integrations-label">use your .wei on</span>
   <div class="integrations-row">
     <a href="https://github.com/solardev-xyz/freedom-browser" target="_blank" rel="noopener" class="integration" title="Freedom Browser">
-      <img src="assets/freedom-browser.png" alt="" width="22" height="22" loading="lazy"><span>Freedom Browser</span>
+      <img src="assets/freedom-browser.png" alt="" width="22" height="22" loading="lazy" decoding="async"><span>Freedom Browser</span>
     </a>
     <a href="https://walletchan.com/" target="_blank" rel="noopener" class="integration" title="WalletChan">
-      <img src="assets/walletchan.png" alt="" width="22" height="22" loading="lazy"><span>WalletChan</span>
+      <img src="assets/walletchan.png" alt="" width="22" height="22" loading="lazy" decoding="async"><span>WalletChan</span>
     </a>
     <a href="https://kaowallet.com/" target="_blank" rel="noopener" class="integration" title="Kao desktop wallet">
-      <img src="assets/kao.png" alt="" width="22" height="22" loading="lazy"><span>Kao Wallet</span>
+      <img src="assets/kao.png" alt="" width="22" height="22" loading="lazy" decoding="async"><span>Kao Wallet</span>
     </a>
     <a href="https://poidh.xyz/" target="_blank" rel="noopener" class="integration" title="poidh">
-      <img src="assets/poidh.svg" alt="" width="22" height="22" loading="lazy"><span>poidh</span>
+      <img src="assets/poidh.svg" alt="" width="22" height="22" loading="lazy" decoding="async"><span>poidh</span>
     </a>
     <a href="https://ocarina.trade/" target="_blank" rel="noopener" class="integration" title="Ocarina">
-      <img src="assets/ocarina.png" alt="" width="22" height="22" loading="lazy"><span>Ocarina</span>
+      <img src="assets/ocarina.png" alt="" width="22" height="22" loading="lazy" decoding="async"><span>Ocarina</span>
     </a>
     <a href="https://holders.vote/" target="_blank" rel="noopener" class="integration" title="holders.vote">
-      <img src="assets/holders-vote.svg" alt="" width="22" height="22" loading="lazy"><span>holders.vote</span>
+      <img src="assets/holders-vote.svg" alt="" width="22" height="22" loading="lazy" decoding="async"><span>holders.vote</span>
     </a>
     <a href="https://x.com/search?q=%22.wei%22&amp;src=typed_query" target="_blank" rel="noopener" class="integrations-more" title="Explore .wei names on X">and more</a>
   </div>
@@ -928,7 +942,12 @@ try{if(localStorage.getItem('wns_dao_banner')==='1'){var _db=document.getElement
 </footer>
 
 <script src="vendor/ethers.min.js"></script>
-<script src="vendor/walletconnect.min.js"></script>
+<!-- vendor/walletconnect.min.js is NOT loaded here: at 624 KB it is larger than
+     everything else the dapp ships combined, and it is dead weight on the vast
+     majority of loads (injected/EIP-6963 wallet, or no wallet at all). wallet.js
+     pulls it in on demand — see loadWalletConnect(). Keeping it off the critical
+     path also lets the inline script below (and its getRpc() warm-up) start
+     ~624 KB of download+parse+execute sooner. -->
 <script src="wallet.js"></script>
 <script>
 // Global error handler for debugging on mobile
@@ -2690,6 +2709,17 @@ async function showManage(tokenId, name) {
     // Common text record keys to display
     const textKeys = ['url', 'email', 'description', 'com.twitter', 'com.github'];
 
+    // A subdomain's staleness check needs records(parent), and the parent's id is
+    // the recursive namehash of the parent label chain — no chain read required to
+    // derive it (showManage is always called with tokenId === computeIdFull(name)).
+    // So it rides along in the batch below instead of costing a second serial
+    // round-trip after it: a taken subdomain used to cost three chained public-RPC
+    // calls (availability -> this batch -> parent records). It is only *used* once
+    // the chain confirms it really is this token's parent, so a mismatch falls back
+    // to the extra call rather than trusting a locally derived id.
+    const parentIdGuess = name.includes('.') ? computeIdFull(name.split('.').slice(1).join('.')) : null;
+    const parentSlot = 4 + textKeys.length;
+
     // Batch all reads into one RPC call (including text records). Retry once:
     // a single flaky public-RPC aggregate3 call — or an allowFailure ownerOf
     // that transiently reverts — must not silently blank the panel for a name
@@ -2702,7 +2732,8 @@ async function showManage(tokenId, name) {
           { fn: 'resolve', args: [tokenId], allowFailure: true },
           { fn: 'records', args: [tokenId], allowFailure: true },
           { fn: 'contenthash', args: [tokenId], allowFailure: true },
-          ...textKeys.map(key => ({ fn: 'text', args: [tokenId, key], allowFailure: true }))
+          ...textKeys.map(key => ({ fn: 'text', args: [tokenId, key], allowFailure: true })),
+          ...(parentIdGuess !== null ? [{ fn: 'records', args: [parentIdGuess], allowFailure: true }] : [])
         ]);
       } catch (_) {
         results = null;
@@ -2740,17 +2771,25 @@ async function showManage(tokenId, name) {
     // offering signatures that will fail on-chain.
     let isStaleSubdomain = false;
     if (record && record.parent !== 0n) {
-      try {
-        const parentResults = await multicall([
-          { fn: 'records', args: [record.parent], allowFailure: true }
-        ]);
-        if (stale()) return false;
-        const parentRecord = parentResults[0] || null;
-        if (parentRecord && parentRecord.epoch !== record.parentEpoch) {
-          isStaleSubdomain = true;
+      // Already in hand from the batch above whenever the locally derived parent id
+      // is the real one. undefined (not null) means "not fetched yet" — a null there
+      // is a legitimate read failure and must not trigger a second attempt.
+      let parentRecord = (parentIdGuess !== null && record.parent === parentIdGuess)
+        ? (results[parentSlot] || null)
+        : undefined;
+      if (parentRecord === undefined) {
+        try {
+          const parentResults = await multicall([
+            { fn: 'records', args: [record.parent], allowFailure: true }
+          ]);
+          if (stale()) return false;
+          parentRecord = parentResults[0] || null;
+        } catch (_) {
+          parentRecord = null; // Best-effort: on read failure, don't block the user
         }
-      } catch (_) {
-        // Best-effort: on read failure, don't block the user
+      }
+      if (parentRecord && parentRecord.epoch !== record.parentEpoch) {
+        isStaleSubdomain = true;
       }
     }
 

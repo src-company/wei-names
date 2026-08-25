@@ -38,15 +38,20 @@ function harness({ hangSilent, chain }) {
   const els = new Map();
   for (const id of ['walletBtn', 'walletModal', 'walletOptions']) els.set(id, makeEl(id));
   const body = makeEl('body');
+  const head = makeEl('head');
+  const scripts = [];               // every <script> appended to <head>, in order
   const document = {
     body,
+    head,
     getElementById: id => els.get(id) || null,
-    createElement: () => {
+    createElement: (tag) => {
       const el = makeEl(null);
       // injectWalletDOM writes innerHTML containing #walletBtn; it's already in els.
+      el.tagName = String(tag || '').toUpperCase();
       return el;
     },
   };
+  head.appendChild = (c) => { if (c.tagName === 'SCRIPT') scripts.push(c); head.children.push(c); return c; };
 
   let store = {};
   const localStorage = {
@@ -103,7 +108,7 @@ function harness({ hangSilent, chain }) {
   const ctx = vm.createContext(win);
   const here = path.dirname(url.fileURLToPath(import.meta.url));
   vm.runInContext(fs.readFileSync(path.join(here, 'wallet.js'), 'utf8'), ctx, { filename: 'wallet.js' });
-  return { ctx, win, els, store, chain, setSaved: k => { store['zfi_wallet'] = k; } };
+  return { ctx, win, els, store, chain, scripts, setSaved: k => { store['zfi_wallet'] = k; } };
 }
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -214,6 +219,121 @@ async function reverseHarness(chain) {
   await sleep(250);
   eq('bare call reads exactly once', calls, 1);
   eq('bare call paints what it read', h.els.get('walletBtn').textContent, 'a.wei');
+}
+
+// ── WalletConnect is loaded on demand, not on every page load ─────────────────
+//
+// The 624 KB WC bundle used to be a plain <script> in index.html, so every visit
+// paid for it whether or not anyone touched WalletConnect. It is now fetched by
+// loadWalletConnect() at the moment it is needed. These lock that in: the option
+// must still be offered with no bundle present, the click must fetch it exactly
+// once, and a failed fetch must stay retryable rather than forgetting the user's
+// saved wallet.
+
+function wcHarness() {
+  const h = harness({ hangSilent: false });
+  h.win.walletInit({ appName: 't', onConnect: [], onDisconnect: [] });
+  return h;
+}
+
+// The bundle a successful fetch would install.
+function installWcBundle(win, { enable } = {}) {
+  win['@walletconnect/ethereum-provider'] = {
+    EthereumProvider: {
+      init: async () => ({
+        on() {}, removeListener() {},
+        enable: enable || (async () => [ADDR]),
+        request: ({ method }) => method === 'eth_chainId' ? Promise.resolve('0x1') : Promise.resolve(null),
+        session: { peer: { metadata: {} } },
+        disconnect: async () => {},
+      }),
+    },
+  };
+}
+
+{
+  // No bundle loaded, and no <script> fetched just to render the list.
+  const h = wcHarness();
+  h.win.showWalletModal();
+  await sleep(500);                                  // 150ms detect + one 250ms retry
+  const html = h.els.get('walletOptions').innerHTML;
+  eq('WalletConnect is offered without the bundle loaded', html.includes('WalletConnect'), true);
+  eq('rendering the modal fetches nothing', h.scripts.length, 0);
+}
+
+{
+  // Clicking it fetches the bundle, once, from the path index.html used to hardcode.
+  const h = wcHarness();
+  const connected = h.win.__WALLET_TEST_API__.connectWithWallet('walletconnect');
+  await sleep(20);
+  eq('picking WalletConnect fetches the bundle', h.scripts.length, 1);
+  eq('from the vendored path', h.scripts[0].src, 'vendor/walletconnect.min.js');
+  eq('and does not block the page', h.scripts[0].async, true);
+
+  installWcBundle(h.win);
+  h.scripts[0].onload();
+  await connected;
+  eq('the connect completes once the bundle lands', h.win._connectedAddress, ADDR);
+}
+
+{
+  // Already in memory => no second fetch.
+  const h = wcHarness();
+  installWcBundle(h.win);
+  await h.win.__WALLET_TEST_API__.connectWithWallet('walletconnect');
+  eq('an already-loaded bundle is not re-fetched', h.scripts.length, 0);
+  eq('and connects straight through', h.win._connectedAddress, ADDR);
+}
+
+{
+  // A silent restore of a saved WC session pulls the bundle in too — that is the
+  // one path where the eager <script> was actually earning its keep.
+  const h = harness({ hangSilent: false });
+  h.setSaved('walletconnect');
+  h.win.walletInit({ appName: 't', onConnect: [], onDisconnect: [] });
+  await sleep(120);                                  // 50ms auto-connect timer
+  eq('restoring a saved WC session fetches the bundle', h.scripts.length, 1);
+  installWcBundle(h.win);
+  h.scripts[0].onload();
+  await sleep(50);
+  eq('and reconnects', h.win._connectedAddress, ADDR);
+}
+
+{
+  // The load-failure invariant. connectWithWallet()'s silent path wipes the saved
+  // wallet on /not found|not available|unavailable/, so a flaky network dropping
+  // one script fetch must NOT report itself that way — else a single bad load
+  // logs the user out for good.
+  const h = harness({ hangSilent: false });
+  h.setSaved('walletconnect');
+  h.win.walletInit({ appName: 't', onConnect: [], onDisconnect: [] });
+  await sleep(120);
+  h.scripts[0].onerror();
+  await sleep(50);
+  eq('a failed fetch keeps the saved wallet', h.store['zfi_wallet'], 'walletconnect');
+  eq('and connects nothing', h.win._connectedAddress, null);
+
+  // ...and it is retryable: the next attempt fetches again rather than replaying
+  // the rejection it already cached.
+  const retry = h.win.__WALLET_TEST_API__.connectWithWallet('walletconnect');
+  await sleep(20);
+  eq('a failed fetch is retried, not cached', h.scripts.length, 2);
+  installWcBundle(h.win);
+  h.scripts[1].onload();
+  await retry;
+  eq('the retry connects', h.win._connectedAddress, ADDR);
+}
+
+{
+  // A bundle that loads but exports nothing IS permanent — that one keeps the old
+  // "not available" wording, and so still clears the dead saved wallet.
+  const h = harness({ hangSilent: false });
+  h.setSaved('walletconnect');
+  h.win.walletInit({ appName: 't', onConnect: [], onDisconnect: [] });
+  await sleep(120);
+  h.scripts[0].onload();                             // no global installed
+  await sleep(50);
+  eq('a bundle that exports nothing clears the saved wallet', h.store['zfi_wallet'], undefined);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

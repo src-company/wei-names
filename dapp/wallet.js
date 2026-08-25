@@ -77,6 +77,33 @@ const WALLET_CONFIG = {
   walletconnect: { name: 'WalletConnect', icon: '📱' }
 };
 
+// WalletConnect's UMD bundle is ~624 KB and is only ever needed by the people
+// who actually pick it (or who are restoring a saved WC session), so it is no
+// longer a <script> in index.html — it is fetched here, on demand. The modal
+// warms it on hover/press of the WalletConnect row, so by the time the click
+// lands it is usually already in memory.
+const WC_BUNDLE = 'vendor/walletconnect.min.js'; // document-relative, as the old tag was
+let _wcLoad = null;
+function loadWalletConnect() {
+  const loaded = () => globalThis['@walletconnect/ethereum-provider'];
+  if (loaded()) return Promise.resolve(loaded());
+  if (_wcLoad) return _wcLoad;
+  _wcLoad = new Promise((resolve, reject) => {
+    const el = document.createElement('script');
+    el.src = WC_BUNDLE;
+    el.async = true;
+    // A network failure must stay RETRYABLE: connectWithWallet()'s silent path
+    // wipes the saved wallet on /not found|not available|unavailable/, and a
+    // one-off failed fetch is no reason to forget the user's wallet. Only the
+    // bundle loading but exporting nothing is a permanent "not available".
+    el.onload = () => loaded() ? resolve(loaded()) : reject(new Error('WalletConnect not available'));
+    el.onerror = () => { _wcLoad = null; reject(new Error('WalletConnect script load failed')); };
+    document.head.appendChild(el);
+  });
+  return _wcLoad;
+}
+function warmWalletConnect() { try { loadWalletConnect().catch(() => {}); } catch (e) {} }
+
 function detectWallets() {
   const detected = [];
   const seenNames = new Set();
@@ -101,8 +128,10 @@ function detectWallets() {
     try { if (config.detect && config.detect() && !seenNames.has(config.name.toLowerCase())) { detected.push({ key, ...config }); seenNames.add(config.name.toLowerCase()); } } catch (e) {}
   }
   if (detected.length === 0 && window.ethereum) detected.push({ key: 'injected', name: 'Browser Wallet', icon: '🔗', getProvider: () => window.ethereum });
-  const wcModule = globalThis['@walletconnect/ethereum-provider'];
-  if (wcModule?.EthereumProvider) detected.push({ key: 'walletconnect', name: 'WalletConnect', icon: '📱' });
+  // Always offered: WalletConnect needs nothing installed to be usable, which is
+  // the whole point of it. (The old gate on the global was equivalent — the
+  // bundle was loaded eagerly on every page, so it was always truthy here.)
+  detected.push({ key: 'walletconnect', name: 'WalletConnect', icon: '📱' });
   return detected;
 }
 
@@ -145,7 +174,15 @@ function renderWalletModal(wallets) {
     container.innerHTML = `<div style="padding:12px;border:1px solid currentColor;margin-bottom:12px;"><div style="font-weight:600;margin-bottom:6px;">Connected</div>${showName ? `<div style="font-size:16px;margin-bottom:4px;">${_esc(displayName)}</div>` : ''}<div style="font-size:12px;word-break:break-all;opacity:0.6;">${_esc(_connectedAddress)}</div></div><div class="wallet-option disconnect" onclick="disconnectWallet()"><span class="wallet-option-name">Disconnect</span></div>`;
   } else {
     container.innerHTML = wallets.length > 0 ? wallets.map(w => `<div class="wallet-option" data-wallet-key="${_escA(w.key)}"><span class="wallet-option-icon">${w.icon}</span><span class="wallet-option-name">${_esc(w.name)}</span></div>`).join('') : '<div style="padding:12px;text-align:center;">No wallets detected.</div>';
-    container.querySelectorAll('[data-wallet-key]').forEach(el => { el.addEventListener('click', () => connectWithWallet(el.dataset.walletKey)); });
+    container.querySelectorAll('[data-wallet-key]').forEach(el => {
+      el.addEventListener('click', () => connectWithWallet(el.dataset.walletKey));
+      // Prefetch on intent rather than on modal-open, so picking MetaMask never
+      // pays for a bundle it will not use.
+      if (el.dataset.walletKey === 'walletconnect') {
+        el.addEventListener('pointerenter', warmWalletConnect, { once: true });
+        el.addEventListener('pointerdown', warmWalletConnect, { once: true });
+      }
+    });
   }
 }
 
@@ -189,7 +226,17 @@ async function connectWithWallet(walletKey, options = {}) {
     closeWalletModal();
     let walletProvider;
     if (walletKey === 'walletconnect') {
-      const wcModule = globalThis['@walletconnect/ethereum-provider'];
+      // The modal is already closed by here, so a cold fetch of the 624 KB bundle
+      // would otherwise be a few silent seconds of "did my click register?".
+      if (!silent && !globalThis['@walletconnect/ethereum-provider'] && typeof showStatus === 'function') {
+        showStatus('Loading WalletConnect…', '');
+      }
+      // Usually already resolved (warmed on hover/press in the modal). The silent
+      // restore gets a clock for the same reason every other silent step does:
+      // nothing on the auto-connect path may hang _isConnecting forever.
+      const wcModule = await (silent
+        ? _withTimeout(loadWalletConnect(), 15000, 'walletconnect script')
+        : loadWalletConnect());
       const WCProvider = wcModule?.EthereumProvider;
       if (!WCProvider?.init) throw new Error('WalletConnect not available');
       if (_walletConnectProvider) { try { await _walletConnectProvider.disconnect?.(); } catch (e) {} _walletConnectProvider = null; }
