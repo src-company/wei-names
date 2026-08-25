@@ -1578,8 +1578,14 @@ function getNormalizationError(label) {
   } catch (e) {
     // ENSIP-15 errors are descriptive
     const msg = e.message || 'Invalid characters';
+    // 200C/200D are the ones that actually matter: they render as nothing at all,
+    // so the name is visually identical to the one without them.
+    if (/\{200[CD]\}/i.test(msg)) return 'Contains invisible characters (zero-width joiners)';
     if (msg.includes('disallowed')) return 'Contains disallowed characters';
     if (msg.includes('invisible')) return 'Contains invisible characters';
+    // ENSIP-15's "illegal mixture: Latin + Cyrillic" — the classic lookalike, and
+    // the reason a Cyrillic-a "vitalik" is a different name from the Latin one.
+    if (msg.includes('mixture')) return 'Mixes characters from different scripts';
     if (msg.includes('confus')) return 'Contains confusable characters';
     if (msg.includes('empty')) return 'Label cannot be empty';
     if (msg.includes('underscore')) return 'Underscores not allowed';
@@ -1785,11 +1791,18 @@ async function doCheckName() {
     return;
   }
 
-  // Top-level name lookup
-  const name = normalizeLabel(raw);
+  // Top-level name lookup.
+  //
+  // Strip the .wei suffix first. isSubdomainInput() strips it before deciding the
+  // route, so "vitalik.wei" correctly lands here — but the raw input was then handed
+  // to normalizeLabel(), which rejects anything containing a dot. Typing or pasting
+  // a name the way it is written everywhere else in the app answered "Invalid name".
+  let rawLabel = raw.trim();
+  if (rawLabel.toLowerCase().endsWith('.wei')) rawLabel = rawLabel.slice(0, -4);
+  const name = normalizeLabel(rawLabel);
 
   if (!name) {
-    const reason = getNormalizationError(raw) || 'Invalid name';
+    const reason = getNormalizationError(rawLabel) || 'Invalid name';
     availEl.innerHTML = '<span class="taken">' + escapeHtml(reason) + '</span>';
     availEl.classList.add('show');
     feeEl.textContent = '';
@@ -1799,6 +1812,23 @@ async function doCheckName() {
     updateHash('');
     return;
   }
+
+  // normalizeLabel() deliberately falls back to the contract's much looser rules
+  // when ENSIP-15 rejects a name, so the dapp can still find and manage everything
+  // the chain allows. That fallback was silent, which is how an invisible-character
+  // or mixed-script lookalike passed through unremarked: "vital<ZWJ>ik" and a
+  // Cyrillic-a "vitalik" both render identically to the real name, hash to a
+  // different tokenId, and showed up as plainly "available".
+  //
+  // Don't block — these are legitimately registerable, and refusing to display them
+  // would stop a victim looking up the very name spoofing them. Just never let one
+  // pass unremarked, on the available side or the taken one.
+  const nonStandard = getNormalizationError(rawLabel);
+  const warnHtml = nonStandard
+    ? '<div style="padding:10px;background:var(--status-warning,#fff3cd);color:#7a4f00;margin-bottom:10px;font-size:12px;border-radius:4px;">⚠ Non-standard name — ENSIP-15 rejects it ('
+      + escapeHtml(nonStandard) + '). It can still be registered, but apps following ENSIP-15 won\'t resolve it, '
+      + 'and it is a different name from any it resembles.</div>'
+    : '';
 
   // Track this request version to ignore stale responses
   const thisVersion = ++checkVersion;
@@ -1839,7 +1869,7 @@ async function doCheckName() {
       // A registration we just watched confirm can't really be available — the read
       // node is simply behind. refreshAfterTx is still polling; don't paint it as final.
       if (_awaitingTx === name) return paintConfirming('name', name);
-      availEl.innerHTML = '<span class="available">' + escaped + '.wei is available</span>' +
+      availEl.innerHTML = warnHtml + '<span class="available">' + escaped + '.wei is available</span>' +
         '<div class="view-link"><a href="#" onclick="copyShareLink();return false;">Copy link →</a></div>';
       // Enable commit only if: available + no pending + wallet connected.
       // Re-read the pending live (not the value captured at function entry): a
@@ -1861,7 +1891,7 @@ async function doCheckName() {
       feeEl.textContent = 'Fee: ' + feeText;
     } else {
       const osLink = `https://opensea.io/assets/ethereum/${CONTRACT}/${tokenId}`;
-      availEl.innerHTML = '<span class="taken">' + escaped + '.wei is taken</span>' +
+      availEl.innerHTML = warnHtml + '<span class="taken">' + escaped + '.wei is taken</span>' +
         '<div class="view-link"><a href="' + osLink + '" target="_blank" rel="noopener">View on OpenSea →</a> · <a href="#" onclick="copyShareLink();return false;">Copy link →</a></div>';
       commitBtn.style.display = 'none';
       feeEl.textContent = '';
@@ -1909,7 +1939,6 @@ let _refreshToken = 0;
 // post-tx one. Fire-and-forget — it terminates on its own.
 async function refreshAfterTx(name, settled, receipt, { tries = 10, delayMs = 1500 } = {}) {
   const token = ++_refreshToken;
-  const minBlock = Number(receipt && receipt.blockNumber) || 0;
   const alive = () => token === _refreshToken && normalizeFullName($('nameInput').value) === name;
   if (!name || !alive()) return false;
 
@@ -1920,15 +1949,13 @@ async function refreshAfterTx(name, settled, receipt, { tries = 10, delayMs = 15
       if (i) await new Promise(r => setTimeout(r, delayMs));
       if (!alive()) return false;
 
-      // While the read provider is provably behind the block our tx landed in, a lookup
-      // can only repaint pre-tx state — wait instead. Never skip the last few attempts:
-      // a stuck/lying height must not be able to starve the refresh entirely.
-      if (minBlock && i < tries - 3) {
-        try {
-          const height = await (await getRpc()).getBlockNumber();
-          if (!alive()) return false;
-          if (height < minBlock) continue;
-        } catch (_) {}
+      // While the read provider hasn't seen our tx, a lookup can only repaint pre-tx
+      // state — wait instead. Never skip the last few attempts: a read side that
+      // never admits to the tx must not be able to starve the refresh entirely.
+      if (receipt && i < tries - 3) {
+        const seen = await readSideHasTx(receipt);
+        if (!alive()) return false;
+        if (!seen) continue;
       }
 
       let verdict = null;
@@ -1947,18 +1974,36 @@ async function refreshAfterTx(name, settled, receipt, { tries = 10, delayMs = 15
   }
 }
 
-// The same read-after-write wait as refreshAfterTx, for the one-shot refreshes that
-// have no verdict to poll on. A receipt only proves the tx landed on whichever node
-// answered it — for a wallet tx that's the WALLET's own node, while every read here
-// goes out over the public endpoints. Refreshing the instant a receipt arrives
-// therefore repaints pre-tx state, and with nothing re-polling behind it, that stale
-// paint is simply what the user is left looking at. Fire-and-forget.
-async function afterReceipt(receipt, fn, { tries = 8, delayMs = 1000 } = {}) {
+// Has the READ side actually caught up with a tx we hold a receipt for?
+//
+// A receipt only proves the tx landed on whichever node answered it — for a wallet
+// tx that is the wallet's own node, not the public endpoints every read here uses.
+// Block height alone is a weak proxy for that: eth_blockNumber and eth_call are
+// separate methods, and a load-balanced endpoint is free to serve them from
+// different backends, so a caught-up height says little about the backend that will
+// answer the next call. Asking the read path for THIS tx's receipt is the same
+// evidence waitForTx's poller uses, and it is about the tx rather than the chain
+// tip. An unseen tx comes back null (not an error), which is exactly "not yet".
+async function readSideHasTx(receipt) {
+  const hash = receipt && receipt.hash;
+  if (hash) {
+    // Deliberately not withRpc(): its last-resort leg is the WALLET's provider,
+    // which by definition already has the tx and would answer yes every time.
+    try { return !!(await (await getRpc()).getTransactionReceipt(hash)); } catch (_) {}
+  }
   const minBlock = Number(receipt && receipt.blockNumber) || 0;
-  for (let i = 0; minBlock && i < tries; i++) {
-    try {
-      if (await (await getRpc()).getBlockNumber() >= minBlock) break;
-    } catch (_) { break; } // unreadable height: don't starve the refresh
+  if (!minBlock) return true;
+  try { return (await (await getRpc()).getBlockNumber()) >= minBlock; }
+  catch (_) { return true; } // unreadable: don't starve the refresh
+}
+
+// The same read-after-write wait as refreshAfterTx, for the one-shot refreshes that
+// have no verdict to poll on. Refreshing the instant a receipt arrives repaints
+// pre-tx state, and with nothing re-polling behind it, that stale paint is simply
+// what the user is left looking at. Fire-and-forget.
+async function afterReceipt(receipt, fn, { tries = 8, delayMs = 1000 } = {}) {
+  for (let i = 0; i < tries; i++) {
+    if (await readSideHasTx(receipt)) break;
     await new Promise(r => setTimeout(r, delayMs));
   }
   try { return await fn(); } catch (_) {}
@@ -3207,7 +3252,10 @@ function base36Encode(bytes) {
 }
 
 function base36Decode(str) {
-  const bytes = [0];
+  // Seeded empty, like base58Decode above. Seeding [0] made an all-zero string
+  // decode one byte too long ("0" -> 0x0000 instead of 0x00), because the seed
+  // survives as a high byte that the leading-zero loop below then adds to.
+  const bytes = [];
   for (const ch of str.toLowerCase()) {
     const value = BASE36_ALPHABET.indexOf(ch);
     if (value === -1) throw new Error('Invalid base36 character');

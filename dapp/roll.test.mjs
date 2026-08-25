@@ -47,7 +47,7 @@ const LIFTED = [
   'normalizeLabelContract', 'normalizeLabel', 'normalizeFullName', 'computeIdFull',
   'rollTokenFor', 'rollDrawQuote', 'rollDrawValue', 'rollPanelOpen',
   'rollNameChanged', 'rollPreviewWeight', 'rollEnter', 'rollOnConnect', 'rollOnDisconnect',
-  'renderRoll', 'fmtCountdown', 'fmtEth', 'escapeHtml', 'afterReceipt',
+  'renderRoll', 'fmtCountdown', 'fmtEth', 'escapeHtml', 'afterReceipt', 'readSideHasTx',
 ];
 
 function makeEl(id) {
@@ -235,6 +235,40 @@ function eq(name, got, want) {
   height = 105;
   await pending;
   eq('caught up: refresh fires', ran, 1);
+}
+
+// ── readSideHasTx: prefer evidence about THIS tx over the chain tip ───────────
+// eth_blockNumber and eth_call are separate methods a load-balanced endpoint may
+// serve from different backends, so a caught-up height says little about the
+// backend that answers the next call. Asking the read path for the receipt is
+// evidence about the tx itself.
+{
+  const { run, ctx } = sandbox();
+  let seen = false;
+  ctx.__provider = {
+    // Height says "caught up" while the read side has NOT indexed the tx.
+    getBlockNumber: async () => 999,
+    getTransactionReceipt: async () => (seen ? { blockNumber: 100 } : null),
+  };
+  eq('receipt not visible yet -> not caught up, despite a caught-up height',
+     await run(`readSideHasTx({ hash: '0xabc', blockNumber: 100 })`), false);
+  seen = true;
+  eq('receipt visible -> caught up', await run(`readSideHasTx({ hash: '0xabc', blockNumber: 100 })`), true);
+
+  // No hash to go on: fall back to the height comparison.
+  eq('no hash, height behind -> not caught up',
+     await run(`readSideHasTx({ blockNumber: 1000000 })`), false);
+  eq('no hash, height ahead -> caught up',
+     await run(`readSideHasTx({ blockNumber: 5 })`), true);
+
+  // An unreadable read side must never starve the refresh.
+  ctx.__provider = {
+    getBlockNumber: async () => { throw new Error('rpc down'); },
+    getTransactionReceipt: async () => { throw new Error('rpc down'); },
+  };
+  eq('unreadable read side -> proceed rather than hang',
+     await run(`readSideHasTx({ hash: '0xabc', blockNumber: 100 })`), true);
+  eq('no receipt at all -> proceed', await run(`readSideHasTx(null)`), true);
 }
 
 // ── a dismissed modal must not arm a surprise transaction ────────────────────
