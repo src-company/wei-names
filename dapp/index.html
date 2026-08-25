@@ -1040,7 +1040,17 @@ const LOTTERY_ABI = [
   'function ticketsIn(uint256 r, uint256 offset, uint256 limit) view returns ((uint256 tokenId, uint128 cum, uint128 boostPid)[])',
   'function enter(uint256 tokenId, uint256 boostPid)',
   'function draw() payable',
-  'function claim(uint256 r)'
+  'function claim(uint256 r)',
+  'function BOOST_BPS() view returns (uint256)'
+];
+
+// WeiDAO — read-only, only to auto-detect a name's boost: a name that currently backs a live
+// proposal enters the lottery at BOOST_BPS extra weight, so the panel checks for that on entry.
+const WEIDAO = '0x00000007988A79d16cf76B5dc4cF54dc3Af24936';
+const WEIDAO_ABI = [
+  'function proposalCount() view returns (uint256)',
+  'function supportOf(uint256 id, uint256 tokenId) view returns (uint256)',
+  'function proposals(uint256) view returns (uint64 lastUpdate, uint64 created, bool executed, bool vetoed, address target, uint256 conviction, uint256 supportWeight, uint256 value, bytes data)'
 ];
 
 const MIN_COMMIT_AGE = 60;
@@ -4586,6 +4596,7 @@ const CHAINLINK_ETHUSD = '0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419'; // ETH/US
 const STETH_MARK = "<svg class='roll-steth' viewBox='0 0 32 32' aria-hidden='true' focusable='false'><g fill='none'><circle fill='#00A3FF' cx='16' cy='16' r='16'/><path d='M9.437 14.864l-.181.275c-2.048 3.097-1.603 7.253 1.034 9.824 1.561 1.521 3.622 2.353 5.683 2.353 0 0 0 0-6.536-12.452z' fill='#FFF'/><path opacity='.6' d='M15.997 18.611l-6.56-3.747c6.56 12.452 6.56 12.452 6.56 12.452 0-2.683 0-5.623 0-8.705z' fill='#FFF'/><path opacity='.6' d='M22.563 14.864l.181.275c2.048 3.097 1.603 7.253-1.034 9.824-1.561 1.521-3.622 2.353-5.683 2.353 0 0 0 0 6.536-12.452z' fill='#FFF'/><path opacity='.2' d='M16.003 18.611l6.56-3.747c-6.56 12.452-6.56 12.452-6.56 12.452 0-2.683 0-5.623 0-8.705z' fill='#FFF'/><path opacity='.2' d='M16.004 10.239v6.459l5.654-3.23-5.654-3.229z' fill='#FFF'/><path opacity='.6' d='M16.005 10.239l-5.655 3.229 5.655 3.23v-6.46z' fill='#FFF'/><path d='M16.005 4.805l-5.655 8.668 5.655-3.233V4.805z' fill='#FFF'/><path opacity='.6' d='M16.004 10.238l5.658 3.23-5.658-8.674v5.444z' fill='#FFF'/></g></svg>";
 let _rollRound = null;           // current round, cached for the entry preview's already-entered check
 let _rollEthUsd = { v: null, at: 0 }; // ~60s-cached ETH price for the pot's USD readout
+let _rollBoostBps = null;             // WeiRoll.BOOST_BPS(), fetched once (a deployed constant)
 let _rollTimer = null;
 const rollIface = new ethers.Interface(LOTTERY_ABI);
 
@@ -4929,7 +4940,7 @@ function renderRoll(body, d, me) {
        + escapeHtml(_rollNameDraft) + '" oninput="rollNameChanged()"><span class="suffix">.wei</span></div>'
        + '<div id="rollWeightPreview" style="font-size:12px;opacity:0.6;margin:-4px 0 12px;min-height:16px;"></div>'
        + '<button onclick="rollEnter()">' + (me ? 'Enter round ' + d.round + ' \u2192' : 'Connect & enter \u2192') + '</button>'
-       + '<div class="roll-note">Odds are proportional to what your name costs to hold for its remaining term. One ticket per name. You keep the name; winning pays whoever holds it at claim time.</div>';
+       + '<div class="roll-note">Odds are proportional to what your name costs to hold for its remaining term. One ticket per name. You keep the name; winning pays whoever holds it at claim time. Back a live <a href="https://etherscan.io/address/' + WEIDAO + '" target="_blank" rel="noopener" class="roll-name-link">WeiDAO</a> proposal with the same name and its entry is boosted automatically.</div>';
   } else if (phase === 2) {
     if (st.drawSettles) {
       // st.drawPrice comes from state(), i.e. an eth_call at tx.gasprice 0, where the
@@ -5046,6 +5057,41 @@ function rollNameChanged() {
   rollPreviewWeight();
 }
 
+// WeiRoll.BOOST_BPS() — the extra weight a boosted entry gets, in basis points. A deployed
+// constant, so fetch it once and cache; falls back to the on-chain value (10000 = +100%).
+async function rollBoostBps() {
+  if (_rollBoostBps != null) return _rollBoostBps;
+  try { _rollBoostBps = await withRpc((p) => rollRead(p).BOOST_BPS()); }
+  catch (_) { _rollBoostBps = 10000n; }
+  return _rollBoostBps;
+}
+
+// Auto-detect the boost: find a *live* WeiDAO proposal this name currently backs, so entry can
+// claim the bonus without the user hunting for a proposal id. Returns the proposal id (Number) or
+// 0. Proposals are few and sequential, so a plain scan of the index is fine; newest first, since a
+// name is likeliest to be backing a recent one. Any read failure yields 0 (a plain, unboosted entry).
+async function rollDetectBoost(tokenId) {
+  try {
+    return await withRpc(async (p) => {
+      const dao = new ethers.Contract(WEIDAO, WEIDAO_ABI, p);
+      const count = Number(await dao.proposalCount());
+      if (!count) return 0;
+      const pids = [];
+      for (let i = count; i >= 1; i--) pids.push(i);
+      const found = await Promise.all(pids.map(async (pid) => {
+        const [sup, pr] = await Promise.all([
+          dao.supportOf(pid, tokenId).catch(() => 0n),
+          dao.proposals(pid).catch(() => null)
+        ]);
+        // Backed (support > 0) and still live (not executed, not vetoed).
+        return sup && sup > 0n && pr && !pr.executed && !pr.vetoed ? pid : 0;
+      }));
+      for (const pid of found) if (pid) return pid;
+      return 0;
+    });
+  } catch (_) { return 0; }
+}
+
 let rollPreviewDebounce = null;
 let rollPreviewVersion = 0;
 
@@ -5073,11 +5119,23 @@ function rollPreviewWeight() {
           _rollRound != null ? c.ticketOf(_rollRound, target.id).catch(() => 0n) : Promise.resolve(0n)
         ]);
       });
-      text = entered && entered > 0n
-        ? 'Already entered this round ✓'
-        : (w > 0n
-            ? 'This name’s weight: ' + fmtEth(w, 5) + ' (its share of the odds)'
-            : 'Not an active top-level name — subdomains and expired names can’t enter.');
+      if (entered && entered > 0n) {
+        text = 'Already entered this round ✓';
+      } else if (w > 0n) {
+        // If this name currently backs a live proposal, entry claims the boost — show it.
+        const pid = await rollDetectBoost(target.id);
+        if (pid) {
+          const bps = await rollBoostBps();
+          const eff = w + w * bps / 10000n;
+          const mult = 1 + Number(bps) / 10000;
+          const label = Number.isInteger(mult) ? mult + '×' : '+' + (Number(bps) / 100) + '%';
+          text = 'Weight ' + fmtEth(eff, 5) + ' — ' + label + ' boost, backing proposal #' + pid + ' ✓';
+        } else {
+          text = 'This name’s weight: ' + fmtEth(w, 5) + ' (its share of the odds)';
+        }
+      } else {
+        text = 'Not an active top-level name — subdomains and expired names can’t enter.';
+      }
     } catch (_) { text = ''; }
     if (thisVersion !== rollPreviewVersion) return; // superseded by a newer keystroke
     const el = document.getElementById('rollWeightPreview');
@@ -5105,8 +5163,11 @@ async function rollEnter() {
   isProcessing = true;
   try {
     const c = new ethers.Contract(LOTTERY, LOTTERY_ABI, window._signer);
-    const tx = await wcTransaction(c.enter(target.id, 0), 'Confirm lottery entry');
-    showStatus('Entering ' + target.name + '.wei…', '', tx.hash);
+    // Detect the boost fresh for the name actually being entered — a live proposal this name
+    // backs doubles its weight. 0 (no backing / any read failure) is a plain entry.
+    const boostPid = await rollDetectBoost(target.id);
+    const tx = await wcTransaction(c.enter(target.id, boostPid), 'Confirm lottery entry');
+    showStatus('Entering ' + target.name + '.wei' + (boostPid ? ' (boosted)' : '') + '…', '', tx.hash);
     const receipt = await waitForTx(tx);
     showStatus('Entered ' + target.name + '.wei into the round', 'success', tx.hash);
     _rollNameDraft = '';

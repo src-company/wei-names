@@ -47,6 +47,7 @@ const LIFTED = [
   'normalizeLabelContract', 'normalizeLabel', 'normalizeFullName', 'computeIdFull',
   'rollTokenFor', 'rollDrawQuote', 'rollDrawValue', 'rollPanelOpen',
   'rollNameChanged', 'rollPreviewWeight', 'rollEnter', 'rollOnConnect', 'rollOnDisconnect',
+  'rollDetectBoost', 'rollBoostBps',
   'renderRoll', 'fmtCountdown', 'fmtEth', 'escapeHtml', 'afterReceipt', 'readSideHasTx',
   'fmtUsd', 'fmtAgo', 'rollNameLink', 'fmtPot', 'rollPct', 'rollDonate', 'rollDonateChanged',
 ];
@@ -92,6 +93,8 @@ function sandbox({ signer = null, address = null, panelOpen = true } = {}) {
     // globals the lifted code reads
     LOTTERY: '0x0000C82AA4D72871568eF3859D2b0E7CF37e45f2',
     LOTTERY_ABI: ['function drawPrice() view returns (uint256)', 'function enter(uint256,uint256)'],
+    WEIDAO: '0x00000007988A79d16cf76B5dc4cF54dc3Af24936',
+    WEIDAO_ABI: ['function proposalCount() view returns (uint256)'],
     CONTRACT: '0x0000000000696760E15f265e828DB644A0c242EB',
     ROLL_PHASE: ['Idle', 'Open', 'Ready', 'Drawing'],
     STETH_MARK: '<svg class="roll-steth"></svg>',
@@ -119,6 +122,7 @@ function sandbox({ signer = null, address = null, panelOpen = true } = {}) {
   const prelude = `
     let _rollNameDraft = '';
     let _rollDonateDraft = '';
+    let _rollBoostBps = null;
     let _rollPendingEnter = null;
     const ROLL_ENTER_RESUME_MS = 120000;
     const ROLL_DRAW_GAS = 600000n;
@@ -234,6 +238,30 @@ function eq(name, got, want) {
   ok('combined odds counts all 5 names, not the 1 visible', /in with 5 names/.test(html), html);
   ok('combined odds uses the field-wide weight (25%)', /~25% combined/.test(html));
   ok('rows sit in a scrollable container', html.includes('roll-field-rows'));
+}
+
+// ── rollDetectBoost: auto-find a live proposal the entered name backs ─────────
+{
+  const { run, ctx } = sandbox({});
+  ctx.__provider = {};
+  const backed = new Set(['2']); // proposal ids the name currently supports
+  const state = {
+    1: { executed: true, vetoed: false },   // backed-but-executed: no boost
+    2: { executed: false, vetoed: false },  // live + backed: the boost
+    3: { executed: false, vetoed: false },  // live but not backed
+  };
+  ctx.ethers.Contract = class {
+    constructor(addr) { this.addr = addr; }
+    async proposalCount() { return 3n; }
+    async supportOf(pid) { return backed.has(String(pid)) ? 1000n : 0n; }
+    async proposals(pid) { return state[Number(pid)]; }
+  };
+
+  eq('rollDetectBoost: finds the live backed proposal', await run(`rollDetectBoost(123n)`), 2);
+  backed.clear();
+  eq('rollDetectBoost: 0 when the name backs nothing', await run(`rollDetectBoost(123n)`), 0);
+  backed.add('1'); // backs only an executed proposal
+  eq('rollDetectBoost: skips executed/vetoed proposals', await run(`rollDetectBoost(123n)`), 0);
 }
 
 // ── "Connect & enter" actually enters ────────────────────────────────────────
