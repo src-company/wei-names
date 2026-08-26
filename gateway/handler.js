@@ -596,6 +596,14 @@ export async function handleRequest(request, env) {
       'x-content-type-options': 'nosniff',
       'x-wns-name': sub,
       'x-wns-contract': resolved.address,
+      // Which interface answered. `x-wns-contract` alone cannot say: it is set
+      // for both ERC-4804 `request()` and ERC-8244 `html()`, and the two cache
+      // and behave differently — 5219 is handed the path and query and may vary
+      // per URL, html() is one document at every URL. Telling them apart from
+      // outside otherwise means reading resolveMode() off the chain, which is
+      // exactly the step everyone skips before concluding what this gateway is
+      // doing.
+      'x-wns-mode': resolved.mode,
     })
     if (request.method === 'HEAD') {
       headers.set('content-length', String(page.body.length))
@@ -719,6 +727,7 @@ export async function handleRequest(request, env) {
     // Defense-in-depth for untrusted content executing on this origin.
     headers.set('x-content-type-options', 'nosniff')
     headers.set('x-wns-name', sub)
+    headers.set('x-wns-mode', resolved.kind)
     headers.set(idHeader[0], idHeader[1])
     // `Response` throws rather than truncating when a null-body status carries
     // one — same guard the contract path already has.
@@ -764,6 +773,7 @@ export async function handleRequest(request, env) {
       location: target,
       'cache-control': 'public, max-age=300',
       'x-wns-name': sub,
+      'x-wns-mode': resolved.kind,
       [idHeader[0]]: idHeader[1],
     },
   })

@@ -692,5 +692,39 @@ eq(
 eq('proxy herd: twelve readers cost one upstream fetch', upstreamFetches, 1)
 proxyResponse = null
 
+// --- 31. the served path is stated in the response ---------------------------
+//
+// x-wns-contract is set for BOTH 5219 and 8244, so it cannot say which one
+// answered — and the two cache differently. Every review of this gateway so far
+// has guessed wrong from the outside; the header removes the guess.
+
+routes = nameRoutes(60, addr(0xc0de60), {
+  [`${addr(0xc0de60)}:${RESOLVE_MODE}`]: mode('5219'),
+  [`${addr(0xc0de60)}:${REQUEST}`]: RET_IMMUTABLE,
+})
+res = await get('m5219.wei.limo/')
+eq('mode header: 5219 says so', res.headers.get('x-wns-mode'), '5219')
+
+routes = nameRoutes(61, addr(0xc0de61), {
+  [`${addr(0xc0de61)}:${RESOLVE_MODE}`]: '0x',
+  [`${addr(0xc0de61)}:${HTML}`]: RET_HTML,
+})
+res = await get('mhtml.wei.limo/')
+eq('mode header: 8244 says so', res.headers.get('x-wns-mode'), 'html')
+eq('mode header: and both still name the contract', res.headers.get('x-wns-contract') !== null, true)
+
+routes = ipfsName(62)
+res = await get('mipfs.wei.limo/')
+eq('mode header: a redirect names its kind', res.headers.get('x-wns-mode'), 'ipfs')
+
+proxyResponse = async () => new Response('p', { status: 200, headers: { 'content-type': 'text/html' } })
+routes = ipfsName(63)
+res = await proxyGet('mproxy.wei.limo/')
+eq('mode header: proxy names its kind too', res.headers.get('x-wns-mode'), 'ipfs')
+routes = ipnsName(64)
+res = await proxyGet('mipns.wei.limo/')
+eq('mode header: ipns is distinguishable from ipfs', res.headers.get('x-wns-mode'), 'ipns')
+proxyResponse = null
+
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail ? 1 : 0)

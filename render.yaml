@@ -125,6 +125,16 @@ services:
         value: w3link.io
       - key: WEB3_CHAIN_ID
         value: "1"
+      # Per-client rate limit. The defaults live in handler.js and these two
+      # only exist so they can be tuned from the dashboard under load without a
+      # redeploy; RATE_LIMIT_RPS=0 disables the limiter entirely. Keyed on
+      # cf-connecting-ip (Cloudflare overwrites it, so it cannot be spoofed);
+      # x-forwarded-for is appended to whatever the client sent and is only a
+      # fallback for running without Cloudflare in front.
+      - key: RATE_LIMIT_RPS
+        value: "15"
+      - key: RATE_LIMIT_BURST
+        value: "100"
       # Per-endpoint timeout for contract page reads (request()/html()), which
       # return whole documents. Registry lookups keep the shorter 5s budget.
       - key: PAGE_TIMEOUT_MS

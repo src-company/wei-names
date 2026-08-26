@@ -145,12 +145,23 @@ The gateway also keeps a `RESERVED_LABELS` guard as defense-in-depth.
 | `WEB3_GATEWAY` | `w3link.io` | web3:// HTTP gateway for on-chain (ERC-4804) dapps → `https://<addr>.<chainId>.<gw>` |
 | `WEB3_CHAIN_ID` | `1` | Chain id used in the web3:// gateway host (mainnet) |
 | `RPC_URLS` | built-in list | Comma-separated mainnet RPCs. **Set a dedicated authenticated endpoint in production** — see [Load behaviour](#load-behaviour) |
-| `SUBDOMAIN_PARENTS` | `slow,id,multisig` | Parents allowed to serve `<x>.<parent>.<zone>`. Must match the second-level wildcards in `render.yaml`; anything else 404s with no RPC |
 | `PAGE_TIMEOUT_MS` | `15000` | Per-endpoint timeout for contract page reads (`request()` / `html()`), which return whole documents — longer than a registry lookup's `5000` |
 | `WNS_CONTRACT` | mainnet WNS | Override the registry address |
-| `RESERVED_LABELS` | — | Extra labels to never treat as `.wei` names (added to the built-in set) |
-| `ZONE` | `wei.limo` | The apex zone this gateway serves |
+| `RESERVED_LABELS` | — | Extra labels to never treat as `.wei` names (added to the built-in set, which is empty) |
+| `RATE_LIMIT_RPS` | `15` | Sustained requests per second per client, token-bucket. `0` disables the limiter |
+| `RATE_LIMIT_BURST` | `100` | Requests a client may make back-to-back before the sustained rate applies. Generous because one page load pulls many assets |
+| `ZONE` | `wei.limo,wei.is,wei.domains` | Comma-separated zones this gateway serves. Must include every zone whose `*.<zone>` wildcard points here |
 | `PORT` | `8080` | Node server only |
+
+There is deliberately **no `SUBDOMAIN_PARENTS`**. It was an allowlist of parents
+permitted to serve `<x>.<parent>.<zone>`, and it was wrong twice over: it was a
+hand-maintained copy of DNS state living in code, so it went stale the moment a
+subdomain was registered, and it shipped as a `render.yaml` env var, so deleting
+it from the blueprint did not unset it on the running service. The stale value
+kept enforcing an allowlist the code no longer declared, and took `02.zswap.wei`
+and `token.list.wei` offline. The chain decides what exists, DNS and TLS decide
+what is reachable, and `handler.js` refuses only the depths neither could ever
+produce. Don't reintroduce it.
 
 ## Load behaviour
 
@@ -187,6 +198,51 @@ The RPC layer also rotates across endpoints rather than always starting at the
 first, benches one that times out or rate-limits for 30s instead of paying its
 timeout on every request, caps concurrent outbound calls, and sheds load with
 `503` + `Retry-After` rather than queueing without bound.
+
+**One client cannot spend everyone's budget.** The caches above make a
+*repeated* URL cheap, and the semaphores keep the process upright, but neither
+bounds how fast one source may ask for URLs nobody has asked for before. A 5219
+contract is handed the path and query, so every fresh `?x=N` is a legitimately
+distinct response and a whole-document read: cheap to send, expensive to answer.
+Without a limit the queue fills and the `503`s land on every reader rather than
+the noisy one. A token bucket (`RATE_LIMIT_RPS` / `RATE_LIMIT_BURST`) refuses
+the source *before* any RPC or upstream fetch, so a refused request costs
+nothing. `/healthz` is exempt.
+
+It keys on `cf-connecting-ip`, and it matters which: Cloudflare **overwrites**
+that header, so a client cannot choose its own value, while `x-forwarded-for` is
+**appended** to whatever arrived — keying on its leftmost entry would hand out a
+fresh budget per request and limit nobody. `x-forwarded-for` is only the
+fallback for running without Cloudflare in front. Note this bounds a single
+source; a distributed flood spreads across addresses and per-IP limiting cannot
+see it.
+
+**Proxy-mode bodies are held, and one name cannot evict another.** In `proxy`
+mode the gateway fetches the whole document from the IPFS gateway on every hit;
+the resolution cache spares the RPC and nothing else. Bodies are now held for
+`ipfs` targets only — a CID is content-addressed, so `cid+path` bytes cannot
+change — while `ipns` stays uncached, because it is resolved fresh each request
+so an owner can update a site with no on-chain transaction. Anything over 2 MB
+streams straight through rather than being buffered. The outbound fetch has its
+own semaphore (10 concurrent) and joins an in-flight fetch for the same key, and
+the page cache caps any one contract's share at an eighth of the budget, so a
+single name answering on many URLs evicts its own oldest entries instead of
+every other name's.
+
+**Query parameters that change nothing cannot mint cache entries.** An IPFS
+gateway answers `?format=raw`, `?download=` and the CAR/DAG selectors
+differently and ignores the rest, so only those reach it or enter the key, and
+they are sorted — `?a=1&b=2` and `?b=2&a=1` are one entry, and `?x=1`, `?x=2`, …
+are not a cache buster. This applies to the IPFS path; a 5219 contract path
+keeps the full query, because there the contract is entitled to vary on it.
+
+**Every response says which path served it.** `x-wns-mode` is `5219`, `html`,
+`ipfs`, `ipns` or `web3`. `x-wns-contract` alone cannot tell you: it is set for
+both ERC-4804 `request()` and ERC-8244 `html()`, which cache and behave
+differently. Two independent reviews of this gateway concluded it was streaming
+IPFS for a name that is a contract page and never touches IPFS, and recommended
+an env var that path ignores. Check the header before concluding what this
+gateway is doing.
 
 **In production, set `RPC_URLS` to a dedicated authenticated endpoint.** The
 built-in public list is a fallback for local use; it will rate-limit under real
