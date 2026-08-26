@@ -57,6 +57,67 @@ const pageCache = new TtlCache({ maxEntries: 500, maxBytes: PAGE_CACHE_MAX_BYTES
 const resolveInflight = new Map()
 const pageInflight = new Map()
 
+// Proxy-mode bodies. In `redirect` mode the gateway is never in the data path,
+// but in `proxy` mode it fetches the whole document from the IPFS gateway on
+// every request — the CID cache above spares the RPC and nothing else, so a hot
+// name is a full upstream fetch per hit and Render edge-caches none of it.
+//
+// Only `ipfs` is held, never `ipns`: a CID is content-addressed, so cid+path ->
+// bytes cannot change and holding it is free correctness. An IPNS name is
+// mutable and is deliberately resolved fresh each request so the owner can
+// update the site with no on-chain transaction; caching it would break that.
+//
+// Bodies over PROXY_MAX_BODY_BYTES are streamed straight through and never
+// held, so one large file can't be buffered into an OOM on a starter instance.
+const PROXY_CACHE_MAX_BYTES = 16 * 1024 * 1024
+const PROXY_MAX_BODY_BYTES = 2 * 1024 * 1024
+const PROXY_TTL_MS = 300_000
+const proxyCache = new TtlCache({ maxEntries: 500, maxBytes: PROXY_CACHE_MAX_BYTES })
+const proxyInflight = new Map()
+
+// Read a body while refusing to buffer more than `cap` bytes.
+//
+// Returns `{ body }` with the complete bytes when it fits — the only case that
+// may be cached — and `{ stream }` when it doesn't: a stream that re-emits what
+// was already pulled and then pipes the rest, so overrunning the cap costs a
+// passthrough rather than a second upstream fetch or a truncated response.
+async function readCapped(res, cap) {
+  if (!res.body) return { body: new Uint8Array(0) }
+  const reader = res.body.getReader()
+  const chunks = []
+  let total = 0
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    chunks.push(value)
+    total += value.length
+    if (total > cap) {
+      return {
+        stream: new ReadableStream({
+          start(c) {
+            for (const ch of chunks) c.enqueue(ch)
+          },
+          async pull(c) {
+            const next = await reader.read()
+            if (next.done) c.close()
+            else c.enqueue(next.value)
+          },
+          cancel(reason) {
+            reader.cancel(reason)
+          },
+        }),
+      }
+    }
+  }
+  const body = new Uint8Array(total)
+  let at = 0
+  for (const ch of chunks) {
+    body.set(ch, at)
+    at += ch.length
+  }
+  return { body }
+}
+
 // How deep a subdomain may go before the gateway stops believing it.
 //
 // Exactly one rule, and it is about arithmetic rather than about any list of
@@ -405,6 +466,17 @@ export async function handleRequest(request, env) {
   if (mode === 'proxy') {
     // Stream the content through the gateway, keeping <label>.wei.limo in the bar.
     // Heavier: the gateway carries the bandwidth. Prefer `redirect` at scale.
+    //
+    // A held body is only correct where the id is content-addressed, so this is
+    // `ipfs` and GET only — see the proxyCache note above for why `ipns` is
+    // excluded. HEAD shares the key with nothing: it has no body to store.
+    const proxyKey =
+      resolved.kind === 'ipfs' && request.method === 'GET' ? `${resolved.id}|${pathAndQuery}` : null
+    if (proxyKey) {
+      const hit = proxyCache.get(proxyKey, now)
+      if (hit) return new Response(hit.body, { status: 200, headers: new Headers(hit.headers) })
+    }
+
     let upstream
     try {
       upstream = await fetch(target, {
@@ -446,6 +518,20 @@ export async function handleRequest(request, env) {
     // one — same guard the contract path already has.
     if (request.method === 'HEAD' || NULL_BODY_STATUS.has(upstream.status)) {
       return new Response(null, { status: upstream.status, headers })
+    }
+
+    // Nothing but a cacheable key on a healthy 200 may be held, and even then
+    // only if it fits: readCapped hands back a passthrough stream instead of
+    // bytes for anything larger, which is served and forgotten.
+    if (proxyKey && upstream.status === 200) {
+      const read = await readCapped(upstream, PROXY_MAX_BODY_BYTES)
+      if (read.stream) return new Response(read.stream, { status: 200, headers })
+      proxyCache.set(
+        proxyKey,
+        { body: read.body, headers: [...headers] },
+        { expires: Date.now() + PROXY_TTL_MS, size: read.body.length + 512 },
+      )
+      return new Response(read.body, { status: 200, headers })
     }
     return new Response(upstream.body, { status: upstream.status, headers })
   }

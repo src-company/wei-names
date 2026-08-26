@@ -366,6 +366,20 @@ const IPFS_CH =
   '0000000000000000000000000000000000000000000000000000000000000026' +
   'e3010170122029f2d17be6139079dc48696d1f582a8530eb9805b561eda517e22a892c7e3f1f' +
   '0000000000000000000000000000000000000000000000000000'
+// An IPNS contenthash (0xe501 + CIDv1 libp2p-key). IPNS is mutable, so the
+// gateway must resolve it fresh rather than holding the body.
+const IPNS_CH =
+  '0x0000000000000000000000000000000000000000000000000000000000000020' +
+  '000000000000000000000000000000000000000000000000000000000000002a' +
+  'e5010172002408011220e4680b2f8c8d21090e6aa327f1bb342ab8e7d9238f1e35831a54d6a8f5c91124' +
+  '00000000000000000000000000000000000000000000'
+function ipnsName(tokenId) {
+  return {
+    [`${WNS}:${COMPUTE_ID}`]: uint(tokenId),
+    [`${WNS}:${RESOLVE}`]: addressWord('0x' + '00'.repeat(20)),
+    [`${WNS}:${CONTENTHASH}`]: IPNS_CH,
+  }
+}
 function ipfsName(tokenId) {
   return {
     [`${WNS}:${COMPUTE_ID}`]: uint(tokenId),
@@ -392,29 +406,33 @@ eq('proxy: does not forward content-length', res.headers.get('content-length'), 
 eq('proxy: keeps the safe subset', res.headers.get('etag'), '"abc"')
 eq('proxy: body is intact', (await res.text()).length, 5000)
 
+// NB: ipfsName() reuses one contenthash, so every proxy name shares a CID. The
+// body cache is keyed by (cid|path) — correctly, since identical CID and path
+// are identical bytes — so each scenario below uses its own path to stay
+// independent of the others.
 // An upstream failure must not be cacheable.
 routes = ipfsName(21)
 proxyResponse = async () => new Response('bad gateway', { status: 502 })
-res = await proxyGet('p21.wei.limo/')
+res = await proxyGet('p21.wei.limo/e502')
 eq('proxy: upstream 5xx is not cached', res.headers.get('cache-control'), 'no-store')
 eq('proxy: upstream status passes through', res.status, 502)
 
 // A healthy upstream still gets the normal edge TTL.
 routes = ipfsName(22)
 proxyResponse = async () => new Response('ok', { status: 200, headers: { 'content-type': 'text/html' } })
-res = await proxyGet('p22.wei.limo/')
+res = await proxyGet('p22.wei.limo/ok')
 eq('proxy: healthy upstream is cacheable', res.headers.get('cache-control'), 'public, max-age=300')
 
 // A null-body status must not blow up the Response constructor.
 routes = ipfsName(23)
 proxyResponse = async () => new Response(null, { status: 204 })
-res = await proxyGet('p23.wei.limo/')
+res = await proxyGet('p23.wei.limo/e204')
 eq('proxy: 204 does not throw', res.status, 204)
 
 // An unreachable IPFS gateway is upstream trouble, not a bare 500.
 routes = ipfsName(24)
 proxyResponse = async () => { throw new Error('connect ECONNREFUSED') }
-res = await proxyGet('p24.wei.limo/')
+res = await proxyGet('p24.wei.limo/dead')
 eq('proxy: dead gateway is a 502', res.status, 502)
 eq('proxy: dead gateway is not cached', res.headers.get('cache-control'), 'no-store')
 proxyResponse = null
@@ -468,6 +486,79 @@ await get('paths.wei.limo/')
 calls.length = 0
 await get('paths.wei.limo/?x=1')
 eq('5219 key: query is still part of the identity', calls.filter((c) => c.selector === REQUEST).length, 1)
+
+// --- 27. proxy mode holds the body, not just the CID -------------------------
+//
+// In proxy mode the gateway fetches the whole document from the IPFS gateway on
+// every hit. The resolution cache spares the RPC and nothing else, so without a
+// body cache a hot name is one full upstream fetch per request.
+
+let upstreamFetches = 0
+routes = ipfsName(30)
+proxyResponse = async () => {
+  upstreamFetches++
+  return new Response('pinned', { status: 200, headers: { 'content-type': 'text/html' } })
+}
+res = await proxyGet('p30.wei.limo/held')
+eq('proxy cache: first hit is a 200', res.status, 200)
+eq('proxy cache: first hit went upstream', upstreamFetches, 1)
+
+res = await proxyGet('p30.wei.limo/held')
+eq('proxy cache: second hit still serves the body', await res.text(), 'pinned')
+eq('proxy cache: second hit makes zero upstream fetches', upstreamFetches, 1)
+eq('proxy cache: headers survive the round trip', res.headers.get('content-type'), 'text/html')
+eq('proxy cache: name header survives', res.headers.get('x-wns-name'), 'p30')
+
+// A different path under the same CID is different bytes, so it must re-fetch.
+res = await proxyGet('p30.wei.limo/other')
+eq('proxy cache: a different path re-fetches', upstreamFetches, 2)
+
+// A body over the cap is served whole but never held — the guard that keeps one
+// large file from being buffered into an OOM.
+upstreamFetches = 0
+routes = ipfsName(31)
+const BIG = 'x'.repeat(3 * 1024 * 1024)
+proxyResponse = async () => {
+  upstreamFetches++
+  return new Response(BIG, { status: 200, headers: { 'content-type': 'application/octet-stream' } })
+}
+res = await proxyGet('p31.wei.limo/big')
+eq('proxy cache: oversize body is intact', (await res.text()).length, BIG.length)
+res = await proxyGet('p31.wei.limo/big')
+eq('proxy cache: oversize body is still intact on re-fetch', (await res.text()).length, BIG.length)
+eq('proxy cache: oversize body was not held', upstreamFetches, 2)
+
+// A failure is never held: the next request must reach a recovered upstream.
+upstreamFetches = 0
+routes = ipfsName(32)
+proxyResponse = async () => {
+  upstreamFetches++
+  return new Response('bad gateway', { status: 502 })
+}
+res = await proxyGet('p32.wei.limo/flap')
+eq('proxy cache: 5xx passes through', res.status, 502)
+res = await proxyGet('p32.wei.limo/flap')
+eq('proxy cache: 5xx was not held', upstreamFetches, 2)
+proxyResponse = null
+
+// IPNS is mutable and is resolved fresh on every request so an owner can update
+// the site with no on-chain transaction. Holding the body would silently break
+// that, so the cache must never take an ipns target.
+upstreamFetches = 0
+routes = ipnsName(33)
+let ipnsBody = 'v1'
+proxyResponse = async () => {
+  upstreamFetches++
+  return new Response(ipnsBody, { status: 200, headers: { 'content-type': 'text/html' } })
+}
+res = await proxyGet('p33.wei.limo/live')
+eq('ipns: served through the proxy', await res.text(), 'v1')
+eq('ipns: routed as ipns', res.headers.get('x-ipns-name') !== null, true)
+ipnsBody = 'v2'
+res = await proxyGet('p33.wei.limo/live')
+eq('ipns: an update is visible immediately', await res.text(), 'v2')
+eq('ipns: never served from cache', upstreamFetches, 2)
+proxyResponse = null
 
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail ? 1 : 0)
