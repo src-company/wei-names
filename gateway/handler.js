@@ -307,7 +307,18 @@ export async function handleRequest(request, env) {
   // already its own origin (see the Public Suffix List note in README.md).
   if (resolved.kind === 'contract') {
     // Path and query are part of the identity of a 5219 response.
-    const pageKey = `${resolved.address}|${url.pathname}${url.search}`
+    // What identifies the cached document, which is exactly what the mode says
+    // it is. For 5219 the contract is handed the path and query and may answer
+    // differently for each, so both belong in the key. For ERC-8244 there is
+    // one document served at every path (see the html() call below), so putting
+    // the URL in the key would store the SAME bytes under unboundedly many
+    // keys: `?x=1`, `?x=2`, … each miss the cache, each cost a full-document
+    // `eth_call`, and ~113 of them at zswap's 288 KB evict the entire 32 MB
+    // budget. Keying an 8244 page by address alone makes that free — a cache
+    // buster and a plain reload become the same entry, and singleFlight then
+    // coalesces every concurrent reader of the name rather than one per URL.
+    const pageKey =
+      resolved.mode === '5219' ? `${resolved.address}|${url.pathname}${url.search}` : resolved.address
     let page = pageCache.get(pageKey, now)
     if (!page) {
       try {

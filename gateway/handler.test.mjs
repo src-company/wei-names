@@ -432,5 +432,42 @@ res = await get('p25.wei.limo/')
 eq('404: no content set is a 404', res.status, 404)
 eq('404: and it is not cacheable', res.headers.get('cache-control'), 'no-store')
 
+// --- 26. an 8244 page is ONE cache entry, whatever the URL -------------------
+//
+// html() has no notion of a path, so every URL yields the same document. The
+// cache key must say so: if it carried the path/query, `?x=1`, `?x=2`, … would
+// each be a separate full-document eth_call, which is a cache buster anyone can
+// type and the fastest way to evict the byte budget.
+
+const R26 = addr(0xc0de26)
+routes = nameRoutes(26, R26, {
+  [`${R26}:${RESOLVE_MODE}`]: '0x',
+  [`${R26}:${HTML}`]: RET_HTML,
+})
+res = await get('once.wei.limo/')
+eq('8244 key: first read is a 200', res.status, 200)
+eq('8244 key: first read hit the chain', calls.filter((c) => c.selector === HTML).length, 1)
+
+// NB: get() resets `calls` per request, so each URL is asserted on its own
+// rather than by summing after the loop.
+for (const u of ['once.wei.limo/?x=1', 'once.wei.limo/?x=2', 'once.wei.limo/deep/path', 'once.wei.limo/']) {
+  res = await get(u)
+  eq(`8244 key: ${u} still serves the document`, await res.text(), '<html>ok</html>')
+  // The whole point: a cache buster is not a cache miss for a one-document page.
+  eq(`8244 key: ${u} makes zero eth_calls`, calls.length, 0)
+}
+
+// 5219, by contrast, IS handed the path and query and may answer per-URL, so
+// those must stay in its key.
+const R26B = addr(0xc0de27)
+routes = nameRoutes(27, R26B, {
+  [`${R26B}:${RESOLVE_MODE}`]: mode('5219'),
+  [`${R26B}:${REQUEST}`]: RET_IMMUTABLE,
+})
+await get('paths.wei.limo/')
+calls.length = 0
+await get('paths.wei.limo/?x=1')
+eq('5219 key: query is still part of the identity', calls.filter((c) => c.selector === REQUEST).length, 1)
+
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail ? 1 : 0)
