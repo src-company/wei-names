@@ -2642,12 +2642,15 @@ async function updateTimer(timerId) {
       // when the wallet sped-up/replaced the commit tx (it then mined under a hash
       // we'd never find a receipt for). Without this, such a user holds a valid,
       // paid-for commitment the dapp would never let them reveal.
+      // null = couldn't ask. Never conflate that with a real "no commitment":
+      // the only caller that acts destructively (clearPending below) must not
+      // delete a paid-for secret because an RPC happened to be rate-limited.
       const commitLandedOnchain = async () => {
         if (!pending.commitment) return false;
         try {
           const ts = await withRpc(p => new ethers.Contract(CONTRACT, ABI, p).commitments(pending.commitment));
           return !!ts && ts !== 0n;
-        } catch (_) { return false; }
+        } catch (_) { return null; }
       };
 
       try {
@@ -2661,9 +2664,14 @@ async function updateTimer(timerId) {
         } else if (receipt && receipt.status === 0) {
           // The mined tx reverted — but only give up if no commitment exists
           // on-chain (a replacement tx could have committed successfully).
-          if (await commitLandedOnchain()) {
-            if (timerId !== pendingTimerId) return;
+          const landed = await commitLandedOnchain();
+          if (timerId !== pendingTimerId) return;
+          if (landed) {
             markCommitConfirmed();
+          } else if (landed === null) {
+            // Couldn't reach an RPC to check. Keep the secret and let the user retry.
+            showVerifyFallback('Could not check whether the commitment landed.');
+            return;
           } else {
             showStatus('Commit transaction reverted. Please try again.', 'error', pending.txHash);
             clearPending();
@@ -4599,7 +4607,11 @@ const STETH_MARK = "<svg class='roll-steth' viewBox='0 0 32 32' aria-hidden='tru
 let _rollRound = null;           // current round, cached for the entry preview's already-entered check
 let _rollEthUsd = { v: null, at: 0 }; // ~60s-cached ETH price for the pot's USD readout
 let _rollBoostBps = null;             // WeiRoll.BOOST_BPS(), fetched once (a deployed constant)
-let _rollTimer = null;
+// var, not let: initFromHash() runs above this line and #roll deeplinks reach
+// openRoll(), which reads _rollTimer. A let would still be in its temporal dead
+// zone there — the throw was swallowed by initFromHash's catch and silently cost
+// the deeplink its scroll, title and countdown timer.
+var _rollTimer = null;
 const rollIface = new ethers.Interface(LOTTERY_ABI);
 
 // What the user has typed into the entry box, kept outside the DOM because
@@ -5200,16 +5212,23 @@ async function rollDraw() {
   if (!window._signer) { toggleWallet(); return; }
   isProcessing = true;
   try {
+    // This button is also "Start next round" for a round with under two tickets.
+    // That path returns early in draw() without requesting randomness and without
+    // refunding — msg.value would just sit on the contract — so re-read the phase
+    // at click time and attach nothing unless the call actually settles.
+    let settles = false;
+    try { settles = !!(await withRpc((p) => rollRead(p).state())).drawSettles; } catch (_) {}
     // Re-quote at click time so the value tracks the gas price the tx is actually
     // priced at, rather than whatever it was when the panel last refreshed.
     // rollDrawQuote() prices the eth_call (a bare one always reads 0 — see its
     // comment); rollDrawValue() adds the buffer. Excess is refunded on-chain,
     // under-sending reverts Underpaid, so the buffer errs high.
     let quote = null;
-    try { quote = await withRpc((p) => rollDrawQuote(p)); } catch (_) {}
-    const value = rollDrawValue(quote);
+    if (settles) { try { quote = await withRpc((p) => rollDrawQuote(p)); } catch (_) {} }
+    const value = settles ? rollDrawValue(quote) : 0n;
     const c = new ethers.Contract(LOTTERY, LOTTERY_ABI, window._signer);
-    const tx = await wcTransaction(c.draw({ value }), 'Confirm draw (VRF fee, excess refunded)');
+    const tx = await wcTransaction(c.draw({ value }),
+      settles ? 'Confirm draw (VRF fee, excess refunded)' : 'Confirm — start the next round (no fee)');
     showStatus('Requesting the random draw…', '', tx.hash);
     const receipt = await waitForTx(tx);
     showStatus('Draw requested — winner lands in ~13 min', 'success', tx.hash);
