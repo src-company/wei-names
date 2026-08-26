@@ -5,7 +5,7 @@
 // test can assert not just the response but which calls were and weren't made.
 // No network, no chain, no dependencies.
 
-import { handleRequest } from './handler.js'
+import { handleRequest, buckets } from './handler.js'
 
 let pass = 0
 let fail = 0
@@ -103,7 +103,10 @@ globalThis.fetch = async (url, init) => {
   })
 }
 
-const ENV = { RPC_URLS: 'https://node.invalid', ZONE: 'wei.limo' }
+// The rate limiter is off for the body of the suite — every request here comes
+// from the same synthetic client, so a live limiter would refuse the suite
+// rather than the behaviour under test. It has its own section at the end.
+const ENV = { RPC_URLS: 'https://node.invalid', ZONE: 'wei.limo', RATE_LIMIT_RPS: 0 }
 
 async function get(hostAndPath, method = 'GET') {
   calls = []
@@ -559,6 +562,65 @@ res = await proxyGet('p33.wei.limo/live')
 eq('ipns: an update is visible immediately', await res.text(), 'v2')
 eq('ipns: never served from cache', upstreamFetches, 2)
 proxyResponse = null
+
+// --- 28. the per-client rate limit -------------------------------------------
+//
+// The caches make a repeated URL cheap; nothing else bounds how fast one client
+// may ask for URLs nobody has asked for yet. Without this a single source fills
+// the RPC queue and MAX_INFLIGHT starts shedding 503s at everyone.
+
+const RL_ENV = { ...ENV, RATE_LIMIT_RPS: 1, RATE_LIMIT_BURST: 3 }
+const from = (ip, path = '/') =>
+  handleRequest(
+    new Request('https://rl.wei.limo' + path, { headers: { 'x-forwarded-for': ip } }),
+    RL_ENV,
+  )
+
+routes = nameRoutes(40, addr(0xc0de40), {
+  [`${addr(0xc0de40)}:${RESOLVE_MODE}`]: '0x',
+  [`${addr(0xc0de40)}:${HTML}`]: RET_HTML,
+})
+
+let statuses = []
+for (let i = 0; i < 5; i++) statuses.push((await from('1.2.3.4', `/?n=${i}`)).status)
+eq('rate limit: the burst is served', statuses.slice(0, 3).every((s) => s === 200), true)
+eq('rate limit: past the burst is refused', statuses[3], 429)
+eq('rate limit: and stays refused', statuses[4], 429)
+
+// The refusal must not be cacheable, or a CDN pins it for everyone behind it.
+res = await from('1.2.3.4', '/?n=99')
+eq('rate limit: 429 is not cacheable', res.headers.get('cache-control'), 'no-store')
+eq('rate limit: 429 tells the client when to retry', res.headers.get('retry-after'), '1')
+
+// The whole point: one noisy client must not spend anybody else's budget.
+eq('rate limit: a different client is unaffected', (await from('5.6.7.8', '/')).status, 200)
+
+// Tokens come back, so a limited client recovers rather than being banned.
+const b = buckets.get('1.2.3.4')
+b.last -= 5000
+eq('rate limit: the bucket refills', (await from('1.2.3.4', '/?after=1')).status, 200)
+
+// Behind Cloudflare, cf-connecting-ip is authoritative and a client-supplied
+// x-forwarded-for must not be able to buy a fresh budget by rotating itself.
+const cf = (ip, xff, path) =>
+  handleRequest(
+    new Request('https://rl.wei.limo' + path, {
+      headers: { 'cf-connecting-ip': ip, 'x-forwarded-for': xff },
+    }),
+    RL_ENV,
+  )
+await cf('9.9.9.9', 'spoof-1', '/?a=1')
+await cf('9.9.9.9', 'spoof-2', '/?a=2')
+await cf('9.9.9.9', 'spoof-3', '/?a=3')
+res = await cf('9.9.9.9', 'spoof-4', '/?a=4')
+eq('rate limit: a rotated x-forwarded-for cannot buy a fresh budget', res.status, 429)
+eq('rate limit: the bucket is keyed on cf-connecting-ip', buckets.has('9.9.9.9'), true)
+eq('rate limit: not on the spoofable header', buckets.has('spoof-1'), false)
+
+// Health checks are never limited — the platform must always be able to ask.
+statuses = []
+for (let i = 0; i < 8; i++) statuses.push((await from('1.2.3.4', '/healthz')).status)
+eq('rate limit: /healthz is exempt', statuses.every((s) => s === 200), true)
 
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail ? 1 : 0)

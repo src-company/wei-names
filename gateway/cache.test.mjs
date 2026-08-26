@@ -121,5 +121,47 @@ eq('quoted value', parseCacheControl('max-age="60"'), 60)
 // word must not unlock the longer cap.
 eq('not-immutable does not match', parseCacheControl('max-age=31536000, x-immutable-ish'), 3600)
 
+// --- per-group byte cap ------------------------------------------------------
+//
+// A 5219 contract is handed the path and query, so one address can legitimately
+// occupy unboundedly many keys. The cap keeps that fan-out from evicting the
+// names next to it.
+
+{
+  const c = new TtlCache({ maxBytes: 1000, maxGroupBytes: 300 })
+  const far = Date.now() + 60_000
+  c.set('other|/', 'neighbour', { expires: far, size: 100, group: 'other' })
+  // One address floods with distinct URLs, well past its own share.
+  for (let i = 0; i < 20; i++) {
+    c.set(`hog|/?x=${i}`, 'page' + i, { expires: far, size: 100, group: 'hog' })
+  }
+  eq('group cap: the hog is held to its share', c.groupSize('hog') <= 300, true)
+  eq('group cap: the neighbour survives the flood', c.get('other|/', Date.now()), 'neighbour')
+  eq('group cap: the hog keeps its newest', c.get('hog|/?x=19', Date.now()), 'page19')
+  eq('group cap: the hog loses its oldest', c.get('hog|/?x=0', Date.now()), undefined)
+  eq('group cap: total stays under the whole budget', c.bytes <= 1000, true)
+}
+
+{
+  // Freeing a group's entries must free its accounting too, or the cap leaks
+  // shut and the address can never cache again.
+  const c = new TtlCache({ maxBytes: 1000, maxGroupBytes: 200 })
+  const now = Date.now()
+  c.set('a|1', 'x', { expires: now + 10, size: 100, group: 'a' })
+  eq('group cap: counted while held', c.groupSize('a'), 100)
+  c.get('a|1', now + 50) // expired -> dropped
+  eq('group cap: expiry releases the group budget', c.groupSize('a'), 0)
+  c.set('a|2', 'y', { expires: now + 60_000, size: 100, group: 'a' })
+  eq('group cap: the address can cache again', c.get('a|2', now), 'y')
+}
+
+{
+  // An ungrouped entry keeps working exactly as before.
+  const c = new TtlCache({ maxBytes: 1000, maxGroupBytes: 100 })
+  const far = Date.now() + 60_000
+  c.set('plain', 'v', { expires: far, size: 500 })
+  eq('group cap: ungrouped entries are unaffected', c.get('plain', Date.now()), 'v')
+}
+
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail ? 1 : 0)

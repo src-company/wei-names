@@ -48,8 +48,19 @@ const resolutionCache = new TtlCache({ maxEntries: 5_000 })
 // `eth_call` per request and one per TTL: a hot page is a few hundred KB of
 // RPC every single time without it, which is how the gateway falls over under
 // traffic. Byte-budgeted because the entries are documents, not pointers.
+// One address may hold an eighth of the budget. A 5219 contract is handed the
+// path and query, so a single name can legitimately occupy unboundedly many
+// keys; capping its share keeps a URL fan-out on one name from turning every
+// other name's cached page cold. That name still pays a read per fresh URL —
+// the contract is entitled to answer differently for each — but its neighbours
+// no longer do.
 const PAGE_CACHE_MAX_BYTES = 32 * 1024 * 1024
-const pageCache = new TtlCache({ maxEntries: 500, maxBytes: PAGE_CACHE_MAX_BYTES })
+const PAGE_CACHE_MAX_ADDRESS_BYTES = PAGE_CACHE_MAX_BYTES / 8
+const pageCache = new TtlCache({
+  maxEntries: 500,
+  maxBytes: PAGE_CACHE_MAX_BYTES,
+  maxGroupBytes: PAGE_CACHE_MAX_ADDRESS_BYTES,
+})
 
 // One in-flight call per key. N simultaneous readers of the same cold page
 // cost one RPC chain, not N — the failure mode a cache alone doesn't fix,
@@ -157,6 +168,78 @@ const MAX_SUB_LABELS = 2
 // its own version and link its successor without leaving this gateway.
 const ADDRESS_LABEL = /^0x[0-9a-f]{40}$/
 
+// Per-client rate limit — the one thing that keeps a flood from being everyone
+// else's outage.
+//
+// The caches below make a REPEATED url cheap and MAX_INFLIGHT keeps the gateway
+// from melting, but neither bounds how fast one client may ask for URLs it has
+// never asked for. A 5219 contract is handed the path and query, so every fresh
+// `?x=N` is a legitimately distinct response and a full document read: cheap to
+// send, expensive to answer. Without a limit the queue fills, and MAX_INFLIGHT
+// starts shedding 503s at everybody — the attacker's traffic and the real
+// readers' alike. Refusing the source is the only version of that which the
+// rest of the zone survives.
+//
+// A token bucket, not a fixed window: BURST requests may arrive back-to-back
+// (one page pulls many assets), refilling at RATE per second. Set RATE_LIMIT_RPS
+// to 0 to disable.
+// Generous on burst, strict on sustained rate. A proxy-mode site pulls many
+// assets on one page load, so a small burst would refuse real readers; what
+// actually needs bounding is the client that keeps going after the page is up.
+const RATE_LIMIT_RPS = 15
+const RATE_LIMIT_BURST = 100
+// Bounded so the limiter itself can't be turned into the memory exhaustion it
+// exists to prevent: a flood from many spoofed sources evicts oldest-first.
+const RATE_LIMIT_MAX_CLIENTS = 20_000
+// Exported for the tests, which drive the clock by ageing a bucket rather than
+// sleeping through a real refill.
+export const buckets = new Map()
+
+// The client, as far as this process can honestly tell.
+//
+// `cf-connecting-ip` first, and it matters which: this service is fronted by
+// Cloudflare (every response carries cf-ray), and Cloudflare OVERWRITES that
+// header, so a client cannot choose its own value. `x-forwarded-for` is the
+// opposite — a proxy APPENDS to whatever arrived, so the leftmost entry is
+// whatever the client typed. Keying on it would let one source rotate a header
+// and get a fresh budget per request, which is a limiter that limits nobody.
+//
+// So x-forwarded-for is only a fallback for running without Cloudflare in
+// front, and there the leftmost entry is the best available answer. Everything
+// unidentifiable shares one bucket: shared is the safe direction, since the
+// alternative is an unlimited lane reachable by dropping a header.
+function clientKey(request) {
+  return (
+    request.headers.get('cf-connecting-ip') ||
+    request.headers.get('true-client-ip') ||
+    request.headers.get('x-forwarded-for')?.split(',')[0].trim() ||
+    request.headers.get('x-real-ip') ||
+    'unknown'
+  )
+}
+
+// True when this request is over budget. Charges a token when it isn't.
+function rateLimited(key, now, rps, burst) {
+  if (rps <= 0) return false
+  let b = buckets.get(key)
+  if (!b) {
+    b = { tokens: burst, last: now }
+    // Touch-on-write keeps insertion order meaningful for eviction below.
+    if (buckets.size >= RATE_LIMIT_MAX_CLIENTS) {
+      const oldest = buckets.keys().next()
+      if (!oldest.done) buckets.delete(oldest.value)
+    }
+  } else {
+    buckets.delete(key)
+    b.tokens = Math.min(burst, b.tokens + ((now - b.last) / 1000) * rps)
+    b.last = now
+  }
+  buckets.set(key, b)
+  if (b.tokens < 1) return true
+  b.tokens -= 1
+  return false
+}
+
 // Statuses HTTP forbids a body on. `Response` throws rather than truncating.
 const NULL_BODY_STATUS = new Set([204, 205, 304])
 
@@ -185,13 +268,17 @@ function labelFromHost(host, zones) {
 // longer. A contract saying `immutable` gets held; one saying `max-age=300`
 // gets held for five minutes; one saying `no-store` isn't held at all. The
 // gateway never picks this number itself. Returns the page for chaining.
-function rememberPage(key, page) {
+function rememberPage(key, page, address) {
   if (!page) return page
   const ttl = parseCacheControl(page.cacheControl)
   if (ttl > 0) {
     // +512 for the entry's own overhead, so the byte budget isn't fooled by
-    // many tiny bodies.
-    pageCache.set(key, page, { expires: Date.now() + ttl * 1000, size: page.body.length + 512 })
+    // many tiny bodies. Grouped by address so one contract's share is bounded.
+    pageCache.set(key, page, {
+      expires: Date.now() + ttl * 1000,
+      size: page.body.length + 512,
+      group: address,
+    })
   }
   return page
 }
@@ -268,6 +355,21 @@ export async function handleRequest(request, env) {
   // Lightweight health check for Railway/Render.
   if (url.pathname === '/healthz') {
     return new Response('ok', { status: 200, headers: { 'cache-control': 'no-store' } })
+  }
+
+  // After /healthz so platform monitoring is never limited, and before any
+  // resolution so a refused request costs no RPC and no upstream fetch.
+  const rps = Number(readEnv(env, 'RATE_LIMIT_RPS', RATE_LIMIT_RPS))
+  const burst = Number(readEnv(env, 'RATE_LIMIT_BURST', RATE_LIMIT_BURST))
+  if (rateLimited(clientKey(request), Date.now(), rps, burst)) {
+    return new Response('Too many requests, slow down.\n', {
+      status: 429,
+      headers: {
+        'cache-control': 'no-store',
+        'retry-after': '1',
+        'content-type': 'text/plain; charset=utf-8',
+      },
+    })
   }
 
   const host =
@@ -386,7 +488,7 @@ export async function handleRequest(request, env) {
         if (prefetched) {
           // The html() read that classified this address is also its content;
           // don't call the contract a second time for the same bytes.
-          page = rememberPage(pageKey, prefetched)
+          page = rememberPage(pageKey, prefetched, resolved.address)
         } else {
           page = await singleFlight(pageInflight, pageKey, async () =>
             rememberPage(
@@ -396,6 +498,7 @@ export async function handleRequest(request, env) {
                 : // ERC-8244 has no notion of a path: one document, served at
                   // every path, the same shape as an SPA fallback.
                   await fetchErc8244(resolved.address, opts),
+              resolved.address,
             ),
           )
         }

@@ -24,19 +24,45 @@ export class TtlCache {
   // `maxBytes` bounds memory (page bodies are large); `maxEntries` bounds the
   // small stuff (resolutions, which have no meaningful size). Eviction is LRU:
   // a Map preserves insertion order, and a hit re-inserts to move to the end.
-  constructor({ maxEntries = 5_000, maxBytes = Infinity } = {}) {
+  // `maxGroupBytes` bounds what any ONE group may hold. Entries may name a
+  // group (the contract address, for page bodies); a group over its share
+  // evicts its own oldest entries and nobody else's. Without it, one address
+  // answering on unboundedly many URLs — a 5219 contract is handed the path and
+  // query, so `?x=1`, `?x=2`, … are each a legitimate distinct entry — walks the
+  // whole byte budget and turns every other name's cached page cold with it.
+  // The per-URL read for that address is still required; this only stops it
+  // being paid by the names next to it.
+  constructor({ maxEntries = 5_000, maxBytes = Infinity, maxGroupBytes = Infinity } = {}) {
     this.map = new Map()
     this.maxEntries = maxEntries
     this.maxBytes = maxBytes
+    this.maxGroupBytes = maxGroupBytes
     this.bytes = 0
+    this.groupBytes = new Map()
+  }
+
+  // Byte total currently held for a group; 0 for one that holds nothing.
+  groupSize(group) {
+    return this.groupBytes.get(group) || 0
+  }
+
+  #forget(key) {
+    const hit = this.map.get(key)
+    if (!hit) return
+    this.map.delete(key)
+    this.bytes -= hit.size
+    if (hit.group !== undefined) {
+      const left = (this.groupBytes.get(hit.group) || 0) - hit.size
+      if (left > 0) this.groupBytes.set(hit.group, left)
+      else this.groupBytes.delete(hit.group)
+    }
   }
 
   get(key, now) {
     const hit = this.map.get(key)
     if (!hit) return undefined
     if (now >= hit.expires) {
-      this.map.delete(key)
-      this.bytes -= hit.size
+      this.#forget(key)
       return undefined
     }
     // Touch: delete + re-insert moves this key to the newest position.
@@ -45,21 +71,33 @@ export class TtlCache {
     return hit.value
   }
 
-  set(key, value, { expires, size = 0 }) {
-    const prev = this.map.get(key)
-    if (prev) this.bytes -= prev.size
-    this.map.delete(key)
-    // An entry larger than the whole budget is not cacheable; don't evict the
-    // entire cache trying to fit it.
+  set(key, value, { expires, size = 0, group } = {}) {
+    this.#forget(key)
+    // An entry larger than a budget it must fit inside is not cacheable; don't
+    // evict everything trying to make room for something that can never fit.
     if (size > this.maxBytes) return
-    this.map.set(key, { value, expires, size })
+    if (group !== undefined && size > this.maxGroupBytes) return
+    this.map.set(key, { value, expires, size, group })
     this.bytes += size
+    if (group !== undefined) this.groupBytes.set(group, this.groupSize(group) + size)
+
+    // A group over its share evicts its own oldest first, so the cost of one
+    // address's URL fan-out lands on that address and not on its neighbours.
+    if (group !== undefined) {
+      while (this.groupSize(group) > this.maxGroupBytes) {
+        let victim
+        for (const [k, v] of this.map) {
+          if (v.group === group && k !== key) { victim = k; break }
+        }
+        if (victim === undefined) break
+        this.#forget(victim)
+      }
+    }
+
     while (this.map.size > this.maxEntries || this.bytes > this.maxBytes) {
       const oldest = this.map.keys().next()
       if (oldest.done) break
-      const victim = this.map.get(oldest.value)
-      this.map.delete(oldest.value)
-      this.bytes -= victim.size
+      this.#forget(oldest.value)
     }
   }
 
