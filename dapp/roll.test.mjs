@@ -47,7 +47,7 @@ const LIFTED = [
   'normalizeLabelContract', 'normalizeLabel', 'normalizeFullName', 'computeIdFull',
   'rollTokenFor', 'rollDrawQuote', 'rollDrawValue', 'rollPanelOpen',
   'rollNameChanged', 'rollPreviewWeight', 'rollEnter', 'rollOnConnect', 'rollOnDisconnect',
-  'rollDetectBoost', 'rollBoostBps',
+  'rollDetectBoost', 'rollBoostBps', 'rollBuildField',
   'renderRoll', 'fmtCountdown', 'fmtEth', 'escapeHtml', 'afterReceipt', 'readSideHasTx',
   'fmtUsd', 'fmtAgo', 'rollNameLink', 'fmtPot', 'rollPct', 'rollDonate', 'rollDonateChanged',
 ];
@@ -106,6 +106,9 @@ function sandbox({ signer = null, address = null, panelOpen = true } = {}) {
     isProcessing: false,
     textEncoder: new TextEncoder(),
     ROOT_NODE: '0x' + '00'.repeat(32),
+    ROLL_FIELD_RESOLVE: 40,
+    ownerOfIface: new ethers.Interface(['function ownerOf(uint256) view returns (address)']),
+    iface: new ethers.Interface(['function getFullName(uint256) view returns (string)']),
     rollIface: new ethers.Interface(['function drawPrice() view returns (uint256)']),
     // collaborators stubbed to observable no-ops
     $: id => els.get(id) || null,
@@ -459,6 +462,52 @@ function eq(name, got, want) {
     const { run } = sandbox();
     eq('null quote falls back to 0.01 ETH', run(`rollDrawValue(null)`), ethers.parseEther('0.01'));
   }
+}
+
+
+
+// ── rollBuildField: owner sweep, name slice, and the index that joins them ────
+//
+// The rows are read out of one flat aggregate3 result by offset, so the boundary
+// between the owner sweep and the name slice is load-bearing. It moves when the
+// sweep is skipped for a disconnected viewer, and the whole thing is chunked, so
+// both the offset and the stitching are pinned here.
+{
+  const { run, ctx } = sandbox({});
+  const mk = (n) => Array.from({ length: n }, (_, i) => ({ tokenId: BigInt(i + 1), cum: BigInt((i + 1) * 10) }));
+  // Every ticket weighs 10; owner of token N is 0xA for odd N, 0xB for even.
+  ctx.__seen = [];
+  ctx.aggregate3 = async calls => {
+    ctx.__seen.push(calls.length);
+    return calls.map(c => {
+      const id = Number(c.args[0]);
+      if (c.fn === 'ownerOf') return [id % 2 ? '0xAA' : '0xBB'];
+      if (c.fn === 'getFullName') return ['name' + id + '.wei'];
+      return null;
+    });
+  };
+
+  const connected = await run(`rollBuildField(${JSON.stringify(mk(5).map(t => ({ tokenId: t.tokenId.toString(), cum: t.cum.toString() })))}, '0xAA')`);
+  ok('connected: every row gets its name', connected.every(r => /^name\d+\.wei$/.test(r.name)), connected.map(r => r.name).join(','));
+  ok('connected: counts the viewer\'s names field-wide', connected.mineCount === 3, 'mineCount=' + connected.mineCount);
+  ok('connected: sums the viewer\'s weight', connected.mineWeight === 30n, 'mineWeight=' + connected.mineWeight);
+  ok('connected: marks the viewer\'s own rows', connected.filter(r => r.mine).length === 3);
+
+  // Disconnected: the owner sweep is skipped, so the name slice starts at 0.
+  // Getting this wrong reads owners as names and every row renders blank.
+  ctx.__seen = [];
+  const anon = await run(`rollBuildField(${JSON.stringify(mk(5).map(t => ({ tokenId: t.tokenId.toString(), cum: t.cum.toString() })))}, null)`);
+  ok('disconnected: names still land on the right rows', anon.every(r => /^name\d+\.wei$/.test(r.name)), anon.map(r => r.name).join(','));
+  ok('disconnected: no owner sweep is issued', ctx.__seen.reduce((a, b) => a + b, 0) === 5, 'calls=' + ctx.__seen);
+  ok('disconnected: nothing is marked as the viewer\'s', anon.every(r => !r.mine) && anon.mineCount === 0);
+
+  // Chunked: 300 tickets = 300 ownerOf + 40 getFullName = 340 calls, over the 250 cap.
+  ctx.__seen = [];
+  const big = await run(`rollBuildField(${JSON.stringify(mk(300).map(t => ({ tokenId: t.tokenId.toString(), cum: t.cum.toString() })))}, '0xAA')`);
+  ok('chunked: split into batches under the cap', ctx.__seen.length > 1 && ctx.__seen.every(n => n <= 250), 'batches=' + ctx.__seen);
+  ok('chunked: results stitch back in order', big.every(r => /^name\d+\.wei$/.test(r.name)), big.slice(0, 3).map(r => r.name).join(','));
+  ok('chunked: the full field is still counted', big.total === 300 && big.mineCount === 150, 'total=' + big.total + ' mine=' + big.mineCount);
+  ok('chunked: only the top slice is rendered', big.length === 40, 'rows=' + big.length);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

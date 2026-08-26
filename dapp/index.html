@@ -4996,11 +4996,11 @@ function renderRoll(body, d, me) {
       const fee = d.draw && d.draw.price > 0n
         ? ' (≈ ' + fmtEth(rollDrawValue(d.draw), 4) + ' ETH at current gas, any excess refunded)'
         : ' (any excess is refunded)';
-      h += '<button onclick="rollDraw()">Draw the winner</button>'
+      h += '<button onclick="rollDraw(true)">Draw the winner</button>'
          + '<div class="roll-note">Entries closed ' + fmtAgo(now - endTs) + ' — anyone can trigger the draw. You pay the Chainlink VRF fee' + fee + ', the pot stays whole.</div>';
     } else {
       h += '<div class="roll-note">This round had too few entries to draw, so calling draw will simply start a fresh one.</div>'
-         + '<button class="secondary" onclick="rollDraw()">Start next round</button>';
+         + '<button class="secondary" onclick="rollDraw(false)">Start next round</button>';
     }
   } else if (phase === 3) {
     h += '<div class="roll-note">Winner is being drawn on-chain (Chainlink VRF, ~13 minutes for finality). This panel updates when it lands.'
@@ -5267,16 +5267,18 @@ function rollOnDisconnect() {
   try { if (rollPanelOpen()) refreshRoll(); } catch (_) {}
 }
 
-async function rollDraw() {
+async function rollDraw(settlesHint) {
   if (isProcessing) return;
   if (!window._signer) { toggleWallet(); return; }
   isProcessing = true;
   try {
     // This button is also "Start next round" for a round with under two tickets.
     // That path returns early in draw() without requesting randomness and without
-    // refunding — msg.value would just sit on the contract — so re-read the phase
-    // at click time and attach nothing unless the call actually settles.
-    let settles = false;
+    // refunding — msg.value would just sit on the contract — so attach nothing
+    // unless the call actually settles. Re-read at click time for authority, and
+    // fall back to what the panel rendered if that read fails: guessing `false`
+    // there would under-send a real draw and revert it Underpaid.
+    let settles = !!settlesHint;
     try { settles = !!(await withRpc((p) => rollRead(p).state())).drawSettles; } catch (_) {}
     // Re-quote at click time so the value tracks the gas price the tx is actually
     // priced at, rather than whatever it was when the panel last refreshed.
