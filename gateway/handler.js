@@ -86,6 +86,73 @@ const PROXY_TTL_MS = 300_000
 const proxyCache = new TtlCache({ maxEntries: 500, maxBytes: PROXY_CACHE_MAX_BYTES })
 const proxyInflight = new Map()
 
+// Query parameters an IPFS gateway actually answers differently for. Everything
+// else is dropped from both the upstream URL and the cache key.
+//
+// Dropping the query wholesale would be wrong — `?format=raw` and `?download=`
+// change the response — but keeping it wholesale means `?x=1`, `?x=2`, … are
+// each a distinct entry and a distinct upstream fetch for byte-identical
+// content, which is the cheapest cache buster there is. So: keep what the
+// gateway honours, drop what it ignores, and sort, so two orderings of the same
+// request are one entry rather than two.
+const IPFS_QUERY_KEYS = new Set([
+  'format',
+  'download',
+  'filename',
+  'dag-scope',
+  'entity-bytes',
+  'car-scope',
+  'car-version',
+  'car-order',
+  'car-dups',
+])
+
+function ipfsQuery(search) {
+  if (!search || search === '?') return ''
+  const kept = []
+  for (const [k, v] of new URLSearchParams(search)) {
+    if (IPFS_QUERY_KEYS.has(k.toLowerCase())) kept.push([k.toLowerCase(), v])
+  }
+  if (!kept.length) return ''
+  kept.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : a[1] < b[1] ? -1 : 1))
+  return '?' + kept.map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&')
+}
+
+// Cap on concurrent outbound fetches to the IPFS gateway, mirroring the RPC
+// semaphore in wns.js and for the same reason: a spike otherwise opens a socket
+// per request, and the first thing that breaks is the upstream rate-limiting
+// this gateway, which takes every name down at once rather than slowing one.
+//
+// The slot covers issuing the request and receiving its headers, and is
+// released before the body is read. That bounds how fast connections are opened
+// upstream rather than how many bodies are in flight; holding a slot for the
+// whole transfer would let a handful of slow readers starve the queue into
+// shedding requests that would otherwise have been served.
+const PROXY_MAX_INFLIGHT = 10
+const PROXY_MAX_QUEUE = 200
+let proxyBusy = 0
+const proxyWaiting = []
+
+async function proxyAcquire() {
+  if (proxyBusy < PROXY_MAX_INFLIGHT) {
+    proxyBusy++
+    return
+  }
+  if (proxyWaiting.length >= PROXY_MAX_QUEUE) {
+    const e = new Error('gateway busy: proxy queue full')
+    e.overloaded = true
+    throw e
+  }
+  await new Promise((resolve) => proxyWaiting.push(resolve))
+  proxyBusy++
+}
+
+function proxyRelease() {
+  proxyBusy--
+  const next = proxyWaiting.shift()
+  if (next) next()
+}
+
 // Read a body while refusing to buffer more than `cap` bytes.
 //
 // Returns `{ body }` with the complete bytes when it fits — the only case that
@@ -562,7 +629,8 @@ export async function handleRequest(request, env) {
     idHeader = ['x-wns-contract', resolved.address]
   } else {
     const subGw = readEnv(env, 'IPFS_SUBDOMAIN_GATEWAY', 'dweb.link')
-    target = `https://${resolved.id}.${resolved.kind}.${subGw}${pathAndQuery}`
+    // Only the parameters the gateway honours reach it; see ipfsQuery.
+    target = `https://${resolved.id}.${resolved.kind}.${subGw}${url.pathname}${ipfsQuery(url.search)}`
     idHeader = [resolved.kind === 'ipns' ? 'x-ipns-name' : 'x-ipfs-cid', resolved.id]
   }
 
@@ -574,19 +642,54 @@ export async function handleRequest(request, env) {
     // `ipfs` and GET only — see the proxyCache note above for why `ipns` is
     // excluded. HEAD shares the key with nothing: it has no body to store.
     const proxyKey =
-      resolved.kind === 'ipfs' && request.method === 'GET' ? `${resolved.id}|${pathAndQuery}` : null
+      resolved.kind === 'ipfs' && request.method === 'GET'
+        ? `${resolved.id}|${url.pathname}${ipfsQuery(url.search)}`
+        : null
     if (proxyKey) {
       const hit = proxyCache.get(proxyKey, now)
       if (hit) return new Response(hit.body, { status: 200, headers: new Headers(hit.headers) })
     }
 
+    // Join a fetch already running for this key rather than opening a second
+    // one. A body can only be read once, so only a fully buffered result can be
+    // handed to more than one caller: the originator resolves with the bytes
+    // when it has them and with null when it cannot share (oversized, or not a
+    // 200), and anyone who joined then falls through and fetches for itself.
+    if (proxyKey && proxyInflight.has(proxyKey)) {
+      const shared = await proxyInflight.get(proxyKey)
+      if (shared) {
+        return new Response(shared.body, { status: 200, headers: new Headers(shared.headers) })
+      }
+    }
+    let settle
+    if (proxyKey) {
+      proxyInflight.set(
+        proxyKey,
+        new Promise((resolve) => {
+          settle = resolve
+        }),
+      )
+    }
+    const done = (shared) => {
+      if (!proxyKey) return shared
+      proxyInflight.delete(proxyKey)
+      settle(shared)
+      return shared
+    }
+
     let upstream
     try {
-      upstream = await fetch(target, {
-        method: request.method,
-        headers: { accept: request.headers.get('accept') || '*/*' },
-      })
+      await proxyAcquire()
+      try {
+        upstream = await fetch(target, {
+          method: request.method,
+          headers: { accept: request.headers.get('accept') || '*/*' },
+        })
+      } finally {
+        proxyRelease()
+      }
     } catch (e) {
+      done(null)
       // An unreachable IPFS gateway is upstream trouble like any other; without
       // this it escaped handleRequest entirely and server.js turned it into a
       // bare 500 with no retry-after and no cache-control.
@@ -620,22 +723,35 @@ export async function handleRequest(request, env) {
     // `Response` throws rather than truncating when a null-body status carries
     // one — same guard the contract path already has.
     if (request.method === 'HEAD' || NULL_BODY_STATUS.has(upstream.status)) {
+      done(null)
       return new Response(null, { status: upstream.status, headers })
     }
 
     // Nothing but a cacheable key on a healthy 200 may be held, and even then
     // only if it fits: readCapped hands back a passthrough stream instead of
-    // bytes for anything larger, which is served and forgotten.
+    // bytes for anything larger, which is served and forgotten — and cannot be
+    // shared with anyone who joined, so they are released to fetch their own.
     if (proxyKey && upstream.status === 200) {
-      const read = await readCapped(upstream, PROXY_MAX_BODY_BYTES)
-      if (read.stream) return new Response(read.stream, { status: 200, headers })
-      proxyCache.set(
-        proxyKey,
-        { body: read.body, headers: [...headers] },
-        { expires: Date.now() + PROXY_TTL_MS, size: read.body.length + 512 },
-      )
+      let read
+      try {
+        read = await readCapped(upstream, PROXY_MAX_BODY_BYTES)
+      } catch (e) {
+        done(null)
+        return upstreamError(e, 'reading ' + target)
+      }
+      if (read.stream) {
+        done(null)
+        return new Response(read.stream, { status: 200, headers })
+      }
+      const shared = { body: read.body, headers: [...headers] }
+      proxyCache.set(proxyKey, shared, {
+        expires: Date.now() + PROXY_TTL_MS,
+        size: read.body.length + 512,
+      })
+      done(shared)
       return new Response(read.body, { status: 200, headers })
     }
+    done(null)
     return new Response(upstream.body, { status: upstream.status, headers })
   }
 

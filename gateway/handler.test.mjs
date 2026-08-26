@@ -622,5 +622,75 @@ statuses = []
 for (let i = 0; i < 8; i++) statuses.push((await from('1.2.3.4', '/healthz')).status)
 eq('rate limit: /healthz is exempt', statuses.every((s) => s === 200), true)
 
+// --- 29. the proxy query string ----------------------------------------------
+//
+// An IPFS gateway answers `?format=raw` and `?download=` differently and
+// ignores everything else, so everything else must not be able to mint cache
+// entries — that is the cheapest cache buster available.
+
+upstreamFetches = 0
+routes = ipfsName(50)
+proxyResponse = async () => {
+  upstreamFetches++
+  return new Response('doc', { status: 200, headers: { 'content-type': 'text/html' } })
+}
+res = await proxyGet('p50.wei.limo/page?x=1')
+eq('proxy query: served', await res.text(), 'doc')
+eq('proxy query: first is a fetch', upstreamFetches, 1)
+for (const u of ['/page?x=2', '/page?x=3', '/page?utm_source=z', '/page?a=1&b=2', '/page']) {
+  res = await proxyGet('p50.wei.limo' + u)
+  eq(`proxy query: ${u} still serves the document`, await res.text(), 'doc')
+}
+eq('proxy query: ignored params never re-fetch', upstreamFetches, 1)
+
+// Ordering must not mint a second entry either.
+await proxyGet('p50.wei.limo/page?b=2&a=1')
+eq('proxy query: param order does not re-fetch', upstreamFetches, 1)
+
+// A parameter the gateway DOES honour is a different response and must re-fetch.
+res = await proxyGet('p50.wei.limo/page?format=raw')
+eq('proxy query: format=raw is its own entry', upstreamFetches, 2)
+res = await proxyGet('p50.wei.limo/page?format=raw')
+eq('proxy query: and is itself cached', upstreamFetches, 2)
+res = await proxyGet('p50.wei.limo/page?download=true')
+eq('proxy query: download is its own entry', upstreamFetches, 3)
+
+// The upstream URL must carry the honoured param and drop the noise.
+let seenTarget = null
+routes = ipfsName(51)
+proxyResponse = async (t) => {
+  seenTarget = t
+  return new Response('doc', { status: 200, headers: { 'content-type': 'text/html' } })
+}
+await proxyGet('p51.wei.limo/f?utm=1&format=raw&junk=2')
+eq('proxy query: honoured param reaches upstream', seenTarget.includes('format=raw'), true)
+eq('proxy query: noise does not', seenTarget.includes('utm') || seenTarget.includes('junk'), false)
+
+// --- 30. concurrent readers of a cold path share one upstream fetch ----------
+//
+// Without this, N simultaneous readers of the same cold path are N fetches --
+// the herd the cache alone cannot fix, because they all miss at the same instant.
+
+upstreamFetches = 0
+routes = ipfsName(52)
+proxyResponse = async () => {
+  upstreamFetches++
+  await new Promise((r) => setTimeout(r, 25))
+  return new Response('herd', { status: 200, headers: { 'content-type': 'text/html' } })
+}
+const proxyHerd = await Promise.all(
+  Array.from({ length: 12 }, () =>
+    handleRequest(new Request('https://p52.wei.limo/cold'), PROXY_ENV),
+  ),
+)
+eq('proxy herd: every reader is served', proxyHerd.every((r) => r.status === 200), true)
+eq(
+  'proxy herd: all twelve get the body',
+  (await Promise.all(proxyHerd.map((r) => r.text()))).every((b) => b === 'herd'),
+  true,
+)
+eq('proxy herd: twelve readers cost one upstream fetch', upstreamFetches, 1)
+proxyResponse = null
+
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail ? 1 : 0)
