@@ -179,6 +179,49 @@ contract WeiRollTest is Test {
         assertGt(roll.weightOf(tAlice), roll.weightOf(tBob)); // shorter name = pricier = better odds
     }
 
+    /// @notice The load-bearing fairness claim behind "when you enter doesn't matter": a ticket's
+    ///         weight is FROZEN at entry. `weightIn` is the entry-time weight, stored, and it does
+    ///         not move as the round runs — even though the name's *live* `weightOf` decays with
+    ///         time. So the odds you lock at entry are exactly the odds the draw uses.
+    function testEnteredWeightIsFrozenAtEntry() public {
+        uint256 wAtEntry = roll.weightOf(tAlice);
+        vm.prank(alice);
+        roll.enter(tAlice, 0);
+        assertEq(roll.weightIn(0, tAlice), wAtEntry, "entered weight = weight at the moment of entry");
+        uint256 totalAtEntry = roll.totalWeight(0);
+
+        // Time passes inside the open round: the *live* weight decays as the name ages toward expiry.
+        vm.warp(block.timestamp + 20 days);
+        assertLt(roll.weightOf(tAlice), wAtEntry, "live weight decays with time");
+
+        // ...but the ticket is frozen: the round still counts the entry-time weight, unchanged.
+        assertEq(roll.weightIn(0, tAlice), wAtEntry, "ticket weight must not move after entry");
+        assertEq(roll.totalWeight(0), totalAtEntry, "round total must not drift as time passes");
+    }
+
+    /// @notice For the "register 5 names at T-5min and enter" crowd: a freshly registered full-term
+    ///         name locks its full fee-weight no matter when in the round it is bought — last-minute
+    ///         is neither a penalty nor an edge. Timing only ever costs weight on a name you already
+    ///         hold and let decay; a fresh registration is timing-independent.
+    function testFreshRegistrationLocksFullWeightWheneverBought() public {
+        uint256 fee2 = nft.getFee(2); // the 2-char tier
+
+        // A 2-char name bought near round start.
+        uint256 early = _register("cd", makeAddr("early"));
+        uint256 wEarly = roll.weightOf(early);
+
+        // Jump to five minutes before the deadline, then buy an equivalent 2-char name.
+        vm.warp(roll.roundEnd() - 5 minutes);
+        uint256 late = _register("ef", makeAddr("late"));
+        uint256 wLate = roll.weightOf(late);
+
+        // Both full-term, so both weigh essentially the full 2-char fee — the T-5min name gets no
+        // less and no more. A fresh registration's weight does not depend on when you buy it.
+        assertApproxEqRel(wEarly, fee2, 0.01e18, "early fresh name ~ full fee");
+        assertApproxEqRel(wLate, fee2, 0.01e18, "T-5min fresh name ~ full fee");
+        assertApproxEqRel(wEarly, wLate, 0.01e18, "timing changes nothing for a fresh registration");
+    }
+
     function testOnlyOwnerCanEnterTheirName() public {
         vm.prank(bob);
         vm.expectRevert(WeiRoll.NotOwner.selector);
