@@ -94,7 +94,11 @@ function sandbox({ signer = null, address = null, panelOpen = true } = {}) {
     LOTTERY: '0x0000C82AA4D72871568eF3859D2b0E7CF37e45f2',
     LOTTERY_ABI: ['function drawPrice() view returns (uint256)', 'function enter(uint256,uint256)'],
     WEIDAO: '0x00000007988A79d16cf76B5dc4cF54dc3Af24936',
-    WEIDAO_ABI: ['function proposalCount() view returns (uint256)'],
+    WEIDAO_ABI: [
+      'function proposalCount() view returns (uint256)',
+      'function supportOf(uint256 id, uint256 tokenId) view returns (uint256)',
+      'function proposals(uint256) view returns (uint64 lastUpdate, uint64 created, bool executed, bool vetoed, address target, uint256 conviction, uint256 supportWeight, uint256 value, bytes data)'
+    ],
     CONTRACT: '0x0000000000696760E15f265e828DB644A0c242EB',
     ROLL_PHASE: ['Idle', 'Open', 'Ready', 'Drawing'],
     STETH_MARK: '<svg class="roll-steth"></svg>',
@@ -114,6 +118,11 @@ function sandbox({ signer = null, address = null, panelOpen = true } = {}) {
     refreshRoll: () => { calls.refreshRoll++; },
     withRpc: async fn => fn(ctx.__provider),
     getRpc: async () => ctx.__provider,
+    // Batched reads. The default answers "unreadable" for every slot — the honest
+    // stub answer — so tests that care about boost detection inject their own.
+    aggregate3: async calls => calls.map(() => null),
+    // rollEnter asks before entering unboosted when the boost check couldn't run.
+    confirm: () => { calls.confirmed = (calls.confirmed || 0) + 1; return true; },
     __provider: null,
   };
   ctx.globalThis = ctx;
@@ -241,27 +250,62 @@ function eq(name, got, want) {
 }
 
 // ── rollDetectBoost: auto-find a live proposal the entered name backs ─────────
+//
+// The boost is bonded once, at enter(), for the whole round. So a read that never
+// landed must never be reported as "backs nothing" — that silently halves the odds
+// for 30 days. Hence { pid, sure }: `sure` false means the caller must ask, not assume.
 {
   const { run, ctx } = sandbox({});
   ctx.__provider = {};
-  const backed = new Set(['2']); // proposal ids the name currently supports
+  const backed = new Set(['2']);  // proposal ids the name currently supports
+  const unread = new Set();       // proposal ids whose supportOf slot fails to decode
   const state = {
     1: { executed: true, vetoed: false },   // backed-but-executed: no boost
     2: { executed: false, vetoed: false },  // live + backed: the boost
     3: { executed: false, vetoed: false },  // live but not backed
   };
-  ctx.ethers.Contract = class {
-    constructor(addr) { this.addr = addr; }
-    async proposalCount() { return 3n; }
-    async supportOf(pid) { return backed.has(String(pid)) ? 1000n : 0n; }
-    async proposals(pid) { return state[Number(pid)]; }
-  };
+  ctx.aggregate3 = async calls => calls.map(c => {
+    if (c.fn === 'proposalCount') return [3n];
+    if (c.fn === 'supportOf') {
+      const pid = String(c.args[0]);
+      return unread.has(pid) ? null : [backed.has(pid) ? 1000n : 0n];
+    }
+    if (c.fn === 'proposals') return state[Number(c.args[0])] || null;
+    return null;
+  });
 
-  eq('rollDetectBoost: finds the live backed proposal', await run(`rollDetectBoost(123n)`), 2);
+  eq('rollDetectBoost: finds the live backed proposal',
+     await run(`rollDetectBoost(123n)`), { pid: 2, sure: true });
   backed.clear();
-  eq('rollDetectBoost: 0 when the name backs nothing', await run(`rollDetectBoost(123n)`), 0);
+  eq('rollDetectBoost: 0 when the name backs nothing',
+     await run(`rollDetectBoost(123n)`), { pid: 0, sure: true });
   backed.add('1'); // backs only an executed proposal
-  eq('rollDetectBoost: skips executed/vetoed proposals', await run(`rollDetectBoost(123n)`), 0);
+  eq('rollDetectBoost: skips executed/vetoed proposals',
+     await run(`rollDetectBoost(123n)`), { pid: 0, sure: true });
+
+  // The regression that matters: a throttled supportOf must not read as "no boost".
+  backed.clear(); unread.add('2');
+  eq('rollDetectBoost: an unreadable slot is not "backs nothing"',
+     await run(`rollDetectBoost(123n)`), { pid: 0, sure: false });
+  unread.clear();
+
+  // ...and a name that does back a live proposal still resolves even if another
+  // proposal's slot was unreadable, because a hit is positive evidence.
+  backed.add('2'); unread.add('3');
+  eq('rollDetectBoost: a confirmed hit wins over an unreadable neighbour',
+     await run(`rollDetectBoost(123n)`), { pid: 2, sure: true });
+}
+
+// ── rollEnter refuses to silently enter unboosted on an unreadable check ──────
+{
+  const { run, ctx, calls, els } = sandbox({ signer: {}, address: '0xME' });
+  els.get('rollNameInput').value = 'vitalik';
+  ctx.aggregate3 = async () => { throw new Error('rpc busy'); };
+  ctx.confirm = () => false;                       // user declines
+  await run(`rollNameChanged({ target: { value: 'vitalik' } }); rollEnter()`);
+  await new Promise(r => setTimeout(r, 10));
+  ok('declining the unboosted warning cancels the entry', calls.enter.length === 0);
+  ok('and isProcessing is released', ctx.isProcessing === false);
 }
 
 // ── "Connect & enter" actually enters ────────────────────────────────────────

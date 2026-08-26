@@ -1776,9 +1776,13 @@ async function doCheckName() {
                 priceDisplay = cfgPrice === 0n ? 'Free' : ethers.formatEther(cfgPrice) + ' ETH';
               } else {
                 try {
+                  // await getRpc(), not the module-level rpcProvider: invalidateRpc()
+                  // nulls that, and a null here throws into the catch below, which
+                  // advertises a 5 USDC subdomain as "5000000 tokens".
+                  const p = await getRpc();
                   [tokenDecimals, tokenSymbol] = await Promise.all([
-                    getTokenDecimals(cfgFeeToken, rpcProvider),
-                    getTokenSymbol(cfgFeeToken, rpcProvider)
+                    getTokenDecimals(cfgFeeToken, p),
+                    getTokenSymbol(cfgFeeToken, p)
                   ]);
                   if (thisVersion !== checkVersion) return;
                   priceDisplay = cfgPrice === 0n ? 'Free' : ethers.formatUnits(cfgPrice, tokenDecimals) + ' ' + tokenSymbol;
@@ -2113,8 +2117,13 @@ async function doCommit() {
     // Wait for confirmation with timeout fallback
     let confirmed = false;
     try {
+      // Keep a handle on the wait so a post-timeout rejection is swallowed here:
+      // once the timeout wins the race, nothing is listening to it and it would
+      // surface as an unhandled rejection. The pending-poller takes over regardless.
+      const waiting = waitForTx(tx).then(() => { confirmed = true; });
+      waiting.catch(() => {});
       await Promise.race([
-        waitForTx(tx).then(() => { confirmed = true; }),
+        waiting,
         new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 60000))
       ]);
     } catch (e) {
@@ -3542,6 +3551,21 @@ async function doSubdomain() {
   // Capture parent name before the tx so we can navigate into the new subdomain afterward
   const parentName = currentTokenName;
 
+  // _register does NOT revert on an existing subdomain: it bumps the epoch, burns the
+  // current token, wipes its records and re-mints to the parent owner. So registering a
+  // label you already sold silently confiscates it. Warn before that, the way the
+  // availability check on the search path already does.
+  try {
+    const subId = computeIdFull(label + '.' + parentName);
+    const [held] = await aggregate3([{ target: CONTRACT, iface: ownerOfIface, fn: 'ownerOf', args: [subId] }]);
+    const holder = held && held[0];
+    if (holder && _connectedAddress && holder.toLowerCase() !== _connectedAddress.toLowerCase()) {
+      if (!confirm(label + '.' + parentName + '.wei already exists and is held by\n' + holder +
+                   '\n\nRe-registering it as the parent burns their NFT, clears its records and ' +
+                   'mints it back to you. Continue?')) return;
+    }
+  } catch (_) { /* couldn't check — fall through; the tx itself is still valid */ }
+
   isProcessing = true;
   const btn = (typeof event !== 'undefined' && event?.target) || null; if (btn) btn.disabled = true;
   try {
@@ -4857,7 +4881,10 @@ async function refreshRoll() {
     data.usd = await rollEthUsd().catch(() => null);
     renderRoll(body, data, me);
   } catch (e) {
-    body.innerHTML = '<div class="roll-note" style="font-size:12px;opacity:0.6;">Couldn’t reach the lottery contract. It may not be deployed on this network yet.</div>';
+    // Almost always a throttled public RPC, not a missing deployment — say so, and
+    // give the same retry affordance the rest of the file offers.
+    body.innerHTML = '<div class="roll-note" style="font-size:12px;opacity:0.6;">Couldn’t reach the lottery contract — the RPC may be busy. ' +
+      '<button class="secondary" onclick="refreshRoll()" style="margin-left:6px;">Retry</button></div>';
     console.error('refreshRoll:', e);
   }
 }
@@ -4880,18 +4907,23 @@ async function rollBuildField(tickets, me) {
   const shown = all.slice(0, ROLL_FIELD_RESOLVE);
   // One multicall: an owner for EVERY ticket (so the viewer's own odds sum correctly even when
   // their names rank below the shown slice), plus a name only for the top slice we render.
+  // Chunked: at a few hundred entrants a single aggregate3 outgrows what public endpoints
+  // will accept, and the whole field section would vanish rather than degrade. Skip the
+  // owner sweep entirely when nobody is connected — it only feeds the "your odds" line.
   const calls = [];
-  for (const t of all) calls.push({ target: CONTRACT, iface: ownerOfIface, fn: 'ownerOf', args: [t.tokenId] });
+  if (me) for (const t of all) calls.push({ target: CONTRACT, iface: ownerOfIface, fn: 'ownerOf', args: [t.tokenId] });
   for (const t of shown) calls.push({ target: CONTRACT, iface: iface, fn: 'getFullName', args: [t.tokenId] });
-  const res = await aggregate3(calls);
+  const res = [];
+  for (let i = 0; i < calls.length; i += 250) res.push(...await aggregate3(calls.slice(i, i + 250)));
 
   const meLc = (me || '').toLowerCase();
-  const owners = all.map((_, i) => (res[i] ? String(res[i][0]).toLowerCase() : null));
+  const owners = meLc ? all.map((_, i) => (res[i] ? String(res[i][0]).toLowerCase() : null))
+                      : all.map(() => null);
   // Viewer's total, over the WHOLE field — this is the honest "your combined odds".
   let mineCount = 0, mineWeight = 0n;
   all.forEach((t, i) => { if (meLc && owners[i] === meLc) { mineCount++; mineWeight += t.weight; } });
 
-  const nameBase = all.length;
+  const nameBase = meLc ? all.length : 0;   // owner sweep is skipped when disconnected
   const rows = shown.map((t, i) => ({
     tokenId: t.tokenId,
     weight: t.weight,
@@ -5080,29 +5112,42 @@ async function rollBoostBps() {
 }
 
 // Auto-detect the boost: find a *live* WeiDAO proposal this name currently backs, so entry can
-// claim the bonus without the user hunting for a proposal id. Returns the proposal id (Number) or
-// 0. Proposals are few and sequential, so a plain scan of the index is fine; newest first, since a
-// name is likeliest to be backing a recent one. Any read failure yields 0 (a plain, unboosted entry).
+// claim the bonus without the user hunting for a proposal id. Newest first, since a name is
+// likeliest to be backing a recent one.
+//
+// Returns { pid, sure }. A read that never landed is NOT the same as "backs nothing": entering
+// with boostPid 0 because an RPC was throttled locks the name into a 30-day round at half the
+// odds it was owed, silently and unrecoverably. So every proposal must actually answer before
+// this reports pid 0, and `sure` is false when any slot came back unreadable — the callers show
+// that instead of quietly entering unboosted. One aggregate3 per phase rather than 2N calls.
 async function rollDetectBoost(tokenId) {
   try {
-    return await withRpc(async (p) => {
-      const dao = new ethers.Contract(WEIDAO, WEIDAO_ABI, p);
-      const count = Number(await dao.proposalCount());
-      if (!count) return 0;
-      const pids = [];
-      for (let i = count; i >= 1; i--) pids.push(i);
-      const found = await Promise.all(pids.map(async (pid) => {
-        const [sup, pr] = await Promise.all([
-          dao.supportOf(pid, tokenId).catch(() => 0n),
-          dao.proposals(pid).catch(() => null)
-        ]);
-        // Backed (support > 0) and still live (not executed, not vetoed).
-        return sup && sup > 0n && pr && !pr.executed && !pr.vetoed ? pid : 0;
-      }));
-      for (const pid of found) if (pid) return pid;
-      return 0;
-    });
-  } catch (_) { return 0; }
+    const weiDaoIface = new ethers.Interface(WEIDAO_ABI);
+    const cnt = await aggregate3([{ target: WEIDAO, iface: weiDaoIface, fn: 'proposalCount', args: [] }]);
+    if (!cnt[0]) return { pid: 0, sure: false };
+    const count = Number(cnt[0][0]);
+    if (!count) return { pid: 0, sure: true };
+
+    const pids = [];
+    for (let i = count; i >= 1; i--) pids.push(i);
+
+    // Phase 1: which proposals does this name back at all? (32 bytes each, one round-trip.)
+    const sup = await aggregate3(pids.map(pid =>
+      ({ target: WEIDAO, iface: weiDaoIface, fn: 'supportOf', args: [pid, tokenId] })));
+    let unread = sup.some(r => r === null);
+    const backed = pids.filter((pid, i) => sup[i] && sup[i][0] > 0n);
+    if (!backed.length) return { pid: 0, sure: !unread };
+
+    // Phase 2: of those, which are still open? Only the hits, so this stays small.
+    const props = await aggregate3(backed.map(pid =>
+      ({ target: WEIDAO, iface: weiDaoIface, fn: 'proposals', args: [pid] })));
+    for (let i = 0; i < backed.length; i++) {
+      const pr = props[i];
+      if (pr === null) { unread = true; continue; }
+      if (!pr.executed && !pr.vetoed) return { pid: backed[i], sure: true };
+    }
+    return { pid: 0, sure: !unread };
+  } catch (_) { return { pid: 0, sure: false }; }
 }
 
 let rollPreviewDebounce = null;
@@ -5124,25 +5169,34 @@ function rollPreviewWeight() {
   rollPreviewDebounce = setTimeout(async () => {
     let text = '';
     try {
-      // One round-trip: weight, and whether this name is already in the current round.
-      const [w, entered] = await withRpc((p) => {
+      // One round-trip: weight, whether this name is already in the current round,
+      // and who holds it — enter() reverts NotOwner, so say so before the gas is spent
+      // rather than showing a weight and an inviting button for someone else's name.
+      const [w, entered, owner] = await withRpc((p) => {
         const c = rollRead(p);
         return Promise.all([
           c.weightOf(target.id),
-          _rollRound != null ? c.ticketOf(_rollRound, target.id).catch(() => 0n) : Promise.resolve(0n)
+          _rollRound != null ? c.ticketOf(_rollRound, target.id).catch(() => 0n) : Promise.resolve(0n),
+          new ethers.Contract(CONTRACT, ABI, p).ownerOf(target.id).catch(() => null)
         ]);
       });
+      const notMine = owner && _connectedAddress &&
+        owner.toLowerCase() !== _connectedAddress.toLowerCase();
       if (entered && entered > 0n) {
         text = 'Already entered this round ✓';
+      } else if (notMine) {
+        text = 'You don’t hold this name — only its holder can enter it.';
       } else if (w > 0n) {
         // If this name currently backs a live proposal, entry claims the boost — show it.
-        const pid = await rollDetectBoost(target.id);
+        const { pid, sure } = await rollDetectBoost(target.id);
         if (pid) {
           const bps = await rollBoostBps();
           const eff = w + w * bps / 10000n;
           const mult = 1 + Number(bps) / 10000;
           const label = Number.isInteger(mult) ? mult + '×' : '+' + (Number(bps) / 100) + '%';
           text = 'Weight <b class="roll-boosted">' + fmtEth(eff, 5) + '</b> · <span class="roll-boost">' + label + ' boost</span> — backing proposal #' + pid + ' ✓';
+        } else if (!sure) {
+          text = 'This name’s weight: ' + fmtEth(w, 5) + ' — couldn’t check for a governance boost (RPC busy).';
         } else {
           text = 'This name’s weight: ' + fmtEth(w, 5) + ' (its share of the odds)';
         }
@@ -5177,8 +5231,14 @@ async function rollEnter() {
   try {
     const c = new ethers.Contract(LOTTERY, LOTTERY_ABI, window._signer);
     // Detect the boost fresh for the name actually being entered — a live proposal this name
-    // backs doubles its weight. 0 (no backing / any read failure) is a plain entry.
-    const boostPid = await rollDetectBoost(target.id);
+    // backs doubles its weight, and the bond is set once, here, for the whole round. If the
+    // check couldn't complete, ask rather than silently entering at half the odds it may be owed.
+    const { pid: boostPid, sure } = await rollDetectBoost(target.id);
+    if (!boostPid && !sure &&
+        !confirm('Could not check whether this name backs a live proposal (the RPC is busy).\n\n' +
+                 'Entering now locks it in unboosted for the whole round. Enter anyway?')) {
+      return; // finally clears isProcessing
+    }
     const tx = await wcTransaction(c.enter(target.id, boostPid), 'Confirm lottery entry');
     showStatus('Entering ' + target.name + '.wei' + (boostPid ? ' (boosted)' : '') + '…', '', tx.hash);
     const receipt = await waitForTx(tx);
