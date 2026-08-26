@@ -1,0 +1,508 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WeiDAO — cast all votes</title>
+<style>
+:root{--bg:#0b0d10;--fg:#e6e9ef;--dim:#8b93a3;--line:#1e232b;--card:#12161b;--ok:#3fb950;--warn:#d29922;--bad:#f85149;--acc:#58a6ff}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;padding:24px}
+.wrap{max-width:940px;margin:0 auto}
+h1{font-size:17px;margin:0 0 2px}
+.sub{color:var(--dim);font-size:12px;margin-bottom:20px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:14px 16px;margin-bottom:14px}
+.card h2{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--dim);margin:0 0 10px;font-weight:600}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(165px,1fr));gap:10px}
+.stat{border:1px solid var(--line);border-radius:6px;padding:8px 10px}
+.stat .k{color:var(--dim);font-size:11px}
+.stat .v{font-size:15px;margin-top:2px;font-variant-numeric:tabular-nums}
+button{font:inherit;background:var(--acc);color:#04101f;border:0;border-radius:6px;padding:9px 16px;cursor:pointer;font-weight:600}
+button.sec{background:transparent;color:var(--fg);border:1px solid var(--line);font-weight:400}
+button.sm{padding:4px 10px;font-size:12px}
+button:disabled{opacity:.4;cursor:not-allowed}
+input[type=text]{font:inherit;background:#0d1117;color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:8px 10px;width:70px}
+input[type=checkbox]{accent-color:var(--acc);cursor:pointer}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{text-align:left;color:var(--dim);font-weight:600;padding:5px 8px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--card);z-index:1}
+td{padding:3px 8px;border-bottom:1px solid #161a20}
+td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
+tr.off td{opacity:.45}
+.scroll{max-height:340px;overflow:auto;border:1px solid var(--line);border-radius:6px}
+.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}.dim{color:var(--dim)}
+pre{background:#0d1117;border:1px solid var(--line);border-radius:6px;padding:10px;overflow:auto;max-height:150px;font-size:11px;color:var(--dim);word-break:break-all;white-space:pre-wrap;margin:0}
+a{color:var(--acc)}
+#log{font-size:12px;white-space:pre-wrap;margin-top:12px;line-height:1.7}
+.note{font-size:11px;color:var(--dim);margin-top:8px;line-height:1.6}
+.desc{font-size:13px;color:var(--fg);margin:2px 0 10px}
+</style></head><body><div class="wrap">
+<h1>WeiDAO · cast all your votes</h1>
+<div class="sub">One transaction. Backs a proposal with every eligible .wei name the connected wallet holds.</div>
+
+<div class="card"><h2>Proposal</h2>
+<div class="row" style="margin-bottom:10px">
+<span class="dim">id</span><input type="text" id="pid" value="3" inputmode="numeric">
+<button class="sec" id="load">Load</button><span id="pinfo" class="dim"></span></div>
+<div class="desc" id="pdesc"></div>
+<div class="grid" id="state"><div class="dim">loading…</div></div>
+<div class="note" id="pcall"></div></div>
+
+<div class="card"><h2>Wallet</h2><div class="row" id="wbtns">
+<button id="connect">Connect wallet</button><span id="acct" class="dim">not connected</span></div>
+<div class="note" id="wdiag"></div></div>
+
+<div class="card"><h2>Your names <span id="cnt" class="dim"></span></h2>
+<div class="row" style="margin-bottom:10px">
+<button class="sec" id="rescan">Rescan names</button>
+<button class="sec sm" id="all">Select all</button>
+<button class="sec sm" id="none">Select none</button>
+<span id="pf" class="dim">connect a wallet to scan</span></div>
+<div class="scroll"><table id="tbl"><thead><tr>
+<th style="width:28px"></th><th>name</th><th class="n">weight (ETH)</th><th>expires</th><th>status</th>
+</tr></thead><tbody></tbody></table></div>
+<div class="note" id="boostnote"></div></div>
+
+<div class="card"><h2>Send</h2><div class="row">
+<button id="send" disabled>Send multicall</button><span id="gas" class="dim"></span></div>
+<div id="log"></div></div>
+
+<div class="card"><h2>Raw calldata <span class="dim">→ <span id="daoaddr"></span>, value 0</span></h2>
+<div class="row" style="margin-bottom:8px"><button class="sec" id="copy">Copy</button><span id="cdlen" class="dim"></span></div>
+<pre id="cd"></pre></div>
+<script>
+const DAO="0x00000007988a79d16cf76b5dc4cf54dc3af24936";
+const NFT="0x0000000000696760e15f265e828db644a0c242eb";
+// Checked from a browser origin: all four answer batched eth_call with CORS.
+// Excluded on purpose — flashbots (eth_call not whitelisted), cloudflare-eth
+// ("Internal error"), llamarpc (malformed responses).
+const RPCS=["https://gateway.tenderly.co/public/mainnet","https://eth.drpc.org",
+            "https://eth.merkle.io","https://ethereum-rpc.publicnode.com"];
+const NFT_DEPLOY=24360470;                 // first block NameNFT existed
+const TRANSFER="0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+const CREATED="0x89a1e7f6c86a8312d520db22d098e313e9013dfe6dc5c4afcdd096e04447c353";
+const ALPHA=999998853923940000n, SCALE=10n**18n;
+const SEL={support:"9be56c67",multicall:"ac9650d8",supportOf:"02cd4a68",weightOf:"0767d178",
+           ownerOf:"6352211e",records:"34461067",convictionOf:"cea5b888",threshold:"42cde4e8",
+           proposals:"013cf08b",proposalCount:"da35c664"};
+let NAMES=[], PID=3n, ACCT=null, PROV=null, PROP=null;
+const $=id=>document.getElementById(id);
+const h=n=>BigInt(n).toString(16).padStart(64,"0");
+const fmt=(w,d=6)=>(Number(BigInt(w))/1e18).toFixed(d);
+const word=(hex,i)=>BigInt("0x"+hex.slice(2).slice(64*i,64*(i+1)));
+const esc=s=>String(s).replace(/[<>&"]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;",'"':"&quot;"}[c]));
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+
+/* ---------------------------------------------------------------- transport */
+// Public endpoints throttle and occasionally answer nonsense, and a failed read
+// must never be mistaken for an on-chain zero — that would silently drop names
+// from the payload. Only an execution revert counts as an answer; anything else
+// rotates to the next endpoint.
+let rpcCursor=0;
+const nextRpc=()=>RPCS[rpcCursor++%RPCS.length];
+async function node(reqs,tries=RPCS.length*2){
+  let last;
+  for(let a=0;a<tries;a++){
+    const url=nextRpc();
+    try{
+      const r=await fetch(url,{method:"POST",headers:{"content-type":"application/json"},
+        body:JSON.stringify(reqs)});
+      if(!r.ok){ last=new Error(url+" HTTP "+r.status); await sleep(250*(a+1)); continue; }
+      const j=await r.json();
+      const arr=Array.isArray(j)?j:[j];
+      const fatal=arr.length===1&&arr[0].error&&arr[0].error.code!==3;
+      if(fatal){ last=new Error(arr[0].error.message); await sleep(300*(a+1)); continue; }
+      return arr;
+    }catch(e){ last=e; await sleep(250*(a+1)); }
+  }
+  throw last||new Error("all RPCs failed");
+}
+async function one(method,params){
+  if(PROV){ try{ return await PROV.request({method,params}); }catch(_){} }
+  const j=await node([{jsonrpc:"2.0",id:1,method,params}]);
+  if(j[0].error) throw new Error(j[0].error.message);
+  return j[0].result;
+}
+const call=(to,data)=>one("eth_call",[{to,data},"latest"]);
+// [{to,data}] -> {out,failed}; a null entry strictly means "could not read".
+async function callMany(items,onProgress){
+  const out=new Array(items.length).fill(null);
+  let todo=items.map((_,i)=>i), done=0;
+  for(let round=0;round<3&&todo.length;round++){
+    const pending=todo; todo=[];
+    for(let i=0;i<pending.length;i+=25){
+      const idx=pending.slice(i,i+25);
+      try{
+        const j=await node(idx.map(k=>({jsonrpc:"2.0",id:k,method:"eth_call",params:[items[k],"latest"]})));
+        const seen=new Set();
+        for(const r of j) if(!r.error&&r.result!==undefined){ out[r.id]=r.result; seen.add(r.id); }
+        for(const k of idx) if(!seen.has(k)) todo.push(k);
+        done+=seen.size;
+      }catch(_){ for(const k of idx) todo.push(k); }
+      if(onProgress) onProgress(done,items.length);
+      await sleep(60);
+    }
+    if(todo.length) await sleep(500);
+  }
+  return {out,failed:todo.length};
+}
+// Endpoints differ in how much history they'll scan and cap results, so split
+// the range on either signal and stitch the halves back together.
+async function getLogs(filter,from,to,depth=0){
+  try{
+    const j=await node([{jsonrpc:"2.0",id:1,method:"eth_getLogs",
+      params:[{...filter,fromBlock:"0x"+from.toString(16),toBlock:"0x"+to.toString(16)}]}]);
+    if(j[0].error) throw new Error(j[0].error.message);
+    const r=j[0].result||[];
+    if(r.length>=300&&to>from){
+      const m=Math.floor((from+to)/2);
+      return (await getLogs(filter,from,m,depth+1)).concat(await getLogs(filter,m+1,to,depth+1));
+    }
+    return r;
+  }catch(e){
+    if(to>from&&depth<24){
+      const m=Math.floor((from+to)/2);
+      return (await getLogs(filter,from,m,depth+1)).concat(await getLogs(filter,m+1,to,depth+1));
+    }
+    throw e;
+  }
+}
+function log(m,c){ $("log").innerHTML+=`<div class="${c||''}">${m}</div>`; }
+function daysToPass(C,W,T){
+  const A=Number(ALPHA)/1e18, ss=Number(W)/(1-A);
+  if(ss<=Number(T)) return null;
+  return Math.log((ss-Number(T))/(ss-Number(C)))/Math.log(A)/86400;
+}
+
+/* ------------------------------------------------------------ abi encode/decode */
+function encode(list,pid){
+  const calls=list.map(n=>SEL.support+h(pid)+h(n.id));
+  let head="",body="",off=32*calls.length;
+  for(const c of calls){head+=h(off);off+=32+Math.ceil(c.length/2/32)*32;}
+  for(const c of calls){const b=c.length/2;body+=h(b)+c.padEnd(Math.ceil(b/32)*64,"0");}
+  return "0x"+SEL.multicall+h(32)+h(calls.length)+head+body;
+}
+function decodeRecords(hex){ // (string label, uint256 parent, uint64 expiresAt, ...)
+  const raw=hex.slice(2);
+  const off=Number(BigInt("0x"+raw.slice(0,64)))*2;
+  const len=Number(BigInt("0x"+raw.slice(off,off+64)));
+  const bytes=raw.slice(off+64,off+64+len*2);
+  let label="";
+  for(let i=0;i<bytes.length;i+=2) label+=String.fromCharCode(parseInt(bytes.slice(i,i+2),16));
+  try{ label=decodeURIComponent(escape(label)); }catch(_){}
+  return {label,parent:BigInt("0x"+raw.slice(64,128)),exp:Number(BigInt("0x"+raw.slice(128,192)))};
+}
+function readString(raw,wordIdx){
+  const off=Number(BigInt("0x"+raw.slice(wordIdx*64,(wordIdx+1)*64)))*2;
+  const len=Number(BigInt("0x"+raw.slice(off,off+64)));
+  const b=raw.slice(off+64,off+64+len*2);
+  let s=""; for(let i=0;i<b.length;i+=2) s+=String.fromCharCode(parseInt(b.slice(i,i+2),16));
+  try{ s=decodeURIComponent(escape(s)); }catch(_){}
+  return s;
+}
+
+/* ------------------------------------------------------------------ proposal */
+async function loadProposal(){
+  const raw=($("pid").value||"").trim();
+  if(!/^\d+$/.test(raw)){ $("state").innerHTML='<div class="bad">proposal id must be a number</div>'; PROP=null; return render(); }
+  PID=BigInt(raw);
+  try{ history.replaceState(null,"","?pid="+PID); }catch(_){}
+  $("state").innerHTML='<div class="dim">loading…</div>';
+  try{
+    const count=BigInt(await call(DAO,"0x"+SEL.proposalCount));
+    $("pinfo").textContent="of "+count;
+    if(PID<1n||PID>count){ $("state").innerHTML=`<div class="bad">no proposal ${PID} — count is ${count}</div>`; PROP=null; return render(); }
+    const [p,c,t]=await Promise.all([
+      call(DAO,"0x"+SEL.proposals+h(PID)),
+      call(DAO,"0x"+SEL.convictionOf+h(PID)),
+      call(DAO,"0x"+SEL.threshold)]);
+    // words: 0 lastUpdate,1 created,2 executed,3 vetoed,4 target,5 conviction,
+    //        6 supportWeight,7 value,8 offset(data)
+    const r=p.slice(2);
+    const dOff=Number(word(p,8))*2, dLen=Number(BigInt("0x"+r.slice(dOff,dOff+64)))*2;
+    PROP={executed:word(p,2)===1n, vetoed:word(p,3)===1n,
+          target:"0x"+r.slice(64*4+24,64*5), W:word(p,6), value:word(p,7),
+          created:Number(word(p,1)), data:"0x"+r.slice(dOff+64,dOff+64+dLen),
+          C:BigInt(c), T:BigInt(t)};
+    renderState();
+    loadMeta();                       // description/proposer: nice to have, never blocking
+  }catch(e){ $("state").innerHTML=`<div class="bad">load failed: ${esc(e.message)}</div>`; PROP=null; }
+  render();
+}
+function renderState(){
+  const {W,C,T}=PROP;
+  const ceil=W*SCALE/(SCALE-ALPHA), Wreq=T*(SCALE-ALPHA)/SCALE;
+  const d=daysToPass(C,W,T);
+  const pct=(x,y)=>(Number(x*10000n/y)/100).toFixed(1)+"%";
+  const sel=NAMES.filter(n=>!n.status&&n.sel);
+  const add=sel.reduce((a,n)=>a+n.w,0n);
+  const rows=[
+    ["support weight",fmt(W)+" ETH"],
+    ["weight needed",fmt(Wreq)+" ETH"],
+    ["ceiling vs threshold",`<span class="${ceil>T?'ok':'bad'}">${pct(ceil,T)}</span>`],
+    ["conviction",pct(C,T)],
+    ["time to pass",d===null?'<span class="bad">never at this weight</span>':d.toFixed(2)+" d"],
+    ["status",PROP.executed?'<span class="warn">executed</span>':PROP.vetoed?'<span class="bad">vetoed</span>':'<span class="ok">open</span>']
+  ];
+  if(add>0n){
+    const d2=daysToPass(C,W+add,T);
+    rows.push([`→ after your ${sel.length}`,
+      `<span class="ok">${fmt(W+add)} ETH · ${d2===null?'never':d2.toFixed(2)+' d'}</span>`]);
+  }
+  $("state").innerHTML=rows.map(([k,v])=>`<div class="stat"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
+  const es=a=>`<a href="https://etherscan.io/address/${a}" target="_blank" rel="noopener">${a}</a>`;
+  $("pcall").innerHTML=`calls ${es(PROP.target)} with <b>${PROP.data}</b> and <b>${fmt(PROP.value)} ETH</b>`+
+    (PROP.executed||PROP.vetoed?' <span class="bad">— closed, support would revert</span>':'');
+}
+async function loadMeta(){
+  try{
+    const latest=Number(BigInt(await one("eth_blockNumber",[])));
+    const ls=await getLogs({address:DAO,topics:[CREATED,"0x"+h(PID)]},NFT_DEPLOY,latest);
+    if(!ls.length) return;
+    const l=ls[0], raw=l.data.slice(2);
+    const desc=readString(raw,3), who=readString(raw,4);
+    $("pdesc").innerHTML=`“${esc(desc)}” <span class="dim">— proposed by ${esc(who)||"?"} `+
+      `(<a href="https://etherscan.io/tx/${l.transactionHash}" target="_blank" rel="noopener">tx</a>)</span>`;
+  }catch(_){}
+}
+
+/* ------------------------------------------------- name discovery + preflight */
+// NameNFT is not ERC721Enumerable, so there is no on-chain way to list an
+// address's names: collect every Transfer that ever sent one here, then let
+// ownerOf decide which are still held.
+const CKEY=a=>"wns:names:"+a;
+const CACHE_TTL=36e5;                      // 1h — a newly registered name shows up on its own
+async function discover(addr){
+  let ids=null;
+  try{
+    const c=JSON.parse(localStorage.getItem(CKEY(addr))||"null");
+    if(c&&Array.isArray(c.ids)&&Date.now()-c.at<CACHE_TTL) ids=c.ids;
+  }catch(_){}
+  if(!ids){
+    $("pf").textContent="scanning Transfer logs…";
+    const latest=Number(BigInt(await one("eth_blockNumber",[])));
+    const ls=await getLogs({address:NFT,topics:[TRANSFER,null,"0x"+addr.slice(2).padStart(64,"0")]},
+                           NFT_DEPLOY,latest);
+    ids=[...new Set(ls.map(l=>l.topics[3]))];
+    try{ localStorage.setItem(CKEY(addr),JSON.stringify({at:Date.now(),ids})); }catch(_){}
+  }
+  return ids;
+}
+async function scan(force){
+  if(!ACCT){ $("pf").textContent="connect a wallet to scan"; return; }
+  if(force){ try{ localStorage.removeItem(CKEY(ACCT)); }catch(_){} }
+  try{
+    const ids=await discover(ACCT);
+    $("pf").textContent=`${ids.length} names ever received — checking which are still yours…`;
+    const reqs=[];
+    for(const id of ids){
+      reqs.push({to:NFT,data:"0x"+SEL.ownerOf+h(id)});
+      reqs.push({to:NFT,data:"0x"+SEL.records+h(id)});
+    }
+    const {out}=await callMany(reqs,(d,t)=>{ $("pf").textContent=`reading names… ${d}/${t}`; });
+    NAMES=[];
+    ids.forEach((id,i)=>{
+      const o=out[i*2], r=out[i*2+1];
+      if(o===null||r===null) return;
+      if(("0x"+o.slice(-40)).toLowerCase()!==ACCT) return;   // sold or transferred away
+      const rec=decodeRecords(r);
+      NAMES.push({id,label:rec.label,p:rec.parent!==0n,e:rec.exp,sel:true});
+    });
+    NAMES.sort((a,b)=>a.p-b.p||a.label.localeCompare(b.label));
+    await preflight();
+  }catch(e){ $("pf").innerHTML=`<span class="bad">scan failed: ${esc(e.message)}</span>`; }
+}
+async function preflight(){
+  if(!NAMES.length){ $("pf").textContent="no names found for this address"; return render(); }
+  if(!PROP){ $("pf").innerHTML='<span class="bad">proposal not loaded — press Load first</span>'; return render(); }
+  const reqs=[];
+  for(const n of NAMES){
+    reqs.push({to:NFT,data:"0x"+SEL.ownerOf+h(n.id)});
+    reqs.push({to:DAO,data:"0x"+SEL.weightOf+h(n.id)});
+    reqs.push({to:DAO,data:"0x"+SEL.supportOf+h(PID)+h(n.id)});
+  }
+  const {out}=await callMany(reqs,(d,t)=>{ $("pf").textContent=`checking… ${d}/${t}`; });
+  NAMES.forEach((n,i)=>{
+    const [o,w,s]=[out[i*3],out[i*3+1],out[i*3+2]];
+    n.w = w!==null ? BigInt(w) : undefined;
+    n.sup = s!==null ? BigInt(s) : undefined;
+    n.owner = o!==null ? ("0x"+o.slice(-40)).toLowerCase() : null;
+    if(n.owner===null||n.w===undefined||n.sup===undefined) n.status="read failed — rescan";
+    else if(n.owner!==ACCT) n.status="not yours";
+    else if(n.sup>0n) n.status="already backing #"+PID;
+    else if(n.w===0n) n.status=n.p?"subdomain · no weight":"no weight";
+    else n.status=null;
+  });
+  const act=NAMES.filter(n=>!n.status);
+  const bad=NAMES.filter(n=>n.status&&n.status.startsWith("read failed")).length;
+  $("pf").innerHTML=`<span class="${act.length?'ok':'warn'}">${act.length} eligible · `+
+    `${NAMES.filter(n=>n.sup>0n).length} already backing · `+
+    `${NAMES.filter(n=>n.w===0n).length} zero-weight</span>`+
+    (bad?` <span class="bad">· ${bad} unread — press Rescan</span>`:"");
+  render(); boostInfo();
+}
+// Mirrors the roll.wei entry path: the boost bonds to the newest live proposal
+// a name backs, and is evaluated once, at enter.
+async function boostInfo(){
+  try{
+    const count=Number(BigInt(await call(DAO,"0x"+SEL.proposalCount)));
+    const live=[];
+    for(let i=count;i>=1&&live.length<6;i--){
+      const p=await call(DAO,"0x"+SEL.proposals+h(BigInt(i)));
+      if(word(p,2)===0n&&word(p,3)===0n) live.push(i);
+    }
+    $("boostnote").innerHTML=`roll.wei boost: an entry bonds to the <b>newest live</b> proposal its name backs`+
+      ` — live now ${live.map(i=>"#"+i).join(", ")||"none"}, so a name backing several picks <b>#${live[0]??"-"}</b>.`+
+      ` Checked once, at <code>enter</code>, and never re-checked, so dropping support later cannot forfeit it.`;
+  }catch(_){}
+}
+
+/* -------------------------------------------------------------------- render */
+function selected(){ return NAMES.filter(n=>!n.status&&n.sel&&n.w>0n); }
+function render(){
+  const tb=$("tbl").querySelector("tbody"); tb.innerHTML="";
+  if(!NAMES.length){
+    tb.innerHTML=`<tr><td colspan="5" class="dim">${ACCT?"nothing scanned yet":"connect a wallet to list your names"}</td></tr>`;
+  }
+  for(const n of NAMES){
+    const on=!n.status;
+    tb.insertAdjacentHTML("beforeend",
+      `<tr class="${on&&n.sel?'':'off'}">`+
+      `<td>${on?`<input type="checkbox" data-id="${n.id}" ${n.sel?"checked":""}>`:""}</td>`+
+      `<td>${esc(n.label)}${n.p?'<span class="dim"> (sub)</span>':'.wei'}</td>`+
+      `<td class="n">${n.w!==undefined?fmt(n.w,9):'—'}</td>`+
+      `<td class="dim">${n.p?'—':new Date(n.e*1000).toISOString().slice(0,10)}</td>`+
+      (n.w===undefined?`<td class="dim">not checked</td>`
+        :`<td class="${on?'ok':(n.sup>0n?'dim':'bad')}">${esc(n.status||'eligible')}</td>`)+
+      `</tr>`);
+  }
+  tb.querySelectorAll("input[type=checkbox]").forEach(cb=>{
+    cb.onchange=()=>{ const n=NAMES.find(x=>x.id===cb.dataset.id); if(n){ n.sel=cb.checked; render(); if(PROP) renderState(); } };
+  });
+  const act=NAMES.filter(n=>!n.status), sel=selected();
+  const tot=sel.reduce((a,n)=>a+n.w,0n);
+  $("cnt").textContent=NAMES.length?`— ${sel.length} selected of ${act.length} eligible, +${fmt(tot)} ETH`:"";
+  const cd=sel.length?encode(sel,PID):"";
+  $("cd").textContent=cd||"(nothing selected)";
+  $("cdlen").textContent=cd?`${(cd.length-2)/2} bytes · ${sel.length} calls`:"";
+  let why="";
+  if(!PROP) why="proposal not loaded — press Load";
+  else if(PROP.executed) why="proposal already executed";
+  else if(PROP.vetoed) why="proposal vetoed";
+  else if(!ACCT) why="connect a wallet first";
+  else if(!NAMES.length) why="no names found for this address";
+  else if(NAMES.every(n=>n.w===undefined)) why="not checked yet — press Rescan names";
+  else if(!act.length) why=NAMES.some(n=>n.status&&n.status.startsWith("read failed"))
+      ? "some reads failed — press Rescan names"
+      : "every name already backs #"+PID;
+  else if(!sel.length) why="select at least one name";
+  $("send").disabled=!!why;
+  $("gas").innerHTML=why?`<span class="dim">${esc(why)}</span>`:"";
+}
+
+/* -------------------------------------------------------------------- wallet */
+// Extensions inject asynchronously and several may compete for window.ethereum,
+// so take EIP-6963 announcements as authoritative and fall back to the global.
+const WALLETS=[]; let sawAnnounce=false;
+function addWallet(w){
+  if(WALLETS.some(x=>x.provider===w.provider)) return;
+  if(WALLETS.some(x=>x.info.name===w.info.name)) return;
+  WALLETS.push(w); renderWallets();
+}
+window.addEventListener("eip6963:announceProvider",e=>{
+  sawAnnounce=true;
+  for(let i=WALLETS.length-1;i>=0;i--) if(WALLETS[i].legacy) WALLETS.splice(i,1);
+  addWallet(e.detail);
+});
+function scanLegacy(){
+  if(sawAnnounce) return;
+  const e=window.ethereum; if(!e) return;
+  const list=Array.isArray(e.providers)&&e.providers.length?e.providers:[e];
+  for(const p of list){
+    const name=p.isRabby?"Rabby":p.isMetaMask?"MetaMask":p.isCoinbaseWallet?"Coinbase":"Injected wallet";
+    addWallet({info:{name,uuid:"legacy:"+name},provider:p,legacy:true});
+  }
+}
+function diag(){
+  const b=[];
+  if(!WALLETS.length){
+    b.push('<span class="bad">No wallet detected.</span>');
+    if(!window.isSecureContext) b.push('Not a secure context — serve over <b>http://localhost</b> or https.');
+    if(location.protocol==="file:") b.push('Opened as <b>file://</b>; extensions do not inject there by default.');
+    b.push('Served from a remote container? Open the <b>forwarded port in your own browser</b> — VS Code’s Simple Browser has no extensions.');
+  } else b.push('Found: '+WALLETS.map(w=>'<b>'+esc(w.info.name)+'</b>').join(", ")+'.');
+  b.push(`<span class="dim">origin ${esc(location.origin)} · secure context ${window.isSecureContext}</span>`);
+  $("wdiag").innerHTML=b.join("<br>");
+}
+function renderWallets(){
+  const box=$("wbtns"), base=$("connect");
+  box.querySelectorAll("button[data-w]").forEach(b=>b.remove());
+  WALLETS.forEach((w,i)=>{
+    const b=document.createElement("button");
+    b.dataset.w=i; b.textContent="Connect "+w.info.name;
+    b.onclick=()=>connect(w.provider);
+    box.insertBefore(b,base);
+  });
+  base.style.display=WALLETS.length?"none":"";
+  diag();
+}
+async function connect(p){
+  PROV=p||WALLETS[0]?.provider||window.ethereum;
+  if(!PROV){ diag(); return log("No wallet provider available — see the note above.","bad"); }
+  try{
+    const [a]=await PROV.request({method:"eth_requestAccounts"});
+    const cid=await PROV.request({method:"eth_chainId"});
+    ACCT=a.toLowerCase();
+    $("acct").innerHTML=esc(a)+(cid!=="0x1"?' <span class="bad">— not mainnet, switch network</span>':"");
+    $("acct").className="";
+    if(PROV.on){
+      PROV.on("accountsChanged",as=>{
+        ACCT=as[0]?as[0].toLowerCase():null;
+        $("acct").innerHTML=as[0]?esc(as[0]):'<span class="bad">disconnected</span>';
+        NAMES=[]; render(); if(ACCT) scan(false);
+      });
+      PROV.on("chainChanged",()=>location.reload());
+    }
+    scan(false);
+  }catch(e){ log("connect failed: "+esc(e.message||e),"bad"); }
+}
+
+/* ---------------------------------------------------------------------- send */
+$("send").onclick=async()=>{
+  const sel=selected();
+  const data=encode(sel,PID);
+  $("send").disabled=true; $("gas").textContent="estimating…";
+  try{
+    const gas=BigInt(await PROV.request({method:"eth_estimateGas",params:[{from:ACCT,to:DAO,data}]}));
+    $("gas").textContent=`est. ${gas.toLocaleString()} gas`;
+    log(`estimate ok — ${sel.length} supports for proposal #${PID}`,"ok");
+    const tx=await PROV.request({method:"eth_sendTransaction",
+      params:[{from:ACCT,to:DAO,data,gas:"0x"+(gas*12n/10n).toString(16)}]});
+    log(`sent → <a href="https://etherscan.io/tx/${tx}" target="_blank" rel="noopener">${tx}</a>`,"ok");
+    let r=null;
+    while(!r){ await sleep(4000); r=await PROV.request({method:"eth_getTransactionReceipt",params:[tx]}); }
+    if(BigInt(r.status)===1n){ log("confirmed ✓","ok"); await loadProposal(); await preflight(); }
+    else log("reverted","bad");
+  }catch(e){
+    log("failed: "+esc(e.data?.message||e.message||e),"bad");
+    $("gas").textContent=""; render();
+  }
+};
+
+$("connect").onclick=()=>connect(null);
+$("load").onclick=()=>loadProposal().then(()=>{ if(NAMES.length) preflight(); });
+$("pid").addEventListener("keydown",e=>{ if(e.key==="Enter") $("load").click(); });
+$("rescan").onclick=()=>scan(true);
+$("all").onclick=()=>{ NAMES.forEach(n=>{ if(!n.status) n.sel=true; }); render(); if(PROP) renderState(); };
+$("none").onclick=()=>{ NAMES.forEach(n=>n.sel=false); render(); if(PROP) renderState(); };
+$("copy").onclick=()=>navigator.clipboard.writeText($("cd").textContent).then(()=>log("copied","dim"));
+$("daoaddr").innerHTML=`<a href="https://etherscan.io/address/${DAO}" target="_blank" rel="noopener">${DAO}</a>`;
+
+const qp=new URLSearchParams(location.search).get("pid");
+if(qp&&/^\d+$/.test(qp)) $("pid").value=qp;
+renderWallets();
+window.dispatchEvent(new Event("eip6963:requestProvider"));
+scanLegacy();
+window.addEventListener("ethereum#initialized",scanLegacy,{once:true});
+[100,300,800,1500,3000].forEach(ms=>setTimeout(()=>{
+  window.dispatchEvent(new Event("eip6963:requestProvider")); scanLegacy();
+},ms));
+render(); loadProposal(); boostInfo();
+</script></div></body></html>
