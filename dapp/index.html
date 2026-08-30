@@ -325,6 +325,36 @@ button.secondary:hover { background: var(--surface-hover); }
   position: relative;
 }
 
+/* "random" draw, sitting in the Name label's row */
+.label-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+.rand-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0 0 8px;
+  padding: 0;
+  background: none;
+  border: none;
+  font-family: inherit;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--fg-muted);
+  opacity: 0.7;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+.rand-btn:hover { opacity: 1; background: none; }
+/* Hold the label's own colour through the draw — the global button:disabled rule
+   would otherwise repaint it in the disabled-button grey for those few hundred ms. */
+.rand-btn:disabled { cursor: default; opacity: 0.35; background: none; color: var(--fg-muted); }
+.rand-btn svg { display: block; }
+
 /* Modal open state (modal styles live in wallet.css as .wallet-modal*) */
 body.modal-open { overflow: hidden; }
 
@@ -455,6 +485,9 @@ body.modal-open { overflow: hidden; }
   .pay-method label { width: 100%; margin: 0 0 8px; }
   /* Roomier tap targets for the small text links/toggles. */
   .view-link a, .send-toggle, .free-cta { display: inline-block; padding: 6px 0; }
+  /* Same, for the random draw — and keep it off the blanket button{width:100%},
+     which would otherwise stretch it across the Name label's row. */
+  .rand-btn { width: auto; padding: 6px 0 6px 16px; margin-bottom: 2px; }
   /* Integrations: two aligned columns on phones. */
   .integrations-row { grid-template-columns: repeat(2, auto); gap: 16px 28px; }
   .pending .actions { flex-direction: row; gap: 8px; }
@@ -810,7 +843,11 @@ try{if(localStorage.getItem('wns_dao_banner')==='1'){var _db=document.getElement
 <h1>wei name service</h1>
 
 <div class="section">
-  <label>Name</label>
+  <div class="label-row">
+    <label for="nameInput">Name</label>
+    <button type="button" id="randomBtn" class="rand-btn" onclick="randomName()" title="Draw a random name that nobody has registered">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 3h5v5"/><path d="M4 20 21 3"/><path d="M21 16v5h-5"/><path d="M15 15l6 6"/><path d="M3 4l6 6"/></svg>random</button>
+  </div>
   <div class="input-wrap">
     <input type="text" id="nameInput" placeholder="yourname" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" enterkeyhint="search" oninput="checkName()" onkeydown="nameInputKey(event)">
     <span class="suffix">.wei</span>
@@ -1642,6 +1679,212 @@ function nameInputKey(e) {
     clearTimeout(checkDebounce);
     e.target.blur();
     doCheckName();
+  }
+}
+
+// --- Random name draw --------------------------------------------------------
+//
+// Candidates come from ENS itself: every .eth registration emits the plaintext
+// label on-chain, so a window of NameRegistered logs is a sample of names real
+// people picked — a far better corpus than anything generated here. They are then
+// screened against isAvailable() so a draw only ever lands on a free .wei.
+//
+// Nothing below runs until the button is clicked. The whole feature is two RPC
+// round-trips (one log window, one batched availability check) on first use and
+// zero on the clicks after it, so the search path pays nothing for it.
+
+// The three .eth controllers ENS has deployed, and the NameRegistered signatures
+// they emit. Every variant declares `string name` first among the non-indexed
+// args, so the label always sits at the head offset of `data` — decodable without
+// knowing which controller wrote the log.
+const ENS_CONTROLLERS = [
+  '0x283Af0B28c62C092C9727F1Ee09c02CA627EB7F5', // 2019 permanent registrar controller
+  '0x253553366Da8546fC250F225fe3d25d0C782303b', // 2022 controller (adds premium)
+  '0x59E16fcCd424Cc24e280Be16E11Bcd56fb0CE547'  // current controller (adds referrer)
+];
+const ENS_NAME_REGISTERED = [
+  '0xca6abbe9d7f11422cb6ca7629fbf6fe9efb1c621f71ce8f02b9f2a230097404f', // (string,bytes32,address,uint256,uint256)
+  '0x69e37f151eb98a09618ddaa80c8cfaf1ce5996867c489f45b555b412271ebf27', // + premium
+  '0xc2240194853531f1ae318dcef227de79c6ad0fd9d1b0e4fe08568415be2e08a5'  // + referrer
+];
+
+// ~800 blocks is a couple of hours of ENS traffic (tens of registrations) and stays
+// under the range caps public endpoints put on eth_getLogs. The window is drawn from
+// roughly the last year: recent enough that a non-archive node still holds the logs,
+// wide enough that consecutive clicks don't resample the same names.
+const ENS_WINDOW_BLOCKS = 800;
+const ENS_LOOKBACK_BLOCKS = 3000000;
+const RANDOM_BATCH = 24; // candidates screened per multicall
+
+// Pull the label out of a NameRegistered log's data: head word 0 is the offset to
+// the string, then length, then bytes. Returns null for anything malformed or not
+// valid UTF-8 rather than throwing — one odd log must not lose the whole window.
+function decodeEnsLabel(data) {
+  try {
+    const bytes = ethers.getBytes(data);
+    const word = i => Number(BigInt(ethers.hexlify(bytes.slice(i, i + 32))));
+    if (bytes.length < 32) return null;
+    const off = word(0);
+    if (!Number.isSafeInteger(off) || off < 32 || off + 32 > bytes.length) return null;
+    const len = word(off);
+    if (!Number.isSafeInteger(len) || off + 32 + len > bytes.length) return null;
+    return ethers.toUtf8String(bytes.slice(off + 32, off + 32 + len));
+  } catch (e) {
+    return null;
+  }
+}
+
+// Keep a candidate only if it is plain lowercase ASCII starting with a letter, 5-15
+// chars. That drops the emoji/CJK/hyphenated end of ENS along with the 3- and
+// 4-character names (which price at 0.05 / 0.01 ETH here, not the 0.0005 base fee) —
+// a random draw should not quietly hand someone a 100x bill. The ENSIP-15 pass is
+// belt-and-braces: on this character set it can only confirm the label, never rewrite
+// it, so what the button shows is exactly what a commit would register.
+function usableLabel(raw) {
+  if (typeof raw !== 'string') return null;
+  const label = raw.toLowerCase();
+  if (!/^[a-z][a-z0-9]{4,14}$/.test(label)) return null;
+  return normalizeLabel(label) === label ? label : null;
+}
+
+// Fallback corpus, used when eth_getLogs is unavailable — several public endpoints
+// refuse it outright, and a custom ?rpc= node may too. Two lists of short words,
+// every pair 7-13 characters.
+const RANDOM_HEADS = ['amber','brisk','civic','coral','dusky','ember','fleet','frost','gilt','glass',
+  'ivory','jade','keen','lucid','lush','mellow','mint','noble','onyx','opal','pale','plain','quiet',
+  'rapid','rust','sable','sage','silk','slate','solar','still','swift','terse','tidal','umber','vast',
+  'vivid','warm','wild','zinc'];
+const RANDOM_TAILS = ['anvil','arch','bell','birch','cairn','coast','cove','crown','delta','drift',
+  'fern','forge','fox','gate','glen','grove','harbor','haven','heron','kiln','lake','lantern','ledge',
+  'loom','marsh','mesa','moth','oak','orbit','otter','pine','quarry','reef','ridge','river','sail',
+  'shore','spire','stone','thorn','tide','vale','wharf','willow','wren'];
+
+function localLabels(n) {
+  const pick = a => a[Math.floor(Math.random() * a.length)];
+  const out = new Set();
+  for (let i = 0; out.size < n && i < n * 20; i++) {
+    const label = usableLabel(pick(RANDOM_HEADS) + pick(RANDOM_TAILS));
+    if (label) out.add(label);
+  }
+  return [...out];
+}
+
+function shuffled(arr) {
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+// eth_getLogs needs its own endpoint walk. FallbackProvider does not fail over on
+// it — the top-priority endpoint's error is the call's error — and only two of the
+// six public endpoints answer log queries at all (publicnode 403s, cloudflare and
+// blastapi reject the filter, merkle rate-limits), with two of the refusers sitting
+// at the top of the shared list. So the walk starts with the endpoints verified to
+// serve logs, then falls through to the rest: a hint, not a hardcoding, so a change
+// of policy at either one costs latency rather than the feature. The winner is
+// remembered for the rest of the session.
+//
+// Keeping this off the shared read provider is the point — every search goes through
+// that one, and it must not be reordered or stalled on this feature's behalf.
+const LOG_ENDPOINTS_FIRST = ['https://eth.drpc.org', 'https://mainnet.gateway.tenderly.co'];
+let _logEndpoint = null;
+
+async function anyEndpoint(fn) {
+  const overrides = customRpcs();
+  const list = overrides.length ? overrides : RPC_ENDPOINTS;
+  const prefer = [_logEndpoint, ...LOG_ENDPOINTS_FIRST].filter(u => u && list.includes(u));
+  const ordered = [...new Set([...prefer, ...list])];
+  let lastErr = null;
+  for (const url of ordered) {
+    try {
+      const out = await fn(providerFor(url));
+      _logEndpoint = url;
+      return out;
+    } catch (e) { lastErr = e; }
+  }
+  throw lastErr || new Error('No endpoint served the query');
+}
+
+// One window of .eth registrations, deduped and shuffled. Throws if no endpoint
+// will serve the logs — the caller treats that as "use the local list".
+//
+// Head and window come from the same endpoint inside one walk: the block number is
+// only needed to place the window, so asking the shared provider for it separately
+// would be a second round-trip on a second connection to learn something the log
+// endpoint already knows.
+async function ensLabelSample() {
+  const logs = await anyEndpoint(async p => {
+    const head = await p.getBlockNumber();
+    const span = Math.max(1, head - ENS_WINDOW_BLOCKS - ENS_LOOKBACK_BLOCKS);
+    const from = span + Math.floor(Math.random() * ENS_LOOKBACK_BLOCKS);
+    return p.getLogs({
+      address: ENS_CONTROLLERS,
+      topics: [ENS_NAME_REGISTERED],
+      fromBlock: from,
+      toBlock: from + ENS_WINDOW_BLOCKS
+    });
+  });
+  const out = new Set();
+  for (const log of logs) {
+    const label = usableLabel(decodeEnsLabel(log.data));
+    if (label) out.add(label);
+  }
+  return shuffled([...out]);
+}
+
+// Screen a batch of candidates in a single multicall. allowFailure keeps one bad
+// slot from voiding the batch; a null decode just means that candidate is skipped.
+async function screenAvailable(labels) {
+  const batch = labels.slice(0, RANDOM_BATCH);
+  if (!batch.length) return [];
+  const results = await multicall(batch.map(l => ({ fn: 'isAvailable', args: [l, 0], allowFailure: true })));
+  return batch.filter((l, i) => results[i] && results[i][0]);
+}
+
+// Labels already proven free, drained one per click so repeat draws are instant.
+let _randomPool = [];
+let _randomDrawing = false;
+
+async function randomName() {
+  if (_randomDrawing) return;
+  const input = $('nameInput');
+  const btn = $('randomBtn');
+  const availEl = $('availability');
+  const before = input.value;
+
+  _randomDrawing = true;
+  if (btn) btn.disabled = true;
+  try {
+    if (!_randomPool.length) {
+      availEl.innerHTML = '<span style="opacity:0.5;">' + spinnerSVG(15) + 'Drawing a name…</span>';
+      availEl.classList.add('show');
+
+      let labels = [];
+      try { labels = await ensLabelSample(); } catch (e) { labels = []; }
+      // ENS is the interesting source, not a dependency: top up from the local list
+      // whenever the window came back thin or the endpoint refused it outright.
+      if (labels.length < 8) labels = labels.concat(localLabels(12));
+      try { _randomPool = await screenAvailable(labels); } catch (e) { _randomPool = []; }
+      // Everything drawn is taken, or the screen itself failed. Offer one unscreened
+      // name anyway — doCheckName below is the authority and will say so either way.
+      if (!_randomPool.length) _randomPool = localLabels(1);
+    }
+
+    // Don't clobber a name the user started typing while the draw was in flight —
+    // their own oninput checkName() repaints the box. Checked before the pool is
+    // drawn from, so an abandoned draw doesn't burn the name it would have shown.
+    if (input.value !== before) return;
+    const name = _randomPool.shift();
+    if (!name) { availEl.classList.remove('show'); return; }
+    input.value = name;
+    clearTimeout(checkDebounce);
+    await doCheckName();
+  } finally {
+    _randomDrawing = false;
+    if (btn) btn.disabled = false;
   }
 }
 
