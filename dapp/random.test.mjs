@@ -72,8 +72,8 @@ const CONSTS = ['ENS_CONTROLLERS', 'ENS_NAME_REGISTERED', 'ENS_WINDOW_BLOCKS',
   'ENS_LOOKBACK_BLOCKS', 'RANDOM_BATCH', 'RANDOM_HEADS', 'RANDOM_TAILS',
   'LOG_ENDPOINTS_FIRST'];
 
-const ALL = ['normalizeLabelContract', 'normalizeLabel', 'decodeEnsLabel', 'usableLabel',
-  'localLabels', 'shuffled', 'anyEndpoint', 'ensLabelSample', 'screenAvailable', 'randomName'];
+const ALL = ['decodeEnsLabel', 'usableLabel', 'localLabels', 'shuffled',
+  'anyEndpoint', 'ensLabelSample', 'screenAvailable', 'randomName'];
 
 function makeEl(id) {
   const el = {
@@ -92,8 +92,8 @@ function makeEl(id) {
 // resolves to the sandbox global instead of the source's declaration.
 function sandbox({ lifted = ALL, multicall, ensLabelSample, doCheckName } = {}) {
   const els = new Map();
-  for (const id of ['nameInput', 'randomBtn', 'availability']) els.set(id, makeEl(id));
-  const calls = { multicall: [], ensLabelSample: 0, doCheckName: 0, getLogs: [], withRpc: 0 };
+  for (const id of ['nameInput', 'randomBtn', 'availability', 'feeDisplay', 'commitBtn']) els.set(id, makeEl(id));
+  const calls = { multicall: [], ensLabelSample: 0, doCheckName: 0, getLogs: [], withRpc: 0, hideManage: 0 };
 
   const ctx = {
     ethers, console,
@@ -103,8 +103,9 @@ function sandbox({ lifted = ALL, multicall, ensLabelSample, doCheckName } = {}) 
     $: id => els.get(id) || null,
     spinnerSVG: () => '',
     textEncoder: new TextEncoder(),
-    ens_normalize: undefined,       // exercises the contract-compatible fallback
     checkDebounce: null,
+    hideManage: () => { calls.hideManage++; },
+    localComputeId: label => BigInt(ethers.keccak256(ethers.toUtf8Bytes(label))),
     RPC_ENDPOINTS: ['https://a.example', 'https://b.example'],
     customRpcs: () => [],
     providerFor: url => ({
@@ -114,7 +115,7 @@ function sandbox({ lifted = ALL, multicall, ensLabelSample, doCheckName } = {}) 
     }),
     withRpc: async fn => { calls.withRpc++; return fn({ getBlockNumber: async () => 20000000 }); },
     __getLogs: async () => { throw new Error('no endpoint stubbed'); },
-    multicall: multicall || (async c => { calls.multicall.push(c); return c.map(() => [true]); }),
+    multicall: multicall || (async c => { calls.multicall.push(c); return c.map(x => [x.fn === 'getPremium' ? 0n : true]); }),
     doCheckName: doCheckName || (async () => { calls.doCheckName++; }),
   };
   if (ensLabelSample) ctx.ensLabelSample = async () => { calls.ensLabelSample++; return ensLabelSample(); };
@@ -218,32 +219,59 @@ function eq(name, got, want) {
   eq('localLabels: no unusable pair in the word lists', every, []);
 }
 
-// ── screenAvailable: one batched call, only free names come back ─────────────
+// ── screenAvailable: free, and at the plain fee ──────────────────────────────
 {
+  // isAvailable answers per label; every premium reads zero.
   const { run, calls } = sandbox({
-    multicall: async c => { calls.multicall.push(c); return c.map((x, i) => i % 2 ? [false] : [true]); }
+    multicall: async c => {
+      calls.multicall.push(c);
+      return c.map((x, i) => x.fn === 'getPremium' ? [0n] : [Math.floor(i / 2) % 2 === 0]);
+    }
   });
   const got = await run(`screenAvailable(['alpha1','beta12','gamma1','delta1'])`);
   eq('screen: keeps only isAvailable=true', got, ['alpha1', 'gamma1']);
   eq('screen: one multicall for the batch', calls.multicall.length, 1);
   eq('screen: asks isAvailable at the top level', calls.multicall[0][0].fn, 'isAvailable');
   eq('screen: parentId 0', calls.multicall[0][0].args[1], 0);
+  eq('screen: getPremium rides along in the same batch', calls.multicall[0][1].fn, 'getPremium');
   ok('screen: allowFailure so one bad slot cannot void the batch',
     calls.multicall[0].every(c => c.allowFailure === true));
   eq('screen: empty in, empty out', await run(`screenAvailable([])`), []);
 }
 {
+  // A name that lapsed and cleared its 90-day grace is available AND carries a
+  // premium. Registerable, priced correctly by the app — just not a draw.
+  const { run } = sandbox({
+    multicall: async c => c.map((x, i) =>
+      x.fn === 'getPremium' ? [i === 1 ? 100000000000000000000n : 0n] : [true])
+  });
+  eq('screen: a premium name is not drawn',
+    await run(`screenAvailable(['alpha1','beta12'])`), ['beta12']);
+}
+{
+  // Can't read the premium, can't promise the price.
+  const { run } = sandbox({
+    multicall: async c => c.map((x, i) =>
+      x.fn === 'getPremium' ? (i === 1 ? null : [0n]) : [true])
+  });
+  eq('screen: an unreadable premium drops the candidate',
+    await run(`screenAvailable(['alpha1','beta12'])`), ['beta12']);
+}
+{
   const { run, calls } = sandbox({
-    multicall: async c => { calls.multicall.push(c); return c.map(() => [true]); }
+    multicall: async c => { calls.multicall.push(c); return c.map(x => [x.fn === 'getPremium' ? 0n : true]); }
   });
   const many = Array.from({ length: 200 }, (_, i) => 'name' + String(i).padStart(3, '0'));
   const got = await run(`screenAvailable(${JSON.stringify(many)})`);
   eq('screen: batch capped at RANDOM_BATCH', got.length, run('RANDOM_BATCH'));
-  eq('screen: and only that many go on the wire', calls.multicall[0].length, run('RANDOM_BATCH'));
+  eq('screen: two calls per candidate, one round-trip',
+    calls.multicall[0].length, run('RANDOM_BATCH') * 2);
 }
 {
   // A null slot is a reverted/undecodable sub-call, not an available name.
-  const { run } = sandbox({ multicall: async c => c.map((x, i) => i === 0 ? null : [true]) });
+  const { run } = sandbox({
+    multicall: async c => c.map((x, i) => x.fn === 'getPremium' ? [0n] : (i === 0 ? null : [true]))
+  });
   eq('screen: null decode is not "available"',
     await run(`screenAvailable(['alpha1','beta12'])`), ['beta12']);
 }
@@ -346,6 +374,28 @@ const withoutSample = ALL.filter(n => n !== 'ensLabelSample');
   eq('draw: and no second batch', calls.multicall.length, 1);
   ok('draw: second click is a different name', els.get('nameInput').value !== first);
   eq('draw: but still runs the lookup', calls.doCheckName, 2);
+}
+
+{
+  // While a draw is in flight the box no longer describes the input, so the
+  // previous name's fee, manage panel and armed Commit button must go with it —
+  // they used to sit under the spinner still pointing at the old name.
+  let release;
+  const gate = new Promise(r => { release = r; });
+  const { run, els, calls } = sandbox({
+    lifted: withoutSample,
+    ensLabelSample: async () => { await gate; return ['astradyne', 'venchi', 'morlo']; },
+  });
+  els.get('feeDisplay').textContent = 'Fee: 0.0005 ETH';
+  els.get('commitBtn').disabled = false;
+  const drawing = run('randomName()');
+  eq('draw: the previous name\'s fee is cleared', els.get('feeDisplay').textContent, '');
+  eq('draw: Commit is disarmed while drawing', els.get('commitBtn').disabled, true);
+  eq('draw: and its manage panel is closed', calls.hideManage, 1);
+  ok('draw: the button itself is disabled', els.get('randomBtn').disabled);
+  release();
+  await drawing;
+  ok('draw: the button comes back', !els.get('randomBtn').disabled);
 }
 
 {

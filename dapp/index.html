@@ -852,7 +852,7 @@ try{if(localStorage.getItem('wns_dao_banner')==='1'){var _db=document.getElement
     <input type="text" id="nameInput" placeholder="yourname" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" enterkeyhint="search" oninput="checkName()" onkeydown="nameInputKey(event)">
     <span class="suffix">.wei</span>
   </div>
-  <div id="availability" class="availability"></div>
+  <div id="availability" class="availability" aria-live="polite"></div>
   <div id="feeDisplay" class="fee"></div>
   <div class="free-cta" onclick="toggleFreePanel()">free names available</div>
   <div id="freePanel" class="free-panel">
@@ -1736,15 +1736,13 @@ function decodeEnsLabel(data) {
 
 // Keep a candidate only if it is plain lowercase ASCII starting with a letter, 5-15
 // chars. That drops the emoji/CJK/hyphenated end of ENS along with the 3- and
-// 4-character names (which price at 0.05 / 0.01 ETH here, not the 0.0005 base fee) —
-// a random draw should not quietly hand someone a 100x bill. The ENSIP-15 pass is
-// belt-and-braces: on this character set it can only confirm the label, never rewrite
-// it, so what the button shows is exactly what a commit would register.
+// 4-character names, which price at 0.05 / 0.01 ETH here rather than the 0.0005 base
+// fee. The character class is its own ENSIP-15 guarantee — [a-z0-9] normalizes to
+// itself — so what the button shows is exactly what a commit would register.
 function usableLabel(raw) {
   if (typeof raw !== 'string') return null;
   const label = raw.toLowerCase();
-  if (!/^[a-z][a-z0-9]{4,14}$/.test(label)) return null;
-  return normalizeLabel(label) === label ? label : null;
+  return /^[a-z][a-z0-9]{4,14}$/.test(label) ? label : null;
 }
 
 // Fallback corpus, used when eth_getLogs is unavailable — several public endpoints
@@ -1835,13 +1833,25 @@ async function ensLabelSample() {
   return shuffled([...out]);
 }
 
-// Screen a batch of candidates in a single multicall. allowFailure keeps one bad
-// slot from voiding the batch; a null decode just means that candidate is skipped.
+// Screen a batch in a single multicall: free, and at the plain fee. isAvailable()
+// turns true the moment a lapsed name clears its 90-day grace, which is also when
+// getPremium() is at its maximum — priced correctly by the app either way, but not
+// what a random draw is for. Only names previously held on .wei can carry one, so it
+// rarely fires. allowFailure keeps one bad slot from voiding the batch; both halves
+// ride in the same round-trip.
 async function screenAvailable(labels) {
   const batch = labels.slice(0, RANDOM_BATCH);
   if (!batch.length) return [];
-  const results = await multicall(batch.map(l => ({ fn: 'isAvailable', args: [l, 0], allowFailure: true })));
-  return batch.filter((l, i) => results[i] && results[i][0]);
+  const calls = [];
+  for (const label of batch) {
+    calls.push({ fn: 'isAvailable', args: [label, 0], allowFailure: true });
+    calls.push({ fn: 'getPremium', args: [localComputeId(label)], allowFailure: true });
+  }
+  const results = await multicall(calls);
+  return batch.filter((l, i) => {
+    const free = results[i * 2], premium = results[i * 2 + 1];
+    return !!(free && free[0] && premium && premium[0] === 0n);
+  });
 }
 
 // Labels already proven free, drained one per click so repeat draws are instant.
@@ -1856,11 +1866,17 @@ async function randomName() {
   const before = input.value;
 
   _randomDrawing = true;
-  if (btn) btn.disabled = true;
+  btn.disabled = true;
   try {
     if (!_randomPool.length) {
       availEl.innerHTML = '<span style="opacity:0.5;">' + spinnerSVG(15) + 'Drawing a name…</span>';
       availEl.classList.add('show');
+      // Nothing below the box describes the input any more: the previous name's fee,
+      // its manage panel and an armed Commit button would otherwise sit under the
+      // spinner, still pointing at a name that is about to be replaced.
+      $('feeDisplay').textContent = '';
+      $('commitBtn').disabled = true;
+      hideManage();
 
       let labels = [];
       try { labels = await ensLabelSample(); } catch (e) { labels = []; }
@@ -1884,7 +1900,7 @@ async function randomName() {
     await doCheckName();
   } finally {
     _randomDrawing = false;
-    if (btn) btn.disabled = false;
+    btn.disabled = false;
   }
 }
 
