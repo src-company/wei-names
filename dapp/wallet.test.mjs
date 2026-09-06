@@ -215,6 +215,33 @@ async function reverseHarness(chain) {
 }
 
 {
+  // Unsetting the display name expects '' — the empty string is a real expectation,
+  // not "no expectation". Read as falsy it degraded to no expectation at all, leaving
+  // only the block-height gate: and height is the weak signal, since eth_blockNumber
+  // and eth_call can be answered by different backends. Here the height is already
+  // past the tx while the call still serves the pre-tx name, so the gate opens and
+  // the first answer is the name just cleared — cached and painted back into the
+  // corner, where nothing re-polls it.
+  let reads = 0;
+  const chain = { height: 101, reverse: () => (++reads > 2 ? '' : 'old.wei') };
+  const h = await reverseHarness(chain);
+  reads = 0;                                            // discount the connect-time read
+  h.els.get('walletBtn').textContent = ADDR.slice(0, 6) + '...' + ADDR.slice(-4);
+  h.store['wns_rev:' + ADDR.toLowerCase()] = 'old.wei';
+
+  h.win.resolveWeiName(ADDR, { minBlock: 101, expect: '', tries: 6, delayMs: 20 });
+  await sleep(30);
+  eq('unset, call still pre-tx: the cleared name is not re-cached',
+     h.store['wns_rev:' + ADDR.toLowerCase()], 'old.wei');
+
+  await sleep(400);
+  eq('unset, call caught up: the cached name is dropped',
+     h.store['wns_rev:' + ADDR.toLowerCase()], undefined);
+  eq('unset, call caught up: the label is the bare address',
+     h.els.get('walletBtn').textContent, ADDR.slice(0, 6) + '...' + ADDR.slice(-4));
+}
+
+{
   // The bare call (connect / account switch) is still a single unconditional read.
   let calls = 0;
   const h = await reverseHarness({ height: 9, reverse: () => { calls++; return 'a.wei'; } });

@@ -530,9 +530,11 @@ let _resolveSeq = 0;
 // setPrimaryName only needs ownership, but reverseResolve also requires resolve() to
 // point back at you, so an owner who set the record elsewhere really does get "".
 function resolveWeiName(addr, opts) {
-  const expect = opts && opts.expect ? String(opts.expect).toLowerCase() : null;
+  // expect: '' is a real expectation ("no name"), as unsetting the display name
+  // wants — so test it against null, not for truthiness.
+  const expect = opts && opts.expect != null ? String(opts.expect).toLowerCase() : null;
   const minBlock = Number(opts && opts.minBlock) || 0;
-  const tries = (opts && opts.tries) || ((expect || minBlock) ? 10 : 1);
+  const tries = (opts && opts.tries) || ((expect !== null || minBlock) ? 10 : 1);
   const delayMs = (opts && opts.delayMs) || 1200;
   const seq = ++_resolveSeq;
   const live = () => seq === _resolveSeq && _connectedAddress === addr;
@@ -575,7 +577,7 @@ function resolveWeiName(addr, opts) {
       catch (_) { continue; }
       if (!live()) return;
       // Still the pre-tx answer: don't cache it, don't paint it, just ask again.
-      if (expect && label !== expect && !last) continue;
+      if (expect !== null && label !== expect && !last) continue;
       paint(label);
       return;
     }

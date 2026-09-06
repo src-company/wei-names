@@ -1050,6 +1050,7 @@ const ABI = [
   'function getFullName(uint256 tokenId) view returns (string)',
   'function expiresAt(uint256 tokenId) view returns (uint256)',
   'function records(uint256 tokenId) view returns (string label, uint256 parent, uint64 expiresAt, uint64 epoch, uint64 parentEpoch)',
+  'function primaryName(address owner) view returns (uint256)',
   // Write functions
   'function setAddr(uint256 tokenId, address addr)',
   'function setText(uint256 tokenId, string key, string value)',
@@ -3073,6 +3074,10 @@ async function showManage(tokenId, name) {
     // to the extra call rather than trusting a locally derived id.
     const parentIdGuess = name.includes('.') ? computeIdFull(name.split('.').slice(1).join('.')) : null;
     const parentSlot = 4 + textKeys.length;
+    // Rides along so the actions can offer "Unset Display Name" on the one name
+    // that currently is it. Appended last, after the optional parent slot, so the
+    // index arithmetic above stays put.
+    const primarySlot = parentSlot + (parentIdGuess !== null ? 1 : 0);
 
     // Batch all reads into one RPC call (including text records). Retry once:
     // a single flaky public-RPC aggregate3 call — or an allowFailure ownerOf
@@ -3087,7 +3092,8 @@ async function showManage(tokenId, name) {
           { fn: 'records', args: [tokenId], allowFailure: true },
           { fn: 'contenthash', args: [tokenId], allowFailure: true },
           ...textKeys.map(key => ({ fn: 'text', args: [tokenId, key], allowFailure: true })),
-          ...(parentIdGuess !== null ? [{ fn: 'records', args: [parentIdGuess], allowFailure: true }] : [])
+          ...(parentIdGuess !== null ? [{ fn: 'records', args: [parentIdGuess], allowFailure: true }] : []),
+          ...(_connectedAddress ? [{ fn: 'primaryName', args: [_connectedAddress], allowFailure: true }] : [])
         ]);
       } catch (_) {
         results = null;
@@ -3111,6 +3117,12 @@ async function showManage(tokenId, name) {
     });
 
     const isOwner = _connectedAddress && owner.toLowerCase() === _connectedAddress.toLowerCase();
+    // Is THIS the name the connected address currently shows as? setPrimaryName is
+    // keyed on msg.sender alone, so clearing it neither needs ownership nor an
+    // active name — which is exactly when it's wanted: a display name that expired,
+    // or one transferred away, is still yours to take down.
+    const isPrimary = !!(_connectedAddress && results[primarySlot]?.[0] != null &&
+                         BigInt(results[primarySlot][0]) === BigInt(tokenId));
     const expiryDate = record?.expiresAt ? new Date(Number(record.expiresAt) * 1000).toLocaleDateString() : null;
     const isTopLevel = record?.parent === 0n;
     // A top-level name past expiresAt (still shown because it hasn't cleared grace,
@@ -3210,10 +3222,15 @@ async function showManage(tokenId, name) {
     }
     $('manageInfo').innerHTML = infoHtml;
 
+    // setPrimaryName(0) is the one write that always succeeds — it touches only the
+    // caller's own row — so it is offered wherever this name is the display name,
+    // including the branches where every other action would revert.
+    const unsetBtn = isPrimary ? `<button onclick="doUnsetPrimary()">Unset Display Name</button>` : '';
+
     // Build actions if owner (suppress for stale subdomains — writes would revert)
     if (isOwner && isExpiredInGrace) {
       // Expired (in grace): renewal is the only action that succeeds on-chain.
-      $('manageActions').innerHTML = `<button onclick="showManageForm('renew')">Renew</button>`;
+      $('manageActions').innerHTML = `<button onclick="showManageForm('renew')">Renew</button>` + unsetBtn;
     } else if (isOwner && !isSubInactive) {
       let actionsHtml = `
         <button onclick="showManageForm('transfer')">Transfer</button>
@@ -3222,14 +3239,14 @@ async function showManage(tokenId, name) {
         <button onclick="showManageForm('setText')">Set Text</button>
         <button onclick="showManageForm('subdomain')">Subdomain</button>
         <button onclick="showManageForm('subSales')">Subdomain Sales</button>
-        <button onclick="doSetPrimary()">Set as Display Name</button>
+        ${unsetBtn || `<button onclick="doSetPrimary()">Set as Display Name</button>`}
       `;
       if (isTopLevel) {
         actionsHtml += `<button onclick="showManageForm('renew')">Renew</button>`;
       }
       $('manageActions').innerHTML = actionsHtml;
     } else if (isSubInactive) {
-      $('manageActions').innerHTML = '';
+      $('manageActions').innerHTML = unsetBtn;
     } else {
       // Distinguish "no wallet" from "wrong wallet". Collapsing both into
       // "Connect as owner" reads as the panel not noticing a wallet that is
@@ -3239,7 +3256,8 @@ async function showManage(tokenId, name) {
       const hint = _connectedAddress
         ? 'Connected as ' + _connectedAddress.slice(0, 6) + '...' + _connectedAddress.slice(-4) + ' — not this name\'s owner'
         : 'Connect as owner to manage';
-      $('manageActions').innerHTML = '<span style="font-size:12px;opacity:0.5;">' + escapeHtml(hint) + '</span>';
+      $('manageActions').innerHTML = unsetBtn +
+        '<span style="font-size:12px;opacity:0.5;">' + escapeHtml(hint) + '</span>';
     }
 
     if (stale()) return false;
@@ -3795,6 +3813,39 @@ async function doSetPrimary() {
     if (typeof resolveWeiName === 'function') {
       resolveWeiName(addr, { minBlock: receipt && receipt.blockNumber, expect: name + '.wei' });
     }
+    // Repaint the panel so this name's action flips to "Unset Display Name".
+    if (name) refreshAfterTx(name, panelRepainted, receipt);
+  } catch (e) {
+    handleError(e);
+  } finally {
+    isProcessing = false;
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function doUnsetPrimary() {
+  if (isProcessing || !contract) return;
+  const name = currentTokenName;
+  const addr = _connectedAddress;
+
+  isProcessing = true;
+  const btn = (typeof event !== 'undefined' && event?.target) || null; if (btn) btn.disabled = true;
+  try {
+    showStatus('Clearing your display name...', '');
+    // Token 0 is the sentinel for "none": setPrimaryName skips every ownership and
+    // expiry check on it, so this works even for a name that has expired or moved on.
+    const tx = await wcTransaction(contract.setPrimaryName(0), 'Approve clearing display name');
+    showStatus('Waiting for confirmation...', '', tx.hash);
+    const receipt = await waitForTx(tx);
+    showStatus('Display name cleared — you now show as your address.', 'success', tx.hash);
+    if (addr) $('walletBtn').textContent = addr.slice(0, 6) + '...' + addr.slice(-4);
+    // Same read-after-write gate as doSetPrimary: expect '' (no name), or the public
+    // endpoints hand back the name just cleared and it gets re-cached and repainted.
+    if (typeof resolveWeiName === 'function' && addr) {
+      resolveWeiName(addr, { minBlock: receipt && receipt.blockNumber, expect: '' });
+    }
+    // Repaint the panel so the button flips back to "Set as Display Name".
+    if (name) refreshAfterTx(name, panelRepainted, receipt);
   } catch (e) {
     handleError(e);
   } finally {
