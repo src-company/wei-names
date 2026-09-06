@@ -5991,8 +5991,8 @@ function namesRender() {
        + (grace.length === 1 ? 'it' : 'them') + '.</div>';
   } else if (soon.length) {
     h += '<div class="names-alert">' + soon.length + ' name' + (soon.length === 1 ? '' : 's')
-       + ' expiring within ' + Math.round(NAMES_SOON / 86400) + ' days. Renewing adds a year from '
-       + 'the current expiry, so it costs nothing to do early.</div>';
+       + ' expiring within ' + Math.round(NAMES_SOON / 86400) + ' days. Renewal extends from the '
+       + 'current expiry rather than from today, so nothing is lost by doing it early.</div>';
   }
 
   h += '<div class="names-rows">';

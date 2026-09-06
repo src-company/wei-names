@@ -549,6 +549,12 @@ const classified = (over = {}) => Object.assign(
   const { html } = render([classified({ status: 'soon', expires: REAL + 9 * 86400 })]);
   ok('render: an expiry inside the horizon is called out',
     html.includes('expiring within 30 days'), html.slice(0, 400));
+  // NameNFT extends from the current expiry, not from today (renew(): "Always
+  // extend from current expiry"). Said without naming a term length, so a
+  // multi-year renewal would not turn the sentence into a lie.
+  ok('render: and says why renewing early wastes nothing',
+    html.includes('extends from the current expiry rather than from today')
+    && !/adds a year/.test(html), html.slice(0, 400));
   ok('render: as a countdown', html.includes('expires in 9 days'), html);
 }
 {
