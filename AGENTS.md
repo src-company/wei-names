@@ -39,7 +39,8 @@ node server.js                # run locally (GET/HEAD only)
 **Dapp**: no build — open `dapp/index.html` (or serve the folder). It's static.
 ```bash
 npm run test:dapp    # wallet connect paths, roll.wei panel / token-id parsing,
-                     # manage panel, random-name draw (ENS log decoding + screening)
+                     # manage panel, random-name draw (ENS log decoding + screening),
+                     # owned-names scan (Transfer log -> ownerOf, expiry classing)
 ```
 Both suites lift functions straight out of the shipping source (`index.html`,
 `wallet.js`) into a `vm` sandbox with a DOM shim — no network, no chain, no deps

@@ -735,6 +735,30 @@ body.modal-open { overflow: hidden; }
 .roll-win-row .p { font-variant-numeric:tabular-nums; opacity:0.6; flex:0 0 auto; }
 .roll-note { font-size:10px; opacity:0.45; line-height:1.5; margin-top:14px; }
 
+
+/* ── your names ──────────────────────────────────────── */
+.names-panel { display:none; margin-top:16px; }
+.names-panel.show { display:block; }
+.names-sum { font-size:11px; text-transform:uppercase; letter-spacing:0.06em; opacity:0.5; margin-bottom:12px; }
+.names-alert { border:1px solid var(--border); padding:12px; margin-bottom:16px; font-size:12px; line-height:1.6; }
+.names-rows { max-height:420px; overflow-y:auto; overflow-x:hidden; margin:0 -8px; padding:0 8px; }
+.names-row { display:flex; justify-content:space-between; align-items:baseline; gap:12px; font-size:13px;
+             padding:8px; margin:0 -8px; border-bottom:1px solid var(--border-muted);
+             color:inherit; text-decoration:none; }
+.names-row:hover { background:var(--manage-bg); }
+.names-row .n { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.names-row .p { font-variant-numeric:tabular-nums; opacity:0.5; flex:0 0 auto; font-size:11px; }
+.names-row.dim .n, .names-row.dim .p { opacity:0.4; }
+.names-tag { font-size:9px; text-transform:uppercase; letter-spacing:0.06em; opacity:0.55;
+             border:1px solid var(--border-muted); padding:1px 5px; margin-left:6px; vertical-align:1px; }
+.names-tag.warn { opacity:1; border-color:currentColor; }
+.names-note { font-size:10px; opacity:0.45; line-height:1.5; margin-top:14px; }
+.names-more { background:none; border:none; color:var(--fg); font-family:inherit; font-size:11px;
+              letter-spacing:0.04em; opacity:0.55; padding:6px 0; width:auto; cursor:pointer;
+              border-bottom:1px solid var(--border-muted); margin-top:10px; }
+.names-more:hover { opacity:1; }
+.names-more:disabled { cursor:default; opacity:0.3; }
+
 </style>
 </head>
 <body>
@@ -889,6 +913,14 @@ try{if(localStorage.getItem('wns_dao_banner')==='1'){var _db=document.getElement
 <div class="section">
   <button id="commitBtn" onclick="doCommit()" disabled>Commit</button>
   <div style="font-size:11px;opacity:0.4;margin-top:16px;letter-spacing:0.05em;">a simple namespace on ethereum named after the smallest unit of ether</div>
+</div>
+
+<!-- Your names -->
+<div id="namesSection" class="send-section" style="display:none;">
+  <a href="#" onclick="toggleNames(event)" class="send-toggle" id="namesToggle">your names →</a>
+  <div id="namesPanel" class="names-panel">
+    <div id="namesBody"></div>
+  </div>
 </div>
 
 <!-- Send ETH -->
@@ -1791,11 +1823,16 @@ function shuffled(arr) {
 const LOG_ENDPOINTS_FIRST = ['https://eth.drpc.org', 'https://mainnet.gateway.tenderly.co'];
 let _logEndpoint = null;
 
-async function anyEndpoint(fn) {
+//
+// `prefer` overrides the head of the walk for a caller whose query has different
+// requirements — the owned-names scan spans the contract's whole history, where
+// this function's usual first pick is a guaranteed refusal (see NAMES_LOG_FIRST).
+async function anyEndpoint(fn, prefer) {
   const overrides = customRpcs();
   const list = overrides.length ? overrides : RPC_ENDPOINTS;
-  const prefer = [_logEndpoint, ...LOG_ENDPOINTS_FIRST].filter(u => u && list.includes(u));
-  const ordered = [...new Set([...prefer, ...list])];
+  const head = (prefer && prefer.length ? prefer : [_logEndpoint, ...LOG_ENDPOINTS_FIRST])
+    .filter(u => u && list.includes(u));
+  const ordered = [...new Set([...head, ...list])];
   let lastErr = null;
   for (const url of ordered) {
     try {
@@ -5625,10 +5662,413 @@ async function rollClaim(r) {
 }
 
 
+// --- Your names ---------------------------------------------------------------
+//
+// NameNFT is not ERC721Enumerable, so nothing on chain lists an address's names.
+// What there is: a name only ever arrives by a Transfer, and Transfer indexes its
+// recipient. So one filtered eth_getLogs across the contract's whole life is the
+// complete set of names an address has ever received — one log for a typical
+// holder, a few hundred for the largest — and ownerOf then says which are still
+// held. Two round-trips, no indexer, no API key.
+//
+// Two things the chain will not hand you straight, and both are load-bearing:
+//
+//   ownerOf is not expiry-aware. A name long past its grace still names its last
+//   owner, and still counts in balanceOf. "Owned" and "held" are different sets,
+//   so expiry is a status on the row here, never a filter before it.
+//
+//   A subdomain's records().expiresAt is 0 — it lives exactly as long as the root
+//   above it does, and namesRootExpiry() is what supplies that. Reading the 0 at
+//   face value dates every subdomain to 1970.
+
+const NAMES_DEPLOY_BLOCK = 24360470;      // NameNFT's first block
+const NAMES_TRANSFER = ethers.id('Transfer(address,address,uint256)');
+// Endpoints measured to serve eth_getLogs over the full range since deploy. Most
+// public nodes cap it far below (drpc 10k blocks, blastapi 10, mevblocker 10k,
+// publicnode refuses archive queries outright), and LOG_ENDPOINTS_FIRST is
+// ordered for the ENS draw's 800-block window instead — its head would cost this
+// scan a certain refusal before it got anywhere.
+const NAMES_LOG_FIRST = ['https://mainnet.gateway.tenderly.co'];
+const NAMES_GRACE = 90 * 86400;           // GRACE_PERIOD in NameNFT
+const NAMES_SOON = 30 * 86400;            // how early "expiring soon" starts
+const NAMES_CHUNK = 249;                  // subcalls per aggregate3, 3 per name
+// Worst first: what needs doing outranks what is merely true.
+const NAMES_RANK = { grace: 0, soon: 1, active: 2, unknown: 3, orphan: 4, expired: 5 };
+
+let _namesState = null;   // last completed scan, kept for instant repaints
+let _namesCount = 0;      // what the toggle is currently advertising
+let _namesSeq = 0;        // invalidates a scan the account changed out from under
+let _namesScanning = false;
+
+// Every tokenId this address has ever received. Cached in localStorage with the
+// block the scan reached, so the full-range walk is paid once per address per
+// browser and every later open only scans the blocks since. Nothing here is
+// trusted: ownerOf re-checks every id on the way to the screen.
+async function namesReceived(addr, force) {
+  const key = 'wns:names:' + addr.toLowerCase();
+  let cached = [], from = NAMES_DEPLOY_BLOCK;
+  try {
+    const c = JSON.parse(localStorage.getItem(key) || 'null');
+    if (c && Array.isArray(c.ids) && Number.isInteger(c.head)) {
+      // Shape-check what comes back out: these ids go straight into calldata, and
+      // one malformed entry from a truncated or hand-edited store would throw the
+      // whole batch away rather than cost its own row.
+      cached = c.ids.filter(id => typeof id === 'string' && /^0x[0-9a-f]{64}$/i.test(id));
+      if (!force && cached.length === c.ids.length) from = c.head + 1;
+    }
+  } catch (_) {}
+  const topic = '0x' + addr.toLowerCase().replace(/^0x/, '').padStart(64, '0');
+  let head, logs;
+  try {
+    ({ head, logs } = await anyEndpoint(async p => {
+      const at = await p.getBlockNumber();
+      // An endpoint a few blocks behind the one that wrote the cache would ask for
+      // a backwards range and be told so; there is simply nothing new to read.
+      if (at < from) return { head: at, logs: [] };
+      return {
+        head: at,
+        logs: await p.getLogs({
+          address: CONTRACT,
+          topics: [NAMES_TRANSFER, null, topic],
+          fromBlock: from,
+          toBlock: at
+        })
+      };
+    }, NAMES_LOG_FIRST));
+  } catch (e) {
+    // No endpoint would serve the query. A cached list is stale but real, and
+    // every id in it is about to be re-read from chain anyway — showing it beats
+    // showing nothing. With no cache there is nothing honest to show.
+    if (cached.length) return { ids: cached, stale: true };
+    throw e;
+  }
+  const ids = [...new Set([...cached, ...logs.map(l => l.topics[3])])];
+  try { localStorage.setItem(key, JSON.stringify({ head, ids })); } catch (_) {}
+  return { ids, stale: false };
+}
+
+// ownerOf + getFullName + records for each id. Chunked at the same ceiling the
+// roll field uses; a few hundred subcalls is ~56 KB of calldata, which every
+// endpoint in the list accepts, and 249 keeps a name's three reads in one chunk.
+// A null row means the read failed or the token is gone — never "not yours".
+async function namesRead(ids) {
+  const calls = [];
+  for (const id of ids) {
+    calls.push({ target: CONTRACT, iface: iface, fn: 'ownerOf', args: [id] });
+    calls.push({ target: CONTRACT, iface: iface, fn: 'getFullName', args: [id] });
+    calls.push({ target: CONTRACT, iface: iface, fn: 'records', args: [id] });
+  }
+  const res = [];
+  for (let i = 0; i < calls.length; i += NAMES_CHUNK) {
+    res.push(...await aggregate3(calls.slice(i, i + NAMES_CHUNK)));
+  }
+  return ids.map((id, i) => {
+    const own = res[i * 3], full = res[i * 3 + 1], rec = res[i * 3 + 2];
+    if (!own || !rec) return null;
+    // records() -> (string label, uint256 parent, uint64 expiresAt, uint64 epoch,
+    // uint64 parentEpoch). Decoding it without the leading label silently shifts
+    // every field after it, so read it positionally and in that order.
+    const label = String(rec[0]), parent = BigInt(rec[1]), expiresAt = Number(rec[2]);
+    return {
+      id,
+      owner: String(own[0]).toLowerCase(),
+      // "" from getFullName means a parent was re-registered under this name —
+      // the token survives, the name it spelled does not.
+      name: full ? String(full[0]) : '',
+      label, parent, expiresAt
+    };
+  });
+}
+
+// The root label of a full name: the last label before .wei, and the one whose
+// registration everything below it hangs on.
+function namesRoot(full) {
+  if (!full) return '';
+  const parts = String(full).replace(/\.wei$/, '').split('.');
+  return parts[parts.length - 1] || '';
+}
+
+// Expiry for every root the rows depend on. Roots this address holds are already
+// in hand, so only the rest cost anything — and only when a subdomain sits under
+// one, which for most holders is no extra call at all.
+async function namesRootExpiry(rows) {
+  const known = {};
+  for (const r of rows) if (r && r.parent === 0n && r.label) known[r.label] = r.expiresAt;
+  const missing = [...new Set(rows
+    .filter(r => r && r.parent !== 0n && r.name)
+    .map(r => namesRoot(r.name))
+    .filter(l => l && !(l in known)))];
+  if (!missing.length) return known;
+  const res = await aggregate3(missing.map(l => ({
+    target: CONTRACT, iface: iface, fn: 'expiresAt', args: [localComputeId(l)]
+  })));
+  missing.forEach((l, i) => { if (res[i]) known[l] = Number(res[i][0]); });
+  return known;
+}
+
+// Raw reads -> rows the panel can render, filtered to what this address still
+// owns and ordered worst-first. `now` is passed in so the ordering is a pure
+// function of the chain state and one clock reading.
+function namesClassify(rows, me, rootExpiry, now) {
+  const meLc = String(me).toLowerCase();
+  return rows.filter(r => r && r.owner === meLc).map(r => {
+    const sub = r.parent !== 0n;
+    const exp = sub ? rootExpiry[namesRoot(r.name)] : r.expiresAt;
+    let status;
+    if (sub && !r.name) status = 'orphan';
+    else if (!exp) status = 'unknown';
+    else if (now > exp + NAMES_GRACE) status = 'expired';
+    else if (now > exp) status = 'grace';
+    else if (exp - now <= NAMES_SOON) status = 'soon';
+    else status = 'active';
+    return { id: r.id, name: r.name, label: r.label, sub, expires: exp || 0, status };
+  }).sort(namesOrder);
+}
+
+function namesOrder(a, b) {
+  const ra = NAMES_RANK[a.status], rb = NAMES_RANK[b.status];
+  if (ra !== rb) return (ra === undefined ? 9 : ra) - (rb === undefined ? 9 : rb);
+  if (a.sub !== b.sub) return a.sub ? 1 : -1;          // a name before what hangs off it
+  if (a.expires !== b.expires) return a.expires - b.expires;
+  return (a.name || a.label).localeCompare(b.name || b.label);
+}
+
+async function namesScan(force) {
+  const me = window._connectedAddress;
+  if (!me || _namesScanning) return;
+  const seq = ++_namesSeq;
+  _namesScanning = true;
+  const body = $('namesBody');
+  if (body && !_namesState) body.innerHTML = '<div class="names-sum">scanning…</div>';
+  try {
+    const { ids, stale } = await namesReceived(me, force);
+    if (seq !== _namesSeq) return;
+    // balanceOf counts exactly the tokens ownerOf will attribute to this address,
+    // so it is a free completeness check on the log scan: a shortfall means the
+    // walk missed something and the panel says so instead of quietly showing less.
+    const [meta, rows] = await Promise.all([
+      aggregate3([
+        { target: CONTRACT, iface: erc20BalNonceIface, fn: 'balanceOf', args: [me] },
+        { target: CONTRACT, iface: iface, fn: 'primaryName', args: [me] }
+      ]).catch(() => null),
+      ids.length ? namesRead(ids) : Promise.resolve([])
+    ]);
+    if (seq !== _namesSeq) return;
+    const rootExpiry = await namesRootExpiry(rows);
+    if (seq !== _namesSeq) return;
+    const meLc = me.toLowerCase();
+    const held = rows.filter(r => r && r.owner === meLc).length;
+    const balance = meta && meta[0] ? Number(meta[0][0]) : null;
+    _namesState = {
+      addr: meLc,
+      rows: namesClassify(rows, me, rootExpiry, Math.floor(Date.now() / 1000)),
+      primary: meta && meta[1] ? BigInt(meta[1][0]) : 0n,
+      missing: balance != null ? Math.max(0, balance - held) : 0,
+      stale
+    };
+    _namesCount = held;
+    namesSetToggle();
+    namesRender();
+  } catch (e) {
+    if (seq !== _namesSeq) return;
+    if (body) body.innerHTML = '<div class="names-sum">' + escapeHtml(namesError(e)) + '</div>'
+      + '<button class="names-more" onclick="namesScan(true)">try again</button>';
+  } finally {
+    if (seq === _namesSeq) _namesScanning = false;
+  }
+}
+
+function namesError(e) {
+  const msg = ((e && (e.message || e.reason)) || String(e)).toLowerCase();
+  if (msg.includes('range') || msg.includes('block') || msg.includes('log') || msg.includes('archive')) {
+    return 'No available RPC would scan the logs this needs. Set your own node under the gear icon and try again.';
+  }
+  return 'Could not read your names right now.';
+}
+
+function namesDate(ts) {
+  if (!ts) return '';
+  const d = new Date(ts * 1000);
+  try {
+    return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+  } catch (_) { return d.toISOString().slice(0, 10); }
+}
+
+function namesDays(secs) {
+  const d = Math.max(0, Math.round(secs / 86400));
+  return d === 0 ? 'today' : d === 1 ? '1 day' : d + ' days';
+}
+
+// The right-hand column: the one date that matters for this row's status.
+function namesWhen(r, now) {
+  if (r.status === 'orphan') return 'parent re-registered';
+  if (!r.expires) return '';
+  if (r.status === 'expired') return 'expired ' + namesDate(r.expires);
+  if (r.status === 'grace') return 'open to anyone in ' + namesDays(r.expires + NAMES_GRACE - now);
+  if (r.status === 'soon') return 'expires in ' + namesDays(r.expires - now);
+  return 'expires ' + namesDate(r.expires);
+}
+
+function namesRow(r, st, now) {
+  const dim = r.status === 'expired' || r.status === 'orphan';
+  let tag = '';
+  if (st.primary && BigInt(r.id) === st.primary) tag += '<span class="names-tag">primary</span>';
+  if (r.status === 'grace') tag += '<span class="names-tag warn">renew</span>';
+  else if (r.status === 'expired') tag += '<span class="names-tag">expired</span>';
+  else if (r.status === 'orphan') tag += '<span class="names-tag">orphaned</span>';
+  const when = '<span class="p">' + escapeHtml(namesWhen(r, now)) + '</span>';
+  // An orphan has no name left to look up — getFullName gave nothing, so there is
+  // no hash that would find it, and no suffix that would be true. Show the label it
+  // still carries, and leave it unclickable.
+  if (!r.name) {
+    return '<div class="names-row dim"><span class="n">' + escapeHtml(r.label)
+         + (r.sub ? '' : '.wei') + tag + '</span>' + when + '</div>';
+  }
+  return '<a class="names-row' + (dim ? ' dim' : '') + '" href="#'
+       + encodeURIComponent(r.name.replace(/\.wei$/, '')) + '" onclick="namesPick()">'
+       + '<span class="n">' + escapeHtml(r.name) + tag + '</span>' + when + '</a>';
+}
+
+// The row's href does the work — the hash handler loads the name and paints the
+// manage panel. This only brings that panel back into view, since it sits above a
+// list the reader has just scrolled down through.
+function namesPick() {
+  setTimeout(() => {
+    const el = $('nameInput');
+    if (el && el.scrollIntoView) { try { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (_) {} }
+  }, 0);
+}
+
+function namesFooter(st) {
+  let h = '';
+  if (st.missing) {
+    h += '<div class="names-note">This address holds ' + st.missing + ' more name'
+       + (st.missing === 1 ? '' : 's') + ' than could be read back — the log scan or a read '
+       + 'came up short. Rescan, or set your own node under the gear icon.</div>';
+  }
+  if (st.stale) {
+    h += '<div class="names-note">No endpoint would serve the log scan just now. This is the last '
+       + 'list this browser saw, re-checked against the chain — anything registered since is missing.</div>';
+  }
+  h += '<div class="names-note">Names aren’t enumerable on chain: this is read from the contract’s '
+     + 'Transfer log and confirmed with ownerOf. Pick one to manage, renew or transfer it.</div>'
+     + '<button class="names-more" onclick="namesScan(true)"' + (_namesScanning ? ' disabled' : '')
+     + '>rescan</button>';
+  return h;
+}
+
+function namesRender() {
+  const body = $('namesBody');
+  if (!body) return;
+  const st = _namesState;
+  if (!st) { body.innerHTML = ''; return; }
+  const now = Math.floor(Date.now() / 1000);
+  const rows = st.rows;
+
+  if (!rows.length) {
+    body.innerHTML = '<div class="names-sum">No .wei names at this address yet.</div>' + namesFooter(st);
+    return;
+  }
+
+  const gone = rows.filter(r => r.status === 'expired' || r.status === 'orphan');
+  const grace = rows.filter(r => r.status === 'grace');
+  const soon = rows.filter(r => r.status === 'soon');
+  const live = rows.length - gone.length;
+  // Counted over the live rows only, so the three figures add up against each
+  // other — a lapsed subdomain is already accounted for under "lapsed".
+  const subs = rows.filter(r => r.sub && gone.indexOf(r) < 0).length;
+
+  let h = '<div class="names-sum">' + live + ' name' + (live === 1 ? '' : 's')
+        + (subs ? ' · ' + subs + ' subdomain' + (subs === 1 ? '' : 's') : '')
+        + (gone.length ? ' · ' + gone.length + ' lapsed' : '') + '</div>';
+
+  // At most one banner, and only for the thing with a deadline on it.
+  if (grace.length) {
+    const last = Math.max.apply(null, grace.map(r => r.expires)) + NAMES_GRACE;
+    h += '<div class="names-alert"><b>' + grace.length + ' name'
+       + (grace.length === 1 ? ' has' : 's have') + ' expired.</b> Renewal is still open, at the '
+       + 'ordinary fee. From ' + namesDate(last) + ' anyone can register '
+       + (grace.length === 1 ? 'it' : 'them') + '.</div>';
+  } else if (soon.length) {
+    h += '<div class="names-alert">' + soon.length + ' name' + (soon.length === 1 ? '' : 's')
+       + ' expiring within ' + Math.round(NAMES_SOON / 86400) + ' days. Renewing adds a year from '
+       + 'the current expiry, so it costs nothing to do early.</div>';
+  }
+
+  h += '<div class="names-rows">';
+  for (const r of rows) h += namesRow(r, st, now);
+  h += '</div>';
+  body.innerHTML = h + namesFooter(st);
+}
+
+function namesPanelOpen() {
+  const p = $('namesPanel');
+  return !!(p && p.classList.contains('show'));
+}
+
+function namesSetToggle() {
+  const t = $('namesToggle');
+  if (!t) return;
+  t.textContent = namesPanelOpen() ? '← hide'
+    : 'your names' + (_namesCount ? ' · ' + _namesCount : '') + ' →';
+}
+
+function toggleNames(event) {
+  if (event) event.preventDefault();
+  const panel = $('namesPanel');
+  if (!panel) return;
+  if (namesPanelOpen()) { panel.classList.remove('show'); namesSetToggle(); return; }
+  panel.classList.add('show');
+  namesSetToggle();
+  const me = window._connectedAddress;
+  if (!me) { toggleWallet(); return; }
+  // Repaint the last scan first so the list is there immediately, then refresh it:
+  // the walk forward from the cached block is short, and a name registered in this
+  // session should not need a manual rescan to appear.
+  if (_namesState && _namesState.addr === me.toLowerCase()) namesRender();
+  namesScan(false);
+}
+
+// One balanceOf on connect gives the toggle a count without paying for the scan.
+// It counts lapsed names too, which is deliberate — a lapsed name is exactly the
+// thing someone needs to be told about, and the scan sorts it to the top.
+async function namesOnConnect() {
+  const me = window._connectedAddress;
+  const sec = $('namesSection');
+  if (!sec) return;
+  if (!me) { namesOnDisconnect(); return; }
+  sec.style.display = '';
+  const seq = ++_namesSeq;
+  if (_namesState && _namesState.addr !== me.toLowerCase()) { _namesState = null; _namesCount = 0; }
+  if (namesPanelOpen()) { namesScan(false); return; }
+  try {
+    const res = await aggregate3([
+      { target: CONTRACT, iface: erc20BalNonceIface, fn: 'balanceOf', args: [me] }
+    ]);
+    if (seq !== _namesSeq) return;
+    _namesCount = res && res[0] ? Number(res[0][0]) : 0;
+  } catch (_) {
+    _namesCount = 0;   // a failed count is not a claim that there are none
+  }
+  namesSetToggle();
+}
+
+function namesOnDisconnect() {
+  _namesSeq++;
+  _namesState = null;
+  _namesCount = 0;
+  _namesScanning = false;
+  const panel = $('namesPanel'), body = $('namesBody'), sec = $('namesSection');
+  if (panel) panel.classList.remove('show');
+  if (body) body.innerHTML = '';
+  if (sec) sec.style.display = 'none';
+  namesSetToggle();
+}
+
 walletInit({
   appName: 'zFi Domains',
-  onConnect: [() => { contract = new ethers.Contract(CONTRACT, ABI, _signer); }, initPending, doCheckName, rollOnConnect],
-  onDisconnect: [() => { contract = null; $('commitBtn').disabled = true; }, hideManage, doCheckName, rollOnDisconnect]
+  onConnect: [() => { contract = new ethers.Contract(CONTRACT, ABI, _signer); }, initPending, doCheckName, rollOnConnect, namesOnConnect],
+  onDisconnect: [() => { contract = null; $('commitBtn').disabled = true; }, hideManage, doCheckName, rollOnDisconnect, namesOnDisconnect]
 });
 
 </script>
