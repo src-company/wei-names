@@ -313,6 +313,34 @@ button.secondary:hover { background: var(--surface-hover); }
 .pay-option.active { border-color: var(--btn-bg); background: var(--btn-bg); color: var(--btn-fg); z-index: 1; position: relative; }
 .pay-option.active + .pay-option { border-left: none; }
 .pay-option svg { display: block; }
+.term-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+.term-row label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-muted);
+  margin: 0;
+  white-space: nowrap;
+}
+.term-select {
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 6px 10px;
+  border: 1.5px solid var(--border);
+  border-radius: 0;
+  background: var(--bg);
+  color: var(--fg);
+  cursor: pointer;
+}
+.term-note { font-size: 12px; color: var(--fg-muted); }
+.term-note b { color: var(--fg); font-weight: 600; }
 .suffix {
   font-size: 24px;
   color: var(--fg-dim);
@@ -878,6 +906,11 @@ try{if(localStorage.getItem('wns_dao_banner')==='1'){var _db=document.getElement
   </div>
   <div id="availability" class="availability" aria-live="polite"></div>
   <div id="feeDisplay" class="fee"></div>
+  <div id="termRow" class="term-row" style="display:none;">
+    <label for="termSelect">Register for</label>
+    <select id="termSelect" class="term-select" onchange="onTermChange()"></select>
+    <span id="termNote" class="term-note"></span>
+  </div>
   <div class="free-cta" onclick="toggleFreePanel()">free names available</div>
   <div id="freePanel" class="free-panel">
     <div style="display:flex;justify-content:space-between;align-items:center;">
@@ -897,7 +930,8 @@ try{if(localStorage.getItem('wns_dao_banner')==='1'){var _db=document.getElement
   <h3>Pending Commitment</h3>
   <div class="name" id="pendingName"></div>
   <div class="timer" id="pendingTimer"></div>
-  <div class="pay-method">
+  <div id="pendingTerms" class="term-note" style="margin-bottom:12px;"></div>
+  <div class="pay-method" id="payMethod">
     <label>Pay with</label>
     <button class="pay-option active" data-method="eth" onclick="selectPayMethod(this)"><svg width="16" height="16" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg"><circle fill="#627EEA" cx="16" cy="16" r="16"/><g fill="#FFF"><path fill-opacity=".6" d="M16.498 4v8.87l7.497 3.35z"/><path d="M16.498 4L9 16.22l7.498-3.35z"/><path fill-opacity=".6" d="M16.498 21.968v6.027L24 17.616z"/><path d="M16.498 27.995v-6.028L9 17.616z"/><path fill-opacity=".2" d="M16.498 20.573l7.497-4.353-7.497-3.348z"/><path fill-opacity=".6" d="M9 16.22l7.498 4.353v-7.701z"/></g></svg>ETH</button>
     <button class="pay-option" data-method="usdc" onclick="selectPayMethod(this)"><svg width="16" height="16" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg"><circle fill="#3E73C4" cx="16" cy="16" r="16"/><g fill="#FFF"><path d="M20.022 18.124c0-2.124-1.28-2.852-3.84-3.156-1.828-.243-2.193-.728-2.193-1.578 0-.85.61-1.396 1.828-1.396 1.097 0 1.707.364 2.011 1.275a.458.458 0 00.427.303h.975a.416.416 0 00.427-.425v-.06a3.04 3.04 0 00-2.743-2.489V9.142c0-.243-.183-.425-.487-.486h-.915c-.243 0-.426.182-.487.486v1.396c-1.829.242-2.986 1.456-2.986 2.974 0 2.002 1.218 2.791 3.778 3.095 1.707.303 2.255.668 2.255 1.639 0 .97-.853 1.638-2.011 1.638-1.585 0-2.133-.667-2.316-1.578-.06-.242-.244-.364-.427-.364h-1.036a.416.416 0 00-.426.425v.06c.243 1.518 1.219 2.61 3.23 2.914v1.457c0 .242.183.425.487.485h.915c.243 0 .426-.182.487-.485V21.34c1.829-.303 3.047-1.578 3.047-3.217z"/><path d="M12.892 24.497c-4.754-1.7-7.192-6.98-5.424-11.653.914-2.55 2.925-4.491 5.424-5.402.244-.121.365-.303.365-.607v-.85c0-.242-.121-.424-.365-.485-.061 0-.183 0-.244.06a10.895 10.895 0 00-7.13 13.717c1.096 3.4 3.717 6.01 7.13 7.102.244.121.488 0 .548-.243.061-.06.061-.122.061-.243v-.85c0-.182-.182-.424-.365-.546zm6.46-18.936c-.244-.122-.488 0-.548.242-.061.061-.061.122-.061.243v.85c0 .243.182.485.365.607 4.754 1.7 7.192 6.98 5.424 11.653-.914 2.55-2.925 4.491-5.424 5.402-.244.121-.365.303-.365.607v.85c0 .242.121.424.365.485.061 0 .183 0 .244-.06a10.895 10.895 0 007.13-13.717c-1.096-3.46-3.778-6.07-7.13-7.162z"/></g></svg>USDC</button>
@@ -1051,6 +1085,17 @@ const ZROUTER = '0x000000000000FB114709235f1ccBFfb925F600e4';
 const USDC_ADDR = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48';
 const DAI_ADDR = '0x6B175474E89094C44Da98b954EedeAC495271d0F';
 const ZQUOTER = '0x000000a7DfdD39f4D74c7b201501eaD119F8b86C';
+// Buys several 365-day terms in one transaction. The registry sells exactly one term per call,
+// so a 5-year registration is 5 calls; this contract is the envelope for them. Setting this back
+// to '' hides every term control and leaves the one-year flow exactly as it was.
+const WEI_TERMS = '0x0000002ba1dd65dBe75388F6672826FaC6Ec69fe';
+const WEI_TERMS_ABI = [
+  'function register(string label, bytes32 innerSecret, address to, uint256 terms) payable returns (uint256)',
+  'function renew(uint256 tokenId, uint256 terms) payable',
+  'function quote(uint256 tokenId, uint256 terms) view returns (uint256)'
+];
+const MAX_TERMS = 10;   // the contract allows 25; ten is as far as the UI goes
+const TERM_SECS = 365 * 86400;
 const SUBDOMAIN_REGISTRAR = '0x53745292f0d30d68204a63002C17bDa16C772bf7';
 const REGISTRAR_ABI = [
   'function configure(uint256 parentId, address payout, address feeToken, uint256 price, bool enabled, address gateToken, uint256 minGateBalance)',
@@ -1913,6 +1958,7 @@ async function randomName() {
       // its manage panel and an armed Commit button would otherwise sit under the
       // spinner, still pointing at a name that is about to be replaced.
       $('feeDisplay').textContent = '';
+      hideTermRow();
       $('commitBtn').disabled = true;
       hideManage();
 
@@ -1959,6 +2005,7 @@ async function doCheckName() {
   if (!raw.trim()) {
     availEl.classList.remove('show');
     feeEl.textContent = '';
+    hideTermRow();
     commitBtn.style.display = '';
     commitBtn.disabled = true;
     hideManage();
@@ -1976,6 +2023,7 @@ async function doCheckName() {
       availEl.innerHTML = '<span class="taken">Invalid name format</span>';
       availEl.classList.add('show');
       feeEl.textContent = '';
+      hideTermRow();
       commitBtn.style.display = 'none';
       hideManage();
       return;
@@ -2106,12 +2154,14 @@ async function doCheckName() {
         availEl.innerHTML = '<span class="taken">' + escaped + '.wei exists</span>' +
           '<div class="view-link"><a href="' + osLink + '" target="_blank" rel="noopener">View on OpenSea →</a> · <a href="#" onclick="copyShareLink();return false;">Copy link →</a></div>';
         feeEl.textContent = '';
+        hideTermRow();
         managed = await showManage(tokenId, fullName);
         if (thisVersion !== checkVersion) return; // superseded by a newer search
       }
 
       availEl.classList.add('show');
       commitBtn.style.display = 'none'; // Can't commit subdomains
+      hideTermRow();
       updateHash(fullName);
       return { kind: 'subdomain', name: fullName, exists: !!owner, managed };
     } catch (e) {
@@ -2119,6 +2169,7 @@ async function doCheckName() {
       availEl.innerHTML = '<span class="taken">Error checking subdomain</span>';
       availEl.classList.add('show');
       feeEl.textContent = '';
+      hideTermRow();
       commitBtn.style.display = 'none';
       hideManage();
     }
@@ -2140,6 +2191,7 @@ async function doCheckName() {
     availEl.innerHTML = '<span class="taken">' + escapeHtml(reason) + '</span>';
     availEl.classList.add('show');
     feeEl.textContent = '';
+    hideTermRow();
     commitBtn.style.display = '';
     commitBtn.disabled = true;
     hideManage();
@@ -2218,17 +2270,19 @@ async function doCheckName() {
       commitBtn.textContent = _signer ? 'Commit' : 'Connect to commit';
       hideManage();
 
-      let feeText = ethers.formatEther(fee) + ' ETH';
+      let feeText = ethers.formatEther(fee) + ' ETH per year';
       if (premium > 0n) {
         feeText += ' + ' + ethers.formatEther(premium) + ' ETH premium';
       }
       feeEl.textContent = 'Fee: ' + feeText;
+      showTermRow(fee, premium);
     } else {
       const osLink = `https://opensea.io/assets/ethereum/${CONTRACT}/${tokenId}`;
       availEl.innerHTML = warnHtml + '<span class="taken">' + escaped + '.wei is taken</span>' +
         '<div class="view-link"><a href="' + osLink + '" target="_blank" rel="noopener">View on OpenSea →</a> · <a href="#" onclick="copyShareLink();return false;">Copy link →</a></div>';
       commitBtn.style.display = 'none';
       feeEl.textContent = '';
+      hideTermRow();
 
       // Show manage section with owner info
       managed = await showManage(tokenId, name);
@@ -2243,6 +2297,7 @@ async function doCheckName() {
     availEl.innerHTML = '<span class="taken">Error checking name</span>';
     availEl.classList.add('show');
     feeEl.textContent = '';
+    hideTermRow();
     commitBtn.style.display = '';
     commitBtn.disabled = true;
     hideManage();
@@ -2380,13 +2435,24 @@ async function doCommit() {
 
     const innerSecret = ethers.hexlify(ethers.randomBytes(32));
     const userAddr = await _signer.getAddress();
-    const secret = ethers.keccak256(ethers.AbiCoder.defaultAbiCoder().encode(['bytes32', 'address'], [innerSecret, userAddr]));
+    // The term count is fixed here, not at the reveal: the commitment binds to whichever
+    // contract will spend it, and only WeiTerms can buy more than one year in that call.
+    const terms = selectedTerms();
+    const commitOwner = committerFor(terms);
+    // Folding the reveal's arguments into the secret is what makes the reveal safe to broadcast:
+    // a copy that changes the recipient or the term count derives a different secret and matches
+    // no commitment. zRouter binds the recipient only, so its derivation stays as it was.
+    const secret = commitOwner === WEI_TERMS
+      ? ethers.keccak256(ethers.AbiCoder.defaultAbiCoder().encode(
+          ['bytes32', 'address', 'uint256'], [innerSecret, userAddr, terms]))
+      : ethers.keccak256(ethers.AbiCoder.defaultAbiCoder().encode(
+          ['bytes32', 'address'], [innerSecret, userAddr]));
     // makeCommitment is pure — keccak256(abi.encode(normalized, owner, secret)) — and
     // `name` is already normalized to exactly what _validateAndNormalize would produce,
     // so compute it locally instead of spending an RPC round-trip (and a failure mode)
     // on the most sensitive step in the flow. Same reasoning as computeIdFull.
     const commitment = ethers.keccak256(ethers.AbiCoder.defaultAbiCoder().encode(
-      ['bytes', 'address', 'bytes32'], [ethers.toUtf8Bytes(name), ZROUTER, secret]
+      ['bytes', 'address', 'bytes32'], [ethers.toUtf8Bytes(name), commitOwner, secret]
     ));
 
     // Save pending BEFORE tx to persist even if user leaves during confirmation
@@ -2394,7 +2460,8 @@ async function doCommit() {
       name,
       secret: innerSecret,
       owner: userAddr,
-      commitOwner: ZROUTER,
+      terms,
+      commitOwner,
       commitment,
       timestamp: Math.floor(Date.now() / 1000),
       confirmed: false
@@ -2459,6 +2526,82 @@ async function doCommit() {
     }
     handleError(e);
   }
+}
+
+// ---- multi-year terms ------------------------------------------------------
+// The registry charges the premium once, at registration, and the fee once per year, so a
+// multi-year quote is premium + N x fee. Multiplying the premium too would overcharge exactly
+// the names that carry one.
+function termsTotal(fee, premium, terms) {
+  return (premium || 0n) + fee * BigInt(terms);
+}
+
+// Which contract a commitment is bound to decides what can pay for it. One year goes through
+// zRouter, which can swap USDC or DAI into the reveal. More than one goes through WeiTerms,
+// which buys every year in the same transaction but only takes ETH.
+function committerFor(terms) {
+  return terms > 1 ? WEI_TERMS : ZROUTER;
+}
+
+function termsAvailable() {
+  return !!WEI_TERMS;
+}
+
+function selectedTerms() {
+  const sel = $('termSelect');
+  if (!sel || !termsAvailable()) return 1;
+  return validTerms(sel.value);
+}
+
+// A term count reaches the contract as a uint256 and is folded into the commitment secret, so a
+// fractional or out-of-range value would either throw in ethers or commit to something the reveal
+// can never match. Anything unexpected is one year.
+function validTerms(raw) {
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= 1 && n <= MAX_TERMS ? n : 1;
+}
+
+function termOptionsHtml() {
+  let html = '';
+  for (let n = 1; n <= MAX_TERMS; n++) {
+    html += '<option value="' + n + '">' + n + (n === 1 ? ' year' : ' years') + '</option>';
+  }
+  return html;
+}
+
+// Cost and expiry for whatever is currently selected, so the commitment is priced before it
+// is made rather than at the reveal, where the term count is already fixed.
+let _termFee = null, _termPremium = null;
+
+function showTermRow(fee, premium) {
+  const row = $('termRow');
+  const sel = $('termSelect');
+  if (!row || !sel) return;
+  if (!termsAvailable()) { row.style.display = 'none'; return; }
+  if (!sel.options.length) sel.innerHTML = termOptionsHtml();
+  // Fees are steeply tiered by name length — 0.5 ETH a year at one character against 0.0005 at
+  // five. A selection carried over from the last name would reprice by three orders of magnitude
+  // without the user touching anything, so a different tier starts again at one year.
+  if (_termFee !== null && fee !== _termFee) sel.value = '1';
+  _termFee = fee;
+  _termPremium = premium;
+  row.style.display = '';
+  onTermChange();
+}
+
+function hideTermRow() {
+  const row = $('termRow');
+  if (row) row.style.display = 'none';
+}
+
+function onTermChange() {
+  const note = $('termNote');
+  if (!note || _termFee == null) return;
+  const n = selectedTerms();
+  const total = termsTotal(_termFee, _termPremium, n);
+  const until = new Date(Date.now() + n * TERM_SECS * 1000).toLocaleDateString();
+  note.innerHTML = '<b>' + fmtEth(total, 6) + ' ETH</b> · until ' + escapeHtml(until) +
+    (n > 1 ? ' · ETH only' : '');
 }
 
 let selectedPayMethod = 'eth';
@@ -2530,11 +2673,20 @@ async function doReveal() {
     if (!results[0] || !results[1]) {
       throw new Error('Failed to fetch fee data');
     }
-    const total = results[0][0] + results[1][0];
+    const terms = pending.terms || 1;
+    const total = termsTotal(results[0][0], results[1][0], terms);
 
     showStatus('Registering ' + pending.name + '.wei...', '');
     let tx;
-    if (pending.commitOwner === ZROUTER) {
+    if (pending.commitOwner === WEI_TERMS && WEI_TERMS) {
+      // Reveal and every further year in one transaction. The recipient and the term count are
+      // folded into the secret, so a copy that changes either matches no commitment.
+      const helper = new ethers.Contract(WEI_TERMS, WEI_TERMS_ABI, _signer);
+      tx = await wcTransaction(
+        helper.register(pending.name, pending.secret, _connectedAddress, terms, { value: total }),
+        'Approve registration'
+      );
+    } else if (pending.commitOwner === ZROUTER) {
       const rIface = new ethers.Interface([
         'function revealName(string label, bytes32 secret, address to) returns (uint256)',
         'function sweep(address token, uint256 id, uint256 amount, address to)',
@@ -2557,7 +2709,8 @@ async function doReveal() {
     const receipt = await waitForTx(tx);
 
     clearPending();
-    showStatus(pending.name + '.wei registered!', 'success', txHash);
+    showStatus(pending.name + '.wei registered' + (terms > 1 ? ' for ' + terms + ' years' : '') + '!',
+      'success', txHash);
     refreshAfterTx(pending.name, nameRegistered, receipt);
   } catch (e) {
     handleError(e);
@@ -2609,7 +2762,10 @@ async function doRevealWithToken(tk) {
 
   try {
     if (!pending.commitOwner || pending.commitOwner !== ZROUTER) {
-      showStatus(`This commitment was made before ${tk.name} support. Cancel and re-commit to use ${tk.name}.`, 'error');
+      const why = (pending.terms || 1) > 1
+        ? `Multi-year registration is ETH only. Cancel and re-commit for 1 year to pay with ${tk.name}.`
+        : `This commitment was made before ${tk.name} support. Cancel and re-commit to use ${tk.name}.`;
+      showStatus(why, 'error');
       return;
     }
 
@@ -2838,6 +2994,21 @@ function displayPending(pending) {
   if (!el) return;
   el.classList.add('show');
   $('pendingName').textContent = pending.name + '.wei';
+  // A commitment made for several years can only be revealed by WeiTerms, which takes ETH —
+  // so say so, and take the token options away rather than let them fail at the reveal.
+  const terms = pending.terms || 1;
+  const multi = terms > 1;
+  const termsEl = $('pendingTerms');
+  if (termsEl) termsEl.innerHTML = multi ? 'Registering for <b>' + terms + ' years</b> — paid in ETH' : '';
+  const payEl = $('payMethod');
+  if (payEl) {
+    payEl.style.display = multi ? 'none' : '';
+    if (multi) {
+      selectedPayMethod = 'eth';
+      payEl.querySelectorAll('.pay-option').forEach(b =>
+        b.classList.toggle('active', b.dataset.method === 'eth'));
+    }
+  }
   $('commitBtn').disabled = true;
   // Start new timer chain with fresh ID
   pendingTimerId++;
@@ -3070,6 +3241,7 @@ function showStatus(msg, type, txHash) {
 // Current managed token
 let currentTokenId = null;
 let currentTokenName = null;
+let currentExpiresAt = null; // renewals extend from this, so the renew quote dates from it
 let isProcessing = false; // Prevent double-click on manage actions
 let pendingMintInfo = null;
 let pendingOwnerSub = null; // parent-owner direct subdomain registration (free, via NameNFT)
@@ -3082,6 +3254,7 @@ function hideManage() {
   $('manageForm').classList.remove('show');
   currentTokenId = null;
   currentTokenName = null;
+  currentExpiresAt = null;
 }
 
 let manageVersion = 0;
@@ -3089,6 +3262,7 @@ let manageVersion = 0;
 async function showManage(tokenId, name) {
   currentTokenId = tokenId;
   currentTokenName = name;
+  currentExpiresAt = null;
   const thisManageVersion = ++manageVersion;
   // True once a newer showManage()/hideManage() has superseded this call. Guard
   // every DOM mutation with it so an older, slower response can't clobber a
@@ -3161,6 +3335,7 @@ async function showManage(tokenId, name) {
     const isPrimary = !!(_connectedAddress && results[primarySlot]?.[0] != null &&
                          BigInt(results[primarySlot][0]) === BigInt(tokenId));
     const expiryDate = record?.expiresAt ? new Date(Number(record.expiresAt) * 1000).toLocaleDateString() : null;
+    currentExpiresAt = record?.expiresAt ? Number(record.expiresAt) : null;
     const isTopLevel = record?.parent === 0n;
     // A top-level name past expiresAt (still shown because it hasn't cleared grace,
     // or it wouldn't be "taken") is INACTIVE on-chain: setAddr/setText/setContenthash/
@@ -3214,7 +3389,7 @@ async function showManage(tokenId, name) {
       infoHtml += `<div style="padding:10px;background:var(--status-warning,#fff3cd);color:#7a4f00;margin-bottom:12px;font-size:12px;border-radius:4px;">This subdomain is inactive — ${reason}. On-chain updates (website, records, transfer) will revert.</div>`;
     }
     if (isExpiredInGrace) {
-      infoHtml += `<div style="padding:10px;background:var(--status-warning,#fff3cd);color:#7a4f00;margin-bottom:12px;font-size:12px;border-radius:4px;">This name has expired and is in its grace period. Renew to reactivate — all other on-chain actions (transfer, records, website) will revert until you do.</div>`;
+      infoHtml += `<div style="padding:10px;background:var(--status-warning,#fff3cd);color:#7a4f00;margin-bottom:12px;font-size:12px;border-radius:4px;">This name has expired and is in its grace period. Renew to reactivate — at the normal fee, with no premium, and the extension still runs from the original expiry. All other on-chain actions (transfer, records, website) will revert until you do.</div>`;
     }
     infoHtml += `<div><span>Owner:</span>${addrLink(owner)}</div>`;
     if (resolved && resolved !== ethers.ZeroAddress) {
@@ -3363,7 +3538,17 @@ function showManageForm(action) {
       showSubSalesForm();
       return;
     case 'renew':
-      html = `
+      html = termsAvailable()
+        ? `
+        <div style="font-size:13px;margin-bottom:4px;">Extend registration</div>
+        <div class="term-row" style="margin-bottom:12px;">
+          <select id="renewTerms" class="term-select" onchange="renderRenewQuote()"></select>
+          <span id="renewNote" class="term-note"></span>
+        </div>
+        <button onclick="doRenew()">Renew</button>
+        <button class="secondary" onclick="$('manageForm').classList.remove('show')">Cancel</button>
+      `
+        : `
         <div style="font-size:13px;margin-bottom:12px;">Extend registration for 1 year</div>
         <button onclick="doRenew()">Renew</button>
         <button class="secondary" onclick="$('manageForm').classList.remove('show')">Cancel</button>
@@ -3373,6 +3558,45 @@ function showManageForm(action) {
 
   form.innerHTML = html;
   form.classList.add('show');
+  if (action === 'renew' && termsAvailable()) initRenewTerms();
+}
+
+// Renewal extends from the record's own expiry, not from now, so the new date is the stored
+// expiry plus the terms bought — early renewal loses nothing, and grace months are not forfeited.
+let _renewFee = null;
+
+async function initRenewTerms() {
+  const sel = $('renewTerms');
+  if (!sel) return;
+  sel.innerHTML = termOptionsHtml();
+  _renewFee = null;
+  renderRenewQuote();
+  try {
+    const rc = readContract || contract;
+    _renewFee = await rc.getFee(byteLength(currentTokenName));
+  } catch (e) {
+    _renewFee = null;
+  }
+  renderRenewQuote();
+}
+
+function renewTermCount() {
+  const sel = $('renewTerms');
+  return sel ? validTerms(sel.value) : 1;
+}
+
+function renderRenewQuote() {
+  const note = $('renewNote');
+  if (!note) return;
+  if (_renewFee == null) { note.textContent = 'Fetching price…'; return; }
+  const n = renewTermCount();
+  const total = _renewFee * BigInt(n);
+  let text = '<b>' + fmtEth(total, 6) + ' ETH</b>';
+  if (currentExpiresAt) {
+    const until = new Date((Number(currentExpiresAt) + n * TERM_SECS) * 1000).toLocaleDateString();
+    text += ' · until ' + escapeHtml(until);
+  }
+  note.innerHTML = text;
 }
 
 async function resolveRecipient(input) {
@@ -4576,12 +4800,20 @@ async function doRenew() {
   try {
     const rc = readContract || contract;
     const fee = await rc.getFee(byteLength(currentTokenName));
+    const terms = termsAvailable() ? renewTermCount() : 1;
 
     showStatus('Renewing...', '');
-    const tx = await wcTransaction(contract.renew(currentTokenId, { value: fee }), 'Approve renewal');
+    // One year goes straight to the registry — no reason to route it through anything. More than
+    // one goes through WeiTerms, which pays exactly the quote per year and returns the change.
+    const tx = terms > 1
+      ? await wcTransaction(
+          new ethers.Contract(WEI_TERMS, WEI_TERMS_ABI, _signer)
+            .renew(currentTokenId, terms, { value: fee * BigInt(terms) }),
+          'Approve renewal')
+      : await wcTransaction(contract.renew(currentTokenId, { value: fee }), 'Approve renewal');
     showStatus('Waiting for confirmation...', '', tx.hash);
     const receipt = await waitForTx(tx);
-    showStatus('Renewed!', 'success', tx.hash);
+    showStatus(terms > 1 ? 'Renewed for ' + terms + ' years!' : 'Renewed!', 'success', tx.hash);
     refreshAfterTx(currentTokenName, panelRepainted, receipt);
   } catch (e) {
     handleError(e);

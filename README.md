@@ -626,6 +626,69 @@ const results = await multicall.aggregate3([
 
 ---
 
+## Multi-Year Terms (`WeiTerms`)
+
+`NameNFT` sells exactly one 365-day term per call: `reveal()` mints one year and `renew()` adds
+one year to the **current** expiry. Calls therefore compound, and N years is N calls.
+
+`WeiTerms.sol` is a stateless, ownerless helper that makes those calls in one transaction.
+
+**Contract:** [`0x0000002ba1dd65dBe75388F6672826FaC6Ec69fe`](https://etherscan.io/address/0x0000002ba1dd65dBe75388F6672826FaC6Ec69fe) (Ethereum Mainnet)
+
+| Function | Purpose |
+|---|---|
+| `register(string label, bytes32 innerSecret, address to, uint256 terms) payable` | Reveal and buy `terms` years, delivering the name to `to` |
+| `renew(uint256 tokenId, uint256 terms) payable` | Extend one name by `terms` years |
+| `renewMany(uint256[] tokenIds, uint256[] terms) payable` | Extend a portfolio, terms chosen per name |
+| `quote(uint256 tokenId, uint256 terms) view` | Cost at the current fee |
+| `quoteMany(uint256[] tokenIds, uint256[] terms) view` | Cost of a basket |
+| `sweep(address to)` | Send any stray ETH out; open to anyone |
+
+`MAX_TERMS` is 25, applied per call and per `renewMany` entry.
+
+Properties, each covered by a test in `test/WeiTerms.t.sol`:
+
+- **No authority over names.** `renew()` ignores `msg.sender`, so the helper needs no approval and
+  cannot move, expire, or reclaim a name. The only thing at stake in a call is the ETH sent with it.
+- **Prices are read on-chain**, never supplied by the caller.
+- **Spending is capped by `msg.value`** — that is the caller's whole exposure. Send exactly the
+  quote and a price raised under the pending transaction reverts it; send slack and the slack is
+  spendable, so quote and send the same number.
+- **Change is `msg.value - spent`**, returned to the caller, who is the payer. Paying exactly makes
+  no refund call at all, so a contract that cannot receive ETH can still use this.
+- **Nothing is stranded.** ETH that arrives outside a call can never be spent, and `sweep` gets it
+  out. Names sent here with `safeTransferFrom` are refused rather than accepted and lost.
+
+### Committing for a multi-year registration
+
+`register` reveals a commitment bound to `WeiTerms` rather than to the registrant, so the reveal's
+arguments are folded into the secret — the construction `zRouter.revealName` uses for the
+recipient, extended to the term count:
+
+```javascript
+const innerSecret = randomBytes(32);
+const secret = keccak256(abiEncode(['bytes32', 'address', 'uint256'],
+  [innerSecret, recipient, terms]));
+const commitment = keccak256(abiEncode(['bytes', 'address', 'bytes32'],
+  [toUtf8Bytes(label), WEI_TERMS, secret]));
+await wns.commit(commitment);
+// >= 60s later
+await weiTerms.register(label, innerSecret, recipient, terms, { value: premium + fee * terms });
+```
+
+Both the recipient and the term count are bound, so a copied broadcast that changes either derives
+a different secret and matches no commitment — it cannot redirect the name, and it cannot settle a
+ten-year commitment for one year. Copied verbatim it delivers the name to the intended recipient,
+for the intended number of years, at the copier's expense.
+
+Because `terms` is bound, a commitment can only ever be settled for the term count it was made for.
+Commit again for a different one.
+
+The premium is charged once by `reveal()` and never repeats, so a multi-year quote is
+`premium + terms * fee`, not `terms * (premium + fee)`.
+
+---
+
 ## Best Practices for Integrators
 
 1. **Normalize input** with ENSIP-15 before registration (same as ENS)

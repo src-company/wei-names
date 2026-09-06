@@ -93,7 +93,7 @@ function makeEl(id) {
 function sandbox({ lifted = ALL, multicall, ensLabelSample, doCheckName } = {}) {
   const els = new Map();
   for (const id of ['nameInput', 'randomBtn', 'availability', 'feeDisplay', 'commitBtn']) els.set(id, makeEl(id));
-  const calls = { multicall: [], ensLabelSample: 0, doCheckName: 0, getLogs: [], withRpc: 0, hideManage: 0 };
+  const calls = { multicall: [], ensLabelSample: 0, doCheckName: 0, getLogs: [], withRpc: 0, hideManage: 0, hideTermRow: 0 };
 
   const ctx = {
     ethers, console,
@@ -105,6 +105,8 @@ function sandbox({ lifted = ALL, multicall, ensLabelSample, doCheckName } = {}) 
     textEncoder: new TextEncoder(),
     checkDebounce: null,
     hideManage: () => { calls.hideManage++; },
+    hideTermRow: () => { calls.hideTermRow++; },
+    hideTermRow: () => { calls.hideTermRow++; },
     localComputeId: label => BigInt(ethers.keccak256(ethers.toUtf8Bytes(label))),
     RPC_ENDPOINTS: ['https://a.example', 'https://b.example'],
     customRpcs: () => [],
@@ -392,6 +394,8 @@ const withoutSample = ALL.filter(n => n !== 'ensLabelSample');
   eq('draw: the previous name\'s fee is cleared', els.get('feeDisplay').textContent, '');
   eq('draw: Commit is disarmed while drawing', els.get('commitBtn').disabled, true);
   eq('draw: and its manage panel is closed', calls.hideManage, 1);
+  eq('draw: and the term selector goes with the fee line', calls.hideTermRow, 1);
+  eq('draw: and its term selector is taken down', calls.hideTermRow, 1);
   ok('draw: the button itself is disabled', els.get('randomBtn').disabled);
   release();
   await drawing;

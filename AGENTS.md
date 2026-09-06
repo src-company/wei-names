@@ -8,7 +8,8 @@ is about developing wei-names itself.)
 
 - `src/` — Solidity contracts. `NameNFT.sol` is the whole system (ERC-721 +
   registrar + ENS-compatible resolver, single non-upgradeable file).
-  `SubdomainRegistrar.sol`, `WeiDAO.sol` alongside it.
+  `SubdomainRegistrar.sol`, `WeiDAO.sol` alongside it. `WeiTerms.sol` is a stateless helper
+  that buys several 365-day terms in one transaction (the registry sells one per call).
 - `test/`, `script/` — Foundry tests and deploy scripts.
 - `gateway/` — the `*.wei.limo` / `.wei.is` / `.wei.domains` HTTP gateway.
   Zero-dependency ESM; `handler.js` is runtime-agnostic, wrapped by `worker.js`
