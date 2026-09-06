@@ -13,6 +13,10 @@ interface INameNFT {
     function expiresAt(uint256 tokenId) external view returns (uint256);
     function ownerOf(uint256 tokenId) external view returns (address);
     function isAvailable(string calldata label, uint256 parentId) external view returns (bool);
+    function computeId(string calldata fullName) external pure returns (uint256);
+    function getApproved(uint256 tokenId) external view returns (address);
+    function isApprovedForAll(address owner, address operator) external view returns (bool);
+    function balanceOf(address owner) external view returns (uint256);
     function records(uint256 tokenId)
         external
         view
@@ -51,6 +55,8 @@ contract ForkMultiYear is Test {
     address constant NFT_ADDR = 0x0000000000696760E15f265e828DB644A0c242EB;
     address constant ZROUTER = 0x000000000000FB114709235f1ccBFfb925F600e4;
     address constant ZROUTER_OWNER = 0x5E58BA0e06ED0F5558f83bE732a4b899a674053E;
+    /// @dev The live helper, not a fresh instance — these run against deployed bytecode.
+    address constant TERMS_ADDR = 0x0000002ba1dd65dBe75388F6672826FaC6Ec69fe;
 
     uint256 constant TERM = 365 days;
     uint256 constant MIN_COMMIT_AGE = 60;
@@ -375,6 +381,71 @@ contract ForkMultiYear is Test {
             assertEq(nft.ownerOf(tokenId), alice);
             assertEq(nft.expiresAt(tokenId), startTime + counts[i] * TERM);
         }
+    }
+
+    /*//////////////////////////////////////////////////////////////
+              THE DEPLOYED HELPER, AGAINST A REAL LIVE NAME
+    //////////////////////////////////////////////////////////////*/
+
+    /// Everything above builds its own helper. These two drive the one that is actually deployed,
+    /// against a name that actually exists, held by whoever the chain says holds it right now.
+    /// The question they answer is the one a holder would ask: after paying for several more
+    /// years through a contract I did not write, do I still own my name?
+    function test_liveHolderKeepsCustodyAcrossAMultiYearRenewal() public {
+        if (skipped) return;
+        WeiTerms live = WeiTerms(payable(TERMS_ADDR));
+
+        uint256 tokenId = nft.computeId("ross.wei");
+        address holder = nft.ownerOf(tokenId); // read from chain, never assumed
+        uint256 expiryBefore = nft.expiresAt(tokenId);
+        uint256 namesBefore = nft.balanceOf(holder);
+
+        uint256 nTerms = 5;
+        uint256 cost = live.quote(tokenId, nTerms);
+
+        console2.log("holder        ", holder);
+        console2.log("expiry before ", expiryBefore);
+        console2.log("cost (wei)    ", cost);
+
+        vm.deal(holder, 10 ether);
+        uint256 ethBefore = holder.balance;
+
+        vm.prank(holder);
+        live.renew{value: cost}(tokenId, nTerms);
+
+        console2.log("expiry after  ", nft.expiresAt(tokenId));
+
+        // Custody, stated four ways: the owner, the balance, and that the helper took no standing
+        // claim on the name it just paid for.
+        assertEq(nft.ownerOf(tokenId), holder, "still the same owner");
+        assertEq(nft.balanceOf(holder), namesBefore, "holds the same number of names");
+        assertEq(nft.getApproved(tokenId), address(0), "no approval left on the name");
+        assertFalse(nft.isApprovedForAll(holder, TERMS_ADDR), "helper is not an operator");
+
+        // And the thing they paid for.
+        assertEq(nft.expiresAt(tokenId), expiryBefore + nTerms * TERM, "five more years");
+        assertEq(holder.balance, ethBefore - cost, "charged exactly the quote, change returned");
+        assertEq(TERMS_ADDR.balance, 0, "helper kept nothing");
+    }
+
+    /// The same call made by someone else entirely. Renewal is permissionless, so a stranger can
+    /// pay — and paying must not earn them any claim on the name.
+    function test_liveRenewalPaidByAStrangerGrantsThemNothing() public {
+        if (skipped) return;
+        WeiTerms live = WeiTerms(payable(TERMS_ADDR));
+
+        uint256 tokenId = nft.computeId("ross.wei");
+        address holder = nft.ownerOf(tokenId);
+        uint256 expiryBefore = nft.expiresAt(tokenId);
+        uint256 cost = live.quote(tokenId, 3);
+
+        vm.prank(stranger);
+        live.renew{value: cost}(tokenId, 3);
+
+        assertEq(nft.ownerOf(tokenId), holder, "the payer did not become the owner");
+        assertEq(nft.balanceOf(stranger), 0, "and holds no names");
+        assertEq(nft.getApproved(tokenId), address(0), "and gained no approval");
+        assertEq(nft.expiresAt(tokenId), expiryBefore + 3 * TERM, "the holder got the years");
     }
 
     /*//////////////////////////////////////////////////////////////
