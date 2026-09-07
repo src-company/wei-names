@@ -76,6 +76,7 @@ https://alice.wei.domains     ->  same, alternate zone
 - **IPNS** contenthash means the owner can update the site with no new onchain transaction (the gateway resolves the IPNS key fresh each request).
 - **Subdomains resolve too**, to any depth the owner registers: `https://send.slow.wei.limo` serves the contenthash of `send.slow.wei`.
 - The gateway reads the contenthash live from the contract on each request, so a name published to IPFS works instantly.
+- **A CID resolves on its own**, with no name and no onchain read at all — `https://<cid>.wei.limo` serves that exact content, and `https://<k51…>.wei.limo` that exact IPNS key. Use it when you want the bytes you audited rather than whatever the name points at now; a name can be repointed, a CID cannot. (Same idea as `https://0x<address>.wei.limo`, which serves one exact contract.)
 
 ## Give an agent an identity
 
