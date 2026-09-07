@@ -955,5 +955,53 @@ eq('timeout: a hang benches like any other failure', upstreamHealth.has('brown.o
 proxyResponse = null
 upstreamHealth.clear()
 
+// --- content labels: <cid>.wei.limo ------------------------------------------
+
+// The other fixed-target surface, beside 0x<address>. A CID is already the
+// answer, so this must cost NO registry lookup at all — the assertion on
+// `calls` is the point of the whole surface, not a detail of it.
+const LIVE_CID = 'bafybeibj6lixxzqtsb45ysdjnupvqkufgdvzqbnvmhw2kf7cfkesy7r7d4'
+const LIVE_IPNS = 'k51qzi5uqu5dlvj2baxnqndepeb86cbk3ng7n3i46uzyxzyqj2xjonzllnv0v8'
+
+routes = {}
+upstreamHealth.clear()
+seen = []
+proxyResponse = byHost([['dweb.link', () => new Response('the pinned bytes', { status: 200 })]])
+res = await proxyGetEnv(`${LIVE_CID}.wei.limo/paper.pdf`, {}, { keepHealth: true })
+eq('cid label: serves the content', res.status, 200)
+eq('cid label: the bytes are the CID’s', await res.text(), 'the pinned bytes')
+eq('cid label: costs no eth_call whatsoever', calls.length, 0)
+eq('cid label: reported as ipfs', res.headers.get('x-wns-mode'), 'ipfs')
+eq('cid label: and names the CID it served', res.headers.get('x-ipfs-cid'), LIVE_CID)
+eq('cid label: addressed as a subdomain upstream', seen[0].startsWith(`https://${LIVE_CID}.ipfs.dweb.link/paper.pdf`), true)
+
+// An IPNS key label is the mutable sibling: same surface, resolved fresh.
+routes = {}
+seen = []
+res = await proxyGetEnv(`${LIVE_IPNS}.wei.limo/feed`, {}, { keepHealth: true })
+eq('ipns label: serves the content', res.status, 200)
+eq('ipns label: with no registry lookup either', calls.length, 0)
+eq('ipns label: reported as ipns', res.headers.get('x-wns-mode'), 'ipns')
+eq('ipns label: named as an IPNS key, not a CID', res.headers.get('x-ipns-name'), LIVE_IPNS)
+proxyResponse = null
+
+// Redirect mode hands out the subdomain gateway URL for the CID directly.
+routes = {}
+res = await handleRequest(new Request(`https://${LIVE_CID}.wei.limo/`), ENV)
+eq('cid label: redirects like any other ipfs target', res.status, 302)
+eq(
+  'cid label: to the subdomain gateway',
+  res.headers.get('location'),
+  `https://${LIVE_CID}.ipfs.dweb.link/`,
+)
+
+// The floor exists so ordinary names are untouched. `bafkreib` is base32 and
+// starts with `b`, but it is a name, and it must still be resolved as one.
+routes = { [`${WNS}:${COMPUTE_ID}`]: uint(0) }
+calls = []
+res = await handleRequest(new Request('https://bafkreib.wei.limo/'), ENV)
+eq('cid label: a short base32-ish label is still a name', res.status, 404)
+eq('cid label: and did hit the registry', calls.length > 0, true)
+
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail ? 1 : 0)

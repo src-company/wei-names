@@ -3392,9 +3392,12 @@ async function showManage(tokenId, name) {
       infoHtml += `<div><span>Website:</span><a href="${gatewayUrl}" target="_blank" rel="noopener" style="color:inherit;">${gatewayUrl}</a></div>`;
       if (content) {
         const short = content.id.slice(0, 16) + '...' + content.id.slice(-6);
-        const href = content.ns === 'ipns'
-          ? `https://${content.id}.ipns.dweb.link`
-          : `https://ipfs.io/ipfs/${content.id}`;
+        // Through our own gateway's content-label surface, not a public one.
+        // This link's whole point is that it names fixed bytes rather than
+        // whatever the name currently resolves to, which is worth very little
+        // if reaching them depends on a third party — and the public fleet
+        // this used to use (ipfs.io / dweb.link) is being retired.
+        const href = `https://${content.id}.${WEI_GATEWAY}`;
         const label = content.ns === 'ipns' ? 'ipns://' + short : short;
         infoHtml += `<div><span>Content:</span><a href="${escapeHtml(href)}" target="_blank" rel="noopener" style="color:inherit;font-family:monospace;font-size:11px;">${escapeHtml(label)}</a></div>`;
       }

@@ -291,6 +291,43 @@ const MAX_SUB_LABELS = 2
 // its own version and link its successor without leaving this gateway.
 const ADDRESS_LABEL = /^0x[0-9a-f]{40}$/
 
+// `<cid>.<zone>` — serve that content directly, skipping WNS entirely.
+//
+// The same surface as an address label, for the other kind of fixed target: an
+// address pins a contract's bytes, a CID pins a document's. Both answer the
+// question "what exactly did I audit", and neither can be repointed by anyone,
+// including whoever holds the name that used to carry it.
+//
+// It exists because the alternative was worse. The dapp used to link a name's
+// contenthash at `ipfs.io/ipfs/<cid>`, which put a third party — and, as of
+// 2026-09, a third party being retired — in the path of the one link whose
+// entire point is that it does not depend on anybody's goodwill. This serves it
+// through our own gateway instead, inheriting the failover in the proxy path.
+//
+// Shapes are restricted to the two multibase prefixes decodeContenthash emits:
+//   base32 CIDv1  `b` + [a-z2-7] — 59 chars for the usual sha-256 dag-pb
+//   base36 IPNS   `k` + [0-9a-z] — 62 for an ed25519 libp2p-key, ~57 for a
+//                 sha-256 one, so this is a range and not a fixed width
+// Both are bounded above at 63 by the DNS label limit anyway: a longer one
+// could never arrive here over TLS in the first place.
+//
+// Collision, stated plainly: MAX_LABEL_LENGTH in NameNFT.sol is 255 bytes, so a
+// `.wei` name of this shape is registrable, and this surface would shadow it.
+// That is the same trade the address label already makes and it is resolved the
+// same way — the label surface wins, because a reader following a
+// content-addressed link must get the content they asked for and not whatever a
+// name now points at. The floor of 50 characters is what keeps that set to
+// strings nobody registers by accident: every shorter name is unaffected, and
+// no plausible name is 50+ characters of nothing but base32.
+const IPFS_CID_LABEL = /^b[a-z2-7]{49,62}$/
+const IPNS_KEY_LABEL = /^k[0-9a-z]{49,62}$/
+
+function contentLabel(sub) {
+  if (IPFS_CID_LABEL.test(sub)) return { kind: 'ipfs', id: sub }
+  if (IPNS_KEY_LABEL.test(sub)) return { kind: 'ipns', id: sub }
+  return null
+}
+
 // Per-client rate limit — the one thing that keeps a flood from being everyone
 // else's outage.
 //
@@ -449,6 +486,9 @@ async function classifyContract(address, opts) {
 // caller turns that into a 502 rather than anything cached.
 async function resolveTarget(sub, opts) {
   if (ADDRESS_LABEL.test(sub)) return classifyContract(sub, opts)
+  // A content label is already the answer — no registry lookup, no RPC at all.
+  const direct = contentLabel(sub)
+  if (direct) return { resolved: direct }
 
   const tokenId = await computeId(sub, opts)
   if (tokenId === 0n) return { resolved: null }

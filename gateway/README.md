@@ -20,6 +20,8 @@ GET alice.wei.limo/some/path
 
 GET 0x1234…cdef.wei.limo/          # an address label: skips WNS, serves that
                                    # exact contract and no other
+GET bafy…rqu.wei.limo/             # a content label: skips WNS, serves that
+                                   # exact CID (or k51… IPNS key) and no other
 ```
 
 A newly registered `.wei` name works **instantly**, with zero provisioning.
@@ -72,6 +74,36 @@ newly deployed version to sit unchallenged before a name points at it already
 enforces that in `resolveMode()`/`request()`; a second delay here would compose
 into a longer one nobody chose. Reaching a version by its own address is never
 delayed, which is what keeps an urgent fix reachable while a name waits.
+
+### Content labels: `<cid>.wei.limo`
+
+The same idea as an address label, for the other kind of fixed target. An
+address pins a contract's bytes; a CID pins a document's. Both answer *what
+exactly did I audit*, and neither can be repointed by anybody — including
+whoever holds the name that used to carry it.
+
+```
+GET bafybeib…r7d4.wei.limo/paper.pdf     # base32 CIDv1        -> IPFS
+GET k51qzi…v0v8.wei.limo/feed            # base36 libp2p-key   -> IPNS
+```
+
+It costs **no `eth_call` at all**: the label is already the answer, so there is
+no registry lookup to do. In `proxy` mode it inherits the
+[upstream failover](#upstream-failover) like any other IPFS target.
+
+This exists because the alternative was worse. The dapp used to link a name's
+contenthash at `ipfs.io/ipfs/<cid>`, which put a third party in the path of the
+one link whose entire point is that it depends on nobody's goodwill — and then
+that third party started being retired.
+
+**Collision.** `MAX_LABEL_LENGTH` in `NameNFT.sol` is 255 bytes, so a `.wei`
+name of this shape is registrable and this surface would shadow it. That is the
+same trade the address label already makes, resolved the same way: the label
+surface wins, because a reader following a content-addressed link must get the
+content they asked for rather than whatever a name now points at. The 50-
+character floor keeps the shadowed set to strings nobody registers by accident —
+every shorter name is untouched, and no plausible name is fifty-odd characters
+of nothing but base32.
 
 ### Cache-Control comes from the contract
 
