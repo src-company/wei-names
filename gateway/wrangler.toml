@@ -17,8 +17,22 @@ ZONE = "wei.limo,wei.is"
 # 'redirect' (default, bandwidth-light) or 'proxy' (keeps <name>.<zone> in the
 # URL bar but streams content through the Worker).
 GATEWAY_MODE = "redirect"
+# Comma-separated, tried in order. In `proxy` mode a 429/5xx from one entry
+# falls through to the next; in `redirect` mode only the first is ever used,
+# because a 302 is handed out once and cannot be taken back.
+#
+# The Protocol Labs fleet (ipfs.io, dweb.link, and w3s.link / nftstorage.link,
+# which 301 onto dweb.link) is being retired — 429 for a growing slice of each
+# hour since 2026-09-01, gone entirely on 2026-09-21 UTC. In `redirect` mode
+# there is no failing over from that, so this Worker needs an entry here that
+# outlives the fleet, not a longer list of it.
 IPFS_SUBDOMAIN_GATEWAY = "dweb.link"
-IPFS_PATH_GATEWAY = "https://ipfs.io"
+# Last-resort path gateways (`<origin>/ipfs/<cid>/<path>`), comma-separated.
+# Only consulted in `proxy` mode, and only after every subdomain entry: a path
+# gateway serves all CIDs from one origin, so `_redirects` does not apply there.
+# Unset by default — `https://ipfs.io` used to sit here, which is the same fleet
+# that is going away and so was never a fallback from it.
+# IPFS_PATH_GATEWAY = "https://ipfs.example.org"
 # Comma-separated. Leave unset to use the built-in public RPC fallback list.
 # RPC_URLS = "https://eth.llamarpc.com,https://ethereum.publicnode.com"
 # Extra reserved labels beyond the built-in set (www,api,zfi,multisig,...).

@@ -106,11 +106,39 @@ services:
       # bar) or 'redirect' (302, bandwidth-light, per-CID origin isolation).
       - key: GATEWAY_MODE
         value: proxy
-      # Subdomain gateway used in both modes. Must be subdomain (not path) form
-      # so the site's _redirects/SPA fallback applies — deep paths like /docs
-      # 404 on a path gateway (ipfs.io/ipfs/<cid>/docs) even when / works.
+      # Subdomain gateways, comma-separated and tried in order. Must be
+      # subdomain (not path) form so the site's _redirects/SPA fallback applies
+      # — deep paths like /docs 404 on a path gateway (ipfs.io/ipfs/<cid>/docs)
+      # even when / works.
+      #
+      # In `proxy` mode the list is a failover chain: a 429 or 5xx from one
+      # entry moves to the next, and only the last entry's answer is passed to
+      # the visitor. In `redirect` mode only the first entry is used — a 302 is
+      # handed out once and cannot be taken back.
+      #
+      # This is not hypothetical redundancy. The Protocol Labs public fleet
+      # (ipfs.io, dweb.link, and w3s.link / nftstorage.link, which 301 onto
+      # dweb.link) is being retired: since 2026-09-01 it answers 429 for a
+      # growing slice of each hour, and it stops entirely on 2026-09-21 UTC.
+      # A one-entry list is that shutdown, inherited, for every .wei name at
+      # once. Keep at least one entry here that is NOT part of that fleet.
       - key: IPFS_SUBDOMAIN_GATEWAY
         value: dweb.link
+      # Last-resort path gateways (`<origin>/ipfs/<cid>/<path>`), comma-
+      # separated, tried after every subdomain entry and only in `proxy` mode.
+      #
+      # A path gateway serves every CID from one origin, so the site's
+      # _redirects does not apply and extensionless deep paths (/docs for
+      # /docs.html) 404 there — which is why it sits last. Everything else still
+      # works, and in proxy mode the bytes reach the visitor under
+      # <name>.wei.limo either way, so origin isolation is unchanged.
+      #
+      # Set in the dashboard rather than here: this is the natural place for a
+      # self-hosted kubo that already holds the pins, and publishing an open
+      # gateway's URL in a public repo invites strangers to pull arbitrary CIDs
+      # through its bandwidth.
+      - key: IPFS_PATH_GATEWAY
+        sync: false
       # web3:// HTTP gateway for on-chain (ERC-4804) dapps in `auto`/`manual`
       # mode, where serving means translating a URL into calldata:
       # https://<addr>.<WEB3_CHAIN_ID>.<WEB3_GATEWAY><path>.

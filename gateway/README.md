@@ -141,8 +141,9 @@ The gateway also keeps a `RESERVED_LABELS` guard as defense-in-depth.
 | Var | Default | Notes |
 |-----|---------|-------|
 | `GATEWAY_MODE` | `redirect` | `redirect` (302 to a subdomain IPFS gateway, bandwidth-light) or `proxy` (stream through the gateway, keeps `<name>.wei.limo` in the URL bar). Does **not** apply to ERC-5219 / ERC-8244 contract pages, which are always read and written here |
-| `IPFS_SUBDOMAIN_GATEWAY` | `dweb.link` | Subdomain gateway used in **both** modes → `https://<id>.<ipfs\|ipns>.<gw>`. Subdomain (not path) form so the site's `_redirects`/SPA fallback applies and deep paths like `/docs` resolve. |
-| `WEB3_GATEWAY` | `w3link.io` | web3:// HTTP gateway for on-chain (ERC-4804) dapps → `https://<addr>.<chainId>.<gw>` |
+| `IPFS_SUBDOMAIN_GATEWAY` | `dweb.link` | Subdomain gateways used in **both** modes → `https://<id>.<ipfs\|ipns>.<gw>`. Comma-separated and tried in order — see [Upstream failover](#upstream-failover). Subdomain (not path) form so the site's `_redirects`/SPA fallback applies and deep paths like `/docs` resolve. |
+| `IPFS_PATH_GATEWAY` | — | Last-resort path gateways → `<origin>/ipfs/<cid>/<path>`. Comma-separated, tried after every subdomain entry, **`proxy` mode only**. Loses `_redirects`; the natural place for a self-hosted kubo. |
+| `WEB3_GATEWAY` | `w3link.io` | web3:// HTTP gateways for on-chain (ERC-4804) dapps → `https://<addr>.<chainId>.<gw>`. Comma-separated, same failover rules |
 | `WEB3_CHAIN_ID` | `1` | Chain id used in the web3:// gateway host (mainnet) |
 | `RPC_URLS` | built-in list | Comma-separated mainnet RPCs. **Set a dedicated authenticated endpoint in production** — see [Load behaviour](#load-behaviour) |
 | `PAGE_TIMEOUT_MS` | `15000` | Per-endpoint timeout for contract page reads (`request()` / `html()`), which return whole documents — longer than a registry lookup's `5000` |
@@ -162,6 +163,58 @@ kept enforcing an allowlist the code no longer declared, and took `02.zswap.wei`
 and `token.list.wei` offline. The chain decides what exists, DNS and TLS decide
 what is reachable, and `handler.js` refuses only the depths neither could ever
 produce. Don't reintroduce it.
+
+## Upstream failover
+
+`IPFS_SUBDOMAIN_GATEWAY` and `IPFS_PATH_GATEWAY` are ordered lists, not single
+hosts, because a gateway with one upstream inherits that upstream's outages for
+every `.wei` name simultaneously.
+
+In `proxy` mode the gateway walks the list:
+
+1. every `IPFS_SUBDOMAIN_GATEWAY` entry, in order;
+2. then every `IPFS_PATH_GATEWAY` entry, in order.
+
+A **429 or 5xx** moves to the next entry, as does an outright connection
+failure. A **404 does not** — a missing path is a fact about the content that
+every gateway agrees on, so retrying it is a round trip spent arriving at the
+same answer. The last entry is never failed over from: whatever it says reaches
+the visitor, so a one-entry list behaves exactly as it did before there was a
+list. If every entry fails, the last upstream *status* is returned rather than a
+flat 502, so "the fleet is rate-limiting us" stays distinguishable from "the
+fleet is unreachable". `x-wns-upstream` on every response names the entry that
+actually answered.
+
+In `redirect` mode only the **first** subdomain entry is used, and path
+gateways are skipped entirely. A 302 is handed out once and cannot be taken
+back, so there is no failing over from it — and pointing a visitor at a path
+gateway would land them on an origin shared with every other CID, where the
+site's `_redirects` does not apply. If the upstream you can rely on is a path
+gateway, you need `proxy` mode.
+
+### Why this exists
+
+The Protocol Labs public gateway fleet is being retired. `ipfs.io` and
+`dweb.link` are the same service — and so are `w3s.link` and `nftstorage.link`,
+which `301` onto `dweb.link`, so swapping between them is not redundancy. Since
+**2026-09-01** it answers
+
+```
+429 This IPFS gateway is switching to a service worker gateway only.
+```
+
+for a growing slice of each hour, and it stops for good on **2026-09-21 UTC**.
+That is why a name can be correctly pinned, reachable from its own node, and
+still dark from `<name>.wei.limo` on a schedule: the pin was never the problem,
+the single upstream was.
+
+The durable answer is an entry in these lists that is not part of that fleet —
+in practice a kubo node that already holds the pins. Point `IPFS_PATH_GATEWAY`
+at it (set in the host's dashboard, not in this repo: an open gateway's URL in
+a public repo invites strangers to pull arbitrary CIDs through its bandwidth),
+or give it a hostname with wildcard TLS and `Gateway.PublicGateways` in
+subdomain mode and put it in `IPFS_SUBDOMAIN_GATEWAY`, where it also works for
+`redirect` mode and keeps `_redirects` working.
 
 ## Load behaviour
 

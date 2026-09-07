@@ -296,6 +296,25 @@ function readEnv(env, key, fallback) {
   return v === undefined || v === null || v === '' ? fallback : v
 }
 
+// Comma-separated env var -> trimmed, non-empty entries, in order. Same shape
+// as ZONE and RPC_URLS already use, so a single value stays a valid setting.
+function envList(env, key, fallback) {
+  return String(readEnv(env, key, fallback)).split(',').map((s) => s.trim()).filter(Boolean)
+}
+
+// Upstream answers that say "this gateway, right now" rather than "this
+// content": worth asking the next gateway in the list, because another one
+// holding the same CID will answer differently. A 404 is NOT in here — a
+// missing path is a fact about the content and every gateway agrees on it, so
+// retrying it upstream by upstream is latency spent to arrive at the same 404.
+//
+// 429 is the one that matters today: the public gateway fleet is being retired
+// and answers 429 for a growing slice of each hour, so a name pinned and
+// reachable everywhere else still goes dark on a schedule.
+function shouldFailover(status) {
+  return status === 429 || (status >= 500 && status <= 599)
+}
+
 // Pull the WNS subdomain out of a Host header, for any served zone.
 // `alice.wei.limo` -> { sub: 'alice.wei', zone: 'wei.limo' }.
 // Returns null for a zone apex, or a host in none of the served zones.
@@ -612,19 +631,59 @@ export async function handleRequest(request, env, { clientIp = 'unknown' } = {})
   //     SPA fallback, so deep paths 404 even when `/` works. Subdomain gateways
   //     serve each id as its own origin and honour `_redirects`. Needs a base32
   //     CIDv1 / base36 IPNS name (fits a DNS label) — decodeContenthash emits it.
-  let target
+  // `targets` is an ordered list, not one URL: in proxy mode each is tried
+  // until one answers something that isn't shouldFailover(). One entry — the
+  // historical setting — behaves exactly as before, so a single gateway's
+  // status still passes straight through.
+  let targets
   let idHeader
   if (resolved.kind === 'web3') {
-    const web3Gw = readEnv(env, 'WEB3_GATEWAY', 'w3link.io')
     const chainId = readEnv(env, 'WEB3_CHAIN_ID', '1')
-    target = `https://${resolved.address}.${chainId}.${web3Gw}${pathAndQuery}`
+    targets = envList(env, 'WEB3_GATEWAY', 'w3link.io').map((gw) => ({
+      host: gw,
+      url: `https://${resolved.address}.${chainId}.${gw}${pathAndQuery}`,
+    }))
     idHeader = ['x-wns-contract', resolved.address]
   } else {
-    const subGw = readEnv(env, 'IPFS_SUBDOMAIN_GATEWAY', 'dweb.link')
     // Only the parameters the gateway honours reach it; see ipfsQuery.
-    target = `https://${resolved.id}.${resolved.kind}.${subGw}${url.pathname}${ipfsQuery(url.search)}`
+    const query = ipfsQuery(url.search)
+    targets = envList(env, 'IPFS_SUBDOMAIN_GATEWAY', 'dweb.link').map((gw) => ({
+      host: gw,
+      url: `https://${resolved.id}.${resolved.kind}.${gw}${url.pathname}${query}`,
+    }))
+    // Path-gateway fallbacks (`<origin>/ipfs/<cid>/<path>`), proxy mode only.
+    // Deliberately last and deliberately never used for a redirect: a path
+    // gateway serves every CID from one origin, so the site's `_redirects` /
+    // SPA fallback does not apply and extensionless deep paths 404 there even
+    // though `/` and the real filenames are fine. That is a worse answer than a
+    // subdomain gateway and a much better one than the 429 a retiring gateway
+    // returns. In proxy mode the bytes still arrive under <label>.<zone>, so
+    // nothing about origin isolation changes for the visitor.
+    if (mode === 'proxy') {
+      for (const origin of envList(env, 'IPFS_PATH_GATEWAY', '')) {
+        const base = origin.replace(/\/+$/, '')
+        let host = base
+        try {
+          host = new URL(base).host
+        } catch {}
+        targets.push({ host, url: `${base}/${resolved.kind}/${resolved.id}${url.pathname}${query}` })
+      }
+    }
     idHeader = [resolved.kind === 'ipns' ? 'x-ipns-name' : 'x-ipfs-cid', resolved.id]
   }
+  // An env var set to nothing but separators would otherwise leave no upstream
+  // at all; fall back to the documented default rather than 502 every name.
+  if (!targets.length) {
+    targets = [
+      resolved.kind === 'web3'
+        ? { host: 'w3link.io', url: `https://${resolved.address}.1.w3link.io${pathAndQuery}` }
+        : {
+            host: 'dweb.link',
+            url: `https://${resolved.id}.${resolved.kind}.dweb.link${url.pathname}${ipfsQuery(url.search)}`,
+          },
+    ]
+  }
+  const target = targets[0].url
 
   if (mode === 'proxy') {
     // Stream the content through the gateway, keeping <label>.wei.limo in the bar.
@@ -669,24 +728,68 @@ export async function handleRequest(request, env, { clientIp = 'unknown' } = {})
       return shared
     }
 
-    let upstream
-    try {
-      await proxyAcquire()
+    // Walk the upstream list until one answers something worth serving. Only
+    // shouldFailover() statuses and outright fetch failures move on; anything
+    // else — a 200, a 404, a 304 — is this content's real answer and is served.
+    //
+    // The LAST candidate is never failed over from: whatever it says (429 and
+    // all) is what the visitor gets, which is why a one-entry list is bit-for-
+    // bit the old behaviour. `rejected` holds the best failure seen so far so a
+    // list that fails all the way down still returns an upstream's own status
+    // rather than flattening everything into a 502.
+    let upstream = null
+    let rejected = null
+    let lastError = null
+    let servedBy = targets[0]
+    const discard = (res) => {
       try {
-        upstream = await fetch(target, {
-          method: request.method,
-          headers: { accept: request.headers.get('accept') || '*/*' },
-        })
-      } finally {
-        proxyRelease()
-      }
-    } catch (e) {
-      done(null)
-      // An unreachable IPFS gateway is upstream trouble like any other; without
-      // this it escaped handleRequest entirely and server.js turned it into a
-      // bare 500 with no retry-after and no cache-control.
-      return upstreamError(e, 'fetching ' + target)
+        res.body?.cancel()?.catch?.(() => {})
+      } catch {}
     }
+    for (let i = 0; i < targets.length; i++) {
+      const candidate = targets[i]
+      let res
+      try {
+        await proxyAcquire()
+        try {
+          res = await fetch(candidate.url, {
+            method: request.method,
+            headers: { accept: request.headers.get('accept') || '*/*' },
+          })
+        } finally {
+          proxyRelease()
+        }
+      } catch (e) {
+        lastError = e
+        // A full outbound queue is this gateway shedding load, not the upstream
+        // being unwell — every candidate would hit the same closed door, so
+        // stop rather than spending the whole list discovering that.
+        if (e?.overloaded) break
+        continue
+      }
+      if (i < targets.length - 1 && shouldFailover(res.status)) {
+        if (rejected) discard(rejected)
+        rejected = res
+        servedBy = candidate
+        continue
+      }
+      upstream = res
+      servedBy = candidate
+      break
+    }
+    if (!upstream) {
+      if (rejected) {
+        upstream = rejected
+        rejected = null
+      } else {
+        done(null)
+        // An unreachable IPFS gateway is upstream trouble like any other; without
+        // this it escaped handleRequest entirely and server.js turned it into a
+        // bare 500 with no retry-after and no cache-control.
+        return upstreamError(lastError, 'fetching ' + targets[targets.length - 1].url)
+      }
+    }
+    if (rejected) discard(rejected)
     // Forward only a safe subset. Never propagate Set-Cookie: upstream content
     // is untrusted and must not be able to set cookies on a *.wei.limo origin.
     //
@@ -713,6 +816,10 @@ export async function handleRequest(request, env, { clientIp = 'unknown' } = {})
     headers.set('x-wns-name', sub)
     headers.set('x-wns-mode', resolved.kind)
     headers.set(idHeader[0], idHeader[1])
+    // Which upstream answered. With a failover list, "the gateway is serving a
+    // 429" and "the third gateway in the list is serving a 429" are different
+    // problems, and nothing else in the response tells them apart.
+    headers.set('x-wns-upstream', servedBy.host)
     // `Response` throws rather than truncating when a null-body status carries
     // one — same guard the contract path already has.
     if (request.method === 'HEAD' || NULL_BODY_STATUS.has(upstream.status)) {
@@ -730,7 +837,7 @@ export async function handleRequest(request, env, { clientIp = 'unknown' } = {})
         read = await readCapped(upstream, PROXY_MAX_BODY_BYTES)
       } catch (e) {
         done(null)
-        return upstreamError(e, 'reading ' + target)
+        return upstreamError(e, 'reading ' + servedBy.url)
       }
       if (read.stream) {
         done(null)
@@ -758,6 +865,7 @@ export async function handleRequest(request, env, { clientIp = 'unknown' } = {})
       'cache-control': 'public, max-age=300',
       'x-wns-name': sub,
       'x-wns-mode': resolved.kind,
+      'x-wns-upstream': targets[0].host,
       [idHeader[0]]: idHeader[1],
     },
   })

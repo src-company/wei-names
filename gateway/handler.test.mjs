@@ -728,5 +728,136 @@ res = await proxyGet('mipns.wei.limo/')
 eq('mode header: ipns is distinguishable from ipfs', res.headers.get('x-wns-mode'), 'ipns')
 proxyResponse = null
 
+// --- upstream failover -------------------------------------------------------
+
+// The public IPFS gateway fleet answers 429 for a growing slice of every hour
+// on its way to being retired, so a single upstream is a scheduled outage for
+// every name at once. IPFS_SUBDOMAIN_GATEWAY is a list, and proxy mode walks it.
+//
+// Every ipfsName() shares one contenthash, so the proxy cache is keyed on path
+// alone here — each case below needs its own path or it is served the previous
+// one's body.
+async function proxyGetEnv(hostAndPath, extra, method = 'GET') {
+  calls = []
+  return handleRequest(new Request('https://' + hostAndPath, { method }), {
+    ...PROXY_ENV,
+    ...extra,
+  })
+}
+
+const TWO_GW = { IPFS_SUBDOMAIN_GATEWAY: 'brown.out,healthy.gw' }
+let seen = []
+const byHost = (answers) => async (u) => {
+  const host = new URL(u).host
+  seen.push(u)
+  for (const [needle, make] of answers) if (host.includes(needle)) return make()
+  throw new Error('unrouted upstream: ' + u)
+}
+
+routes = ipfsName(70)
+seen = []
+proxyResponse = byHost([
+  ['brown.out', () => new Response('gateway is retiring', { status: 429 })],
+  ['healthy.gw', () => new Response('pinned', { status: 200, headers: { 'content-type': 'text/html' } })],
+])
+res = await proxyGetEnv('f70.wei.limo/failover', TWO_GW)
+eq('failover: a 429 falls through to the next gateway', res.status, 200)
+eq('failover: and serves its body', await res.text(), 'pinned')
+eq('failover: naming who answered', res.headers.get('x-wns-upstream'), 'healthy.gw')
+eq('failover: both were tried, in order', seen.length, 2)
+
+// A single-entry list must behave exactly as it did before there was a list:
+// whatever the one gateway says is the answer, 429 included.
+routes = ipfsName(71)
+seen = []
+proxyResponse = byHost([['brown.out', () => new Response('gateway is retiring', { status: 429 })]])
+res = await proxyGetEnv('f71.wei.limo/alone', { IPFS_SUBDOMAIN_GATEWAY: 'brown.out' })
+eq('failover: one gateway still passes its status through', res.status, 429)
+eq('failover: and is not retried', seen.length, 1)
+eq('failover: a failing upstream is never cached', res.headers.get('cache-control'), 'no-store')
+
+// Exhausting the list returns the last upstream's own status rather than
+// flattening every gateway being unwell into an indistinguishable 502.
+routes = ipfsName(72)
+seen = []
+proxyResponse = byHost([
+  ['brown.out', () => new Response('retiring', { status: 429 })],
+  ['healthy.gw', () => new Response('also down', { status: 503 })],
+])
+res = await proxyGetEnv('f72.wei.limo/allbad', TWO_GW)
+eq('failover: exhausted list keeps an upstream status', res.status, 503)
+eq('failover: after trying every entry', seen.length, 2)
+
+// A 404 is a fact about the content, not about the gateway: asking the next one
+// arrives at the same answer a round-trip later.
+routes = ipfsName(73)
+seen = []
+proxyResponse = byHost([
+  ['brown.out', () => new Response('nope', { status: 404 })],
+  ['healthy.gw', () => new Response('pinned', { status: 200 })],
+])
+res = await proxyGetEnv('f73.wei.limo/missing', TWO_GW)
+eq('failover: a 404 is served, not retried', res.status, 404)
+eq('failover: so only the first gateway is asked', seen.length, 1)
+
+// An unreachable gateway fails over the same as one answering 429.
+routes = ipfsName(74)
+seen = []
+proxyResponse = byHost([
+  ['brown.out', () => { throw new Error('connect ECONNREFUSED') }],
+  ['healthy.gw', () => new Response('pinned', { status: 200 })],
+])
+res = await proxyGetEnv('f74.wei.limo/dead-first', TWO_GW)
+eq('failover: a dead gateway falls through too', res.status, 200)
+eq('failover: to the live one', res.headers.get('x-wns-upstream'), 'healthy.gw')
+
+// Every entry unreachable is still a 502 — there is no upstream status to keep.
+routes = ipfsName(75)
+proxyResponse = async () => { throw new Error('connect ECONNREFUSED') }
+res = await proxyGetEnv('f75.wei.limo/all-dead', TWO_GW)
+eq('failover: all gateways dead is a 502', res.status, 502)
+
+// IPFS_PATH_GATEWAY is the last resort: `<origin>/ipfs/<cid>/<path>`, tried
+// after every subdomain entry. It loses the site's _redirects (a path gateway
+// serves every CID from one origin), which is why it is last and not first.
+routes = ipfsName(76)
+seen = []
+proxyResponse = byHost([
+  ['brown.out', () => new Response('retiring', { status: 429 })],
+  ['self.hosted', () => new Response('from our own box', { status: 200 })],
+])
+res = await proxyGetEnv('f76.wei.limo/deep.html', {
+  IPFS_SUBDOMAIN_GATEWAY: 'brown.out',
+  IPFS_PATH_GATEWAY: 'https://self.hosted:8080/',
+})
+eq('path gateway: takes over when the subdomain gateways are down', res.status, 200)
+eq('path gateway: named as the upstream', res.headers.get('x-wns-upstream'), 'self.hosted:8080')
+eq(
+  'path gateway: addressed by path, with the trailing slash normalised',
+  /^https:\/\/self\.hosted:8080\/ipfs\/[a-z0-9]+\/deep\.html$/.test(seen[1]),
+  true,
+)
+
+// Redirect mode never hands out a path-gateway URL: the visitor would land on a
+// shared origin, on a gateway whose _redirects do not apply, with no way back.
+routes = ipfsName(77)
+res = await handleRequest(new Request('https://f77.wei.limo/'), {
+  ...ENV,
+  IPFS_SUBDOMAIN_GATEWAY: 'first.gw,second.gw',
+  IPFS_PATH_GATEWAY: 'https://self.hosted:8080',
+})
+eq('redirect: goes to the first subdomain gateway', res.status, 302)
+eq('redirect: never to a path gateway', res.headers.get('location').includes('first.gw'), true)
+eq('redirect: and says which', res.headers.get('x-wns-upstream'), 'first.gw')
+
+// A list of nothing but separators must not leave the gateway with no upstream.
+routes = ipfsName(78)
+seen = []
+proxyResponse = byHost([['dweb.link', () => new Response('default', { status: 200 })]])
+res = await proxyGetEnv('f78.wei.limo/empty-list', { IPFS_SUBDOMAIN_GATEWAY: ' , , ' })
+eq('failover: an empty list falls back to the default gateway', res.status, 200)
+eq('failover: which is dweb.link', res.headers.get('x-wns-upstream'), 'dweb.link')
+proxyResponse = null
+
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail ? 1 : 0)
