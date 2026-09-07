@@ -323,7 +323,7 @@ function rememberPage(key, page, address) {
     // +512 for the entry's own overhead, so the byte budget isn't fooled by
     // many tiny bodies. Grouped by address so one contract's share is bounded.
     pageCache.set(key, page, {
-      expires: Date.now() + ttl * 1000,
+      expires: page.fetchedAt + ttl * 1000,
       size: page.body.length + 512,
       group: address,
     })
@@ -530,7 +530,7 @@ export async function handleRequest(request, env, { clientIp = 'unknown' } = {})
     // coalesces every concurrent reader of the name rather than one per URL.
     const pageKey =
       resolved.mode === '5219' ? `${resolved.address}|${url.pathname}${url.search}` : resolved.address
-    let page = pageCache.get(pageKey, now)
+    let page = pageCache.get(pageKey, Date.now())
     if (!page) {
       try {
         if (prefetched) {
@@ -574,6 +574,9 @@ export async function handleRequest(request, env, { clientIp = 'unknown' } = {})
     const headers = new Headers({
       'content-type': page.contentType,
       'cache-control': page.cacheControl,
+      // Include the original read's elapsed time on GET and HEAD. Round up so
+      // sub-second timing cannot extend the contract's freshness deadline.
+      'age': String(Math.max(0, Math.ceil((Date.now() - page.fetchedAt) / 1000))),
       'x-content-type-options': 'nosniff',
       'x-wns-name': sub,
       'x-wns-contract': resolved.address,

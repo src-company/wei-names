@@ -117,6 +117,19 @@ eq('empty is not cacheable', parseCacheControl(''), 0)
 eq('undefined is not cacheable', parseCacheControl(undefined), 0)
 eq('case-insensitive', parseCacheControl('PUBLIC, MAX-AGE=120'), 120)
 eq('quoted value', parseCacheControl('max-age="60"'), 60)
+eq('shared zero overrides browser freshness', parseCacheControl('max-age=300, s-maxage=0'), 0)
+eq('shared short lifetime wins', parseCacheControl('max-age=300, s-maxage=20'), 20)
+eq('shared lifetime alone', parseCacheControl('s-maxage=30'), 30)
+eq('shared lifetime can exceed browser lifetime', parseCacheControl('max-age=0, s-maxage=30'), 30)
+eq('quoted shared lifetime', parseCacheControl('S-MAXAGE = "20", max-age=300'), 20)
+eq('quoted extension cannot invent freshness', parseCacheControl('extension="a, max-age=300, b"'), 0)
+eq('quoted extension cannot override shared policy', parseCacheControl('max-age=300, extension="a, s-maxage=0, b"'), 300)
+for (const policy of [
+  'max-age=300oops', 'max-age="300', 'max-age=300"', 's-maxage=-1, max-age=300',
+  's-maxage=garbage, max-age=300', 'max-age=300, max-age=0', 's-maxage=10, s-maxage=20',
+  'max-age=9007199254740992', 'max-age=300, private="set-cookie"',
+  'max-age=300, no-cache="content-type"',
+]) eq('unsafe policy is not cached: ' + policy, parseCacheControl(policy), 0)
 // `immutable` must be its own token — a directive that merely contains the
 // word must not unlock the longer cap.
 eq('not-immutable does not match', parseCacheControl('max-age=31536000, x-immutable-ish'), 3600)

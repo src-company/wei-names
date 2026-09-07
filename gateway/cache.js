@@ -127,18 +127,43 @@ export function singleFlight(inflight, key, fn) {
 
 // How long the *contract* says its answer may be held, in seconds.
 //
-// `no-store`/`no-cache`/`max-age=0` -> 0, i.e. don't hold it at all. Otherwise
-// max-age, capped: `immutable` gets the longer cap because it means the bytes
+// `no-store`/`no-cache`/`private` -> 0, i.e. don't hold it at all. Otherwise
+// s-maxage takes precedence over max-age for this shared cache. Both accept
+// only complete delta-seconds; ambiguous or malformed policies are not held.
+// The lifetime is capped: `immutable` gets the longer cap because the bytes
 // cannot change, everything else gets the short one. The caps are about this
 // process's memory, not about doubting the contract — a year-long max-age is
 // meaningless to a service that redeploys, and holding every version of every
 // page forever is how a gateway OOMs.
 export function parseCacheControl(value, { cap = 3600, immutableCap = 86_400 } = {}) {
   const cc = String(value || '').toLowerCase()
-  if (/(^|[\s,])(no-store|no-cache|private)([\s,;]|$)/.test(cc)) return 0
-  const m = /(?:^|[\s,])max-age\s*=\s*"?(\d+)"?/.exec(cc)
-  if (!m) return 0
-  const maxAge = Number(m[1])
-  if (!Number.isFinite(maxAge) || maxAge <= 0) return 0
-  return Math.min(maxAge, /(^|[\s,])immutable([\s,;]|$)/.test(cc) ? immutableCap : cap)
+  const parts = []
+  let start = 0, quoted = false, escaped = false
+  for (let i = 0; i < cc.length; i++) {
+    if (escaped) { escaped = false; continue }
+    if (quoted && cc.charCodeAt(i) === 92) { escaped = true; continue }
+    if (cc[i] === '"') quoted = !quoted
+    else if (cc[i] === ',' && !quoted) { parts.push(cc.slice(start, i)); start = i + 1 }
+  }
+  if (quoted || escaped) return 0
+  parts.push(cc.slice(start))
+  const directives = new Map()
+  for (const part of parts) {
+    const at = part.indexOf('=')
+    const name = (at < 0 ? part : part.slice(0, at)).trim()
+    const argument = at < 0 ? '' : part.slice(at + 1).trim()
+    if (['no-store', 'no-cache', 'private'].includes(name)) return 0
+    if (name === 'max-age' || name === 's-maxage') {
+      if (directives.has(name)) return 0
+      const match = /^(?:"(\d+)"|(\d+))$/.exec(argument)
+      if (!match) return 0
+      const seconds = Number(match[1] ?? match[2])
+      if (!Number.isSafeInteger(seconds)) return 0
+      directives.set(name, seconds)
+    } else if (name === 'immutable' && !argument) {
+      directives.set(name, true)
+    }
+  }
+  const seconds = directives.get('s-maxage') ?? directives.get('max-age') ?? 0
+  return Math.min(seconds, directives.has('immutable') ? immutableCap : cap)
 }
