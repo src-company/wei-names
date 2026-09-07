@@ -459,14 +459,12 @@ window.connectWallet = async function() {
 let _rpcProvider = null;
 function getRpcProvider() {
   if (_rpcProvider) return _rpcProvider;
-  // Honor the same custom-RPC override the main app supports (?rpc= / wns_rpc) and
+  // Honor the same explicitly saved RPC as the main app (wns_rpc) and
   // fail over across the public endpoints, so a single throttled node (publicnode is
   // the most rate-limited) can't silently break reverse resolution of the display name.
   let urls = RPCS;
   try {
     const custom = [];
-    const q = new URLSearchParams(location.search).get('rpc');
-    if (q) custom.push(...q.split(','));
     const ls = localStorage.getItem('wns_rpc');
     if (ls) custom.push(...ls.split(','));
     const cleaned = custom.map(s => s.trim()).filter(u => /^https?:\/\//i.test(u));
