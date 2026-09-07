@@ -3,10 +3,10 @@
 
 // CORS-enabled, browser-tolerant public endpoints (kept in sync with index.html's
 // RPC_ENDPOINTS). 1rpc.io and llamarpc were dropped: they CORS-block / rate-limit
-// the wei.domains origin in production.
+// the wei.domains origin in production. cloudflare-eth.com was dropped because it
+// answers eth_chainId and returns -32603 on eth_call — see index.html.
 const RPCS = [
   'https://ethereum-rpc.publicnode.com',
-  'https://cloudflare-eth.com',
   'https://eth.drpc.org',
   'https://eth.merkle.io',
   'https://mainnet.gateway.tenderly.co',

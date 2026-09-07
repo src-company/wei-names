@@ -17,7 +17,6 @@
      (quorum 1, priority order) touches the head of the list, and opening six idle
      TLS connections costs mobile users more than it saves. -->
 <link rel="preconnect" href="https://ethereum-rpc.publicnode.com" crossorigin>
-<link rel="preconnect" href="https://cloudflare-eth.com" crossorigin>
 <script>
 // Prevent dark-mode FOUC: apply class before first paint
 try{var d=localStorage.getItem('dark');if(d==='1'||(d===null&&matchMedia('(prefers-color-scheme:dark)').matches))document.documentElement.classList.add('dark')}catch(_){}
@@ -1182,11 +1181,16 @@ const textEncoder = new TextEncoder();
 // Public endpoints must send CORS headers for the browser origin AND tolerate
 // browser load. 1rpc.io (rate-limits/403s under load) and llamarpc (Cloudflare
 // challenge, no CORS header) were removed after breaking in production on
-// wei.domains. Each endpoint below was verified to return an
-// Access-Control-Allow-Origin header + eth_chainId from a cross-origin request.
+// wei.domains.
+//
+// Each endpoint below is verified on an Access-Control-Allow-Origin header AND
+// an **eth_call**, not eth_chainId. That distinction cost us cloudflare-eth.com,
+// which answers eth_chainId perfectly and returns -32603 on every eth_call —
+// so it passed the old check, sat second in this list, and could not serve a
+// single read the dapp actually makes. gateway/wns.js had already dropped it
+// for exactly this; the dapp had not. Vet on the call you depend on.
 const RPC_ENDPOINTS = [
   'https://ethereum-rpc.publicnode.com',
-  'https://cloudflare-eth.com',
   'https://eth.drpc.org',
   'https://eth.merkle.io',
   'https://mainnet.gateway.tenderly.co',
