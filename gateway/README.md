@@ -174,7 +174,7 @@ The gateway also keeps a `RESERVED_LABELS` guard as defense-in-depth.
 |-----|---------|-------|
 | `GATEWAY_MODE` | `redirect` | `redirect` (302 to a subdomain IPFS gateway, bandwidth-light) or `proxy` (stream through the gateway, keeps `<name>.wei.limo` in the URL bar). Does **not** apply to ERC-5219 / ERC-8244 contract pages, which are always read and written here |
 | `IPFS_SUBDOMAIN_GATEWAY` | `dweb.link` | Subdomain gateways used in **both** modes → `https://<id>.<ipfs\|ipns>.<gw>`. Comma-separated and tried in order — see [Upstream failover](#upstream-failover). Subdomain (not path) form so the site's `_redirects`/SPA fallback applies and deep paths like `/docs` resolve. |
-| `IPFS_PATH_GATEWAY` | — | Last-resort path gateways → `<origin>/ipfs/<cid>/<path>`. Comma-separated, tried after every subdomain entry, **`proxy` mode only**. Loses `_redirects`; the natural place for a self-hosted kubo. |
+| `IPFS_PATH_GATEWAY` | — | Last-resort path gateways → `<origin>/ipfs/<cid>/<path>`. Comma-separated, tried after every subdomain entry, **`proxy` mode only**. The gateway reads the site's `_redirects` itself here (exact rules only) — see [`_redirects` on a path gateway](#_redirects-on-a-path-gateway). The natural place for a self-hosted kubo. |
 | `WEB3_GATEWAY` | `w3link.io` | web3:// HTTP gateways for on-chain (ERC-4804) dapps → `https://<addr>.<chainId>.<gw>`. Comma-separated, same failover rules |
 | `WEB3_CHAIN_ID` | `1` | Chain id used in the web3:// gateway host (mainnet) |
 | `RPC_URLS` | built-in list | Comma-separated mainnet RPCs. **Set a dedicated authenticated endpoint in production** — see [Load behaviour](#load-behaviour) |
@@ -244,8 +244,42 @@ In `redirect` mode only the **first** subdomain entry is used, and path
 gateways are skipped entirely. A 302 is handed out once and cannot be taken
 back, so there is no failing over from it — and pointing a visitor at a path
 gateway would land them on an origin shared with every other CID, where the
-site's `_redirects` does not apply. If the upstream you can rely on is a path
-gateway, you need `proxy` mode.
+site's `_redirects` is not applied by the upstream. If the upstream you can
+rely on is a path gateway, you need `proxy` mode.
+
+### `_redirects` on a path gateway
+
+A subdomain gateway serves each CID as its own origin and applies the site's
+IPIP-290 `_redirects`, so `/docs` resolves to `/docs.html`. A path gateway
+serves the bytes stored under a name and applies nothing, so the same link
+404s — the same URL working or not depending which upstream answered that
+minute, which is close to undebuggable from outside.
+
+So when a **path** target returns 404, the gateway reads `<root>/_redirects`
+itself and applies it:
+
+- **Exact matches only.** Splats and `:placeholders` are a much larger contract
+  than this needs, and a rule that cannot be honoured exactly is skipped rather
+  than half-applied.
+- **Same-site absolute targets only.** A rule pointing off-site, or climbing out
+  of the CID with `..`, is refused — this is untrusted content asking the
+  gateway to hand somebody else its traffic.
+- `200` rewrites the path without moving the address bar; `301`/`302` redirect.
+- A rule whose target is the path it was reached by is skipped.
+- A broken rule leaves the honest 404 in place rather than inventing a worse
+  answer.
+
+The rules are part of the content, so for a CID they are read **once** and
+cached for an hour — an absent `_redirects` cached as an empty rule set, so the
+common case of a site without one costs one round trip ever, not one per 404.
+An IPNS name is mutable and is re-read every time, the same rule `proxyCache`
+already follows. The read goes through the same semaphore and timeout as every
+other outbound fetch.
+
+This runs **after** the failover loop, never inside it: a 404 is still this
+content's real answer and must not trigger a failover. It just gets one declared
+rewrite consulted first. A 404 from a *subdomain* gateway is final — that
+upstream already applied the rules.
 
 ### Why this exists
 
@@ -269,7 +303,7 @@ at it (set in the host's dashboard, not in this repo: an open gateway's URL in
 a public repo invites strangers to pull arbitrary CIDs through its bandwidth),
 or give it a hostname with wildcard TLS and `Gateway.PublicGateways` in
 subdomain mode and put it in `IPFS_SUBDOMAIN_GATEWAY`, where it also works for
-`redirect` mode and keeps `_redirects` working.
+`redirect` mode and applies `_redirects` upstream, splats included.
 
 ## Load behaviour
 

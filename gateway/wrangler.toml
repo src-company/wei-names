@@ -29,7 +29,9 @@ GATEWAY_MODE = "redirect"
 IPFS_SUBDOMAIN_GATEWAY = "dweb.link"
 # Last-resort path gateways (`<origin>/ipfs/<cid>/<path>`), comma-separated.
 # Only consulted in `proxy` mode, and only after every subdomain entry: a path
-# gateway serves all CIDs from one origin, so `_redirects` does not apply there.
+# gateway serves all CIDs from one origin and applies none of the site's own
+# routing; in proxy mode the gateway reads `_redirects` itself to compensate,
+# which is another reason this is ignored in `redirect` mode.
 # Unset by default — `https://ipfs.io` used to sit here, which is the same fleet
 # that is going away and so was never a fallback from it.
 # IPFS_PATH_GATEWAY = "https://ipfs.example.org"

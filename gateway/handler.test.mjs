@@ -5,7 +5,7 @@
 // test can assert not just the response but which calls were and weren't made.
 // No network, no chain, no dependencies.
 
-import { handleRequest, buckets, upstreamHealth } from './handler.js'
+import { handleRequest, buckets, upstreamHealth, redirectsCache } from './handler.js'
 
 let pass = 0
 let fail = 0
@@ -1002,6 +1002,95 @@ calls = []
 res = await handleRequest(new Request('https://bafkreib.wei.limo/'), ENV)
 eq('cid label: a short base32-ish label is still a name', res.status, 404)
 eq('cid label: and did hit the registry', calls.length > 0, true)
+
+// --- _redirects on a path gateway --------------------------------------------
+
+// A subdomain gateway applies the site's IPIP-290 rules, a path gateway does
+// not. With the public subdomain fleet retiring, requests land on path gateways
+// more and more, and `/docs` 404s there while working everywhere else. The
+// gateway reads the rules itself rather than shipping that asymmetry.
+const PATH_ENV = {
+  IPFS_SUBDOMAIN_GATEWAY: 'brown.out',
+  IPFS_PATH_GATEWAY: 'https://self.hosted',
+}
+const REDIRECTS_BODY = [
+  '# a comment, and a blank line follow',
+  '',
+  '/docs    /docs.html   200',
+  '/brand   /brand.html  200',
+  '/old     /new.html    301',
+  '/away    https://evil.example/x  200',
+  '/climb   /../../etc/passwd       200',
+  '/any/*   /splat.html  200',
+  '/self    /self        200',
+  // Distinct paths per scenario: every ipfsName() shares one contenthash, so a
+  // path that was served 200 once is served from the proxy body cache forever
+  // after and never reaches an upstream again.
+  '/d94a    /docs.html   200',
+  '/d94b    /docs.html   200',
+].join('\n')
+
+// answers: [needle, fn] over the FULL url, so paths can be routed too
+const byUrl = (answers) => async (u) => {
+  seen.push(u)
+  for (const [needle, make] of answers) if (u.includes(needle)) return make()
+  return new Response('not found', { status: 404 })
+}
+const SELF_HOSTED = [
+  ['brown.out', () => new Response('retiring', { status: 429 })],
+  ['/_redirects', () => new Response(REDIRECTS_BODY, { status: 200 })],
+  ['/docs.html', () => new Response('the docs page', { status: 200, headers: { 'content-type': 'text/html' } })],
+  ['/new.html', () => new Response('the new page', { status: 200 })],
+]
+
+routes = ipfsName(90)
+upstreamHealth.clear(); redirectsCache.clear(); seen = []
+proxyResponse = byUrl(SELF_HOSTED)
+res = await proxyGetEnv('r90.wei.limo/docs', PATH_ENV, { keepHealth: true })
+eq('_redirects: an exact 200 rule is honoured', res.status, 200)
+eq('_redirects: serving the rewritten file', await res.text(), 'the docs page')
+eq('_redirects: without moving the address bar', res.headers.get('location'), null)
+
+// A 301 rule moves the address bar instead, and stays on this origin.
+routes = ipfsName(91)
+upstreamHealth.clear(); redirectsCache.clear(); seen = []
+res = await proxyGetEnv('r91.wei.limo/old', PATH_ENV, { keepHealth: true })
+eq('_redirects: a 301 rule redirects', res.status, 301)
+eq('_redirects: to the same-site target', res.headers.get('location'), '/new.html')
+eq('_redirects: still naming the upstream', res.headers.get('x-wns-upstream'), 'self.hosted')
+
+// Untrusted content must not be able to point our traffic off-site or climb out
+// of its own CID, and a rule we cannot honour exactly is skipped, not guessed.
+routes = ipfsName(92)
+for (const [path, label] of [['/away', 'off-site'], ['/climb', '..'], ['/any/thing', 'a splat'], ['/self', 'a self-reference']]) {
+  upstreamHealth.clear(); redirectsCache.clear(); seen = []
+  res = await proxyGetEnv(`r92.wei.limo${path}`, PATH_ENV, { keepHealth: true })
+  eq(`_redirects: ${label} rule is not applied`, res.status, 404)
+}
+
+// A 404 from a SUBDOMAIN gateway is final — it already applied the rules, so
+// re-deriving them here would be second-guessing the upstream that got it right.
+routes = ipfsName(93)
+upstreamHealth.clear(); redirectsCache.clear(); seen = []
+proxyResponse = byUrl([['healthy.gw', () => new Response('nope', { status: 404 })]])
+res = await proxyGetEnv('r93.wei.limo/d93', { IPFS_SUBDOMAIN_GATEWAY: 'healthy.gw' }, { keepHealth: true })
+eq('_redirects: a subdomain gateway 404 stands', res.status, 404)
+eq('_redirects: and no rules are fetched for it', seen.some((u) => u.includes('_redirects')), false)
+
+// The rules are part of the content, so for a CID they are read once, not once
+// per 404 — otherwise the fallback costs more than the problem it fixes.
+routes = ipfsName(94)
+upstreamHealth.clear(); redirectsCache.clear(); seen = []
+proxyResponse = byUrl(SELF_HOSTED)
+res = await proxyGetEnv('r94.wei.limo/d94a', PATH_ENV, { keepHealth: true })
+eq('_redirects: first miss reads the rules', seen.filter((u) => u.includes('_redirects')).length, 1)
+eq('_redirects: and applies them', res.status, 200)
+seen = []
+res = await proxyGetEnv('r94.wei.limo/d94b', PATH_ENV, { keepHealth: true })
+eq('_redirects: a second path reuses them', seen.filter((u) => u.includes('_redirects')).length, 0)
+eq('_redirects: and still applies its own rule', res.status, 200)
+proxyResponse = null
+upstreamHealth.clear(); redirectsCache.clear()
 
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail ? 1 : 0)

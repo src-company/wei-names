@@ -408,6 +408,110 @@ function shouldFailover(status) {
   return status === 429 || (status >= 500 && status <= 599)
 }
 
+// --- `_redirects` on a path gateway -----------------------------------------
+//
+// A subdomain gateway serves each CID as its own origin and applies the site's
+// IPIP-290 `_redirects`, so `/docs` resolves to `/docs.html`. A path gateway
+// serves the bytes stored under a name and applies nothing, so the same link
+// 404s. That asymmetry is why path targets sit last — but with the public
+// subdomain fleet retiring, last is increasingly where requests land, and a
+// link that works on one upstream and 404s on another is not a steady state
+// anyone can debug from outside. So the gateway reads the rules itself.
+//
+// EXACT matches only. Splats and `:placeholders` are a much larger contract
+// than this needs, and a rule that cannot be honoured exactly is better skipped
+// than half-applied.
+const REDIRECTS_MAX_BYTES = 64 * 1024
+const REDIRECTS_TTL_MS = 3_600_000
+// Keyed on the CID, which is why only `ipfs` is ever held: the rules are part
+// of the content, so for content-addressed bytes this can never go stale. An
+// IPNS name is mutable and is re-read every time, exactly as proxyCache does.
+export const redirectsCache = new TtlCache({ maxEntries: 200, maxBytes: 4 * 1024 * 1024 })
+
+// Abandoning a response without reading it leaks the connection otherwise.
+function cancelBody(res) {
+  try {
+    res?.body?.cancel()?.catch?.(() => {})
+  } catch {}
+}
+
+// Every outbound fetch in proxy mode goes through here: it takes a semaphore
+// slot and carries the same headers timeout as the main one. The `_redirects`
+// reads below are extra upstream round trips, and extra round trips that skip
+// the concurrency cap are how a 404 storm turns into a socket exhaustion.
+async function proxyFetch(url, { method = 'GET', accept = '*/*', timeoutMs }) {
+  await proxyAcquire()
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    return await fetch(url, { method, headers: { accept }, signal: controller.signal })
+  } finally {
+    clearTimeout(timer)
+    proxyRelease()
+  }
+}
+
+// The site's rules for this target, as a Map of exact path -> { to, status }.
+// An absent or unreadable `_redirects` caches as an EMPTY map rather than as a
+// miss: a site without one is the common case, and re-reading it on every 404
+// would make the fallback cost more than the problem it fixes.
+async function redirectRulesFor(root, resolved, { timeoutMs, now }) {
+  const key = resolved.kind === 'ipfs' ? resolved.id : null
+  if (key) {
+    const hit = redirectsCache.get(key, now)
+    if (hit) return hit
+  }
+  let rules = new Map()
+  let res
+  try {
+    res = await proxyFetch(`${root}/_redirects`, { timeoutMs })
+  } catch {
+    // A failed read is not a cacheable fact about the content — it is a fact
+    // about this moment — so it is the one case that does not get held.
+    return rules
+  }
+  if (res.ok) {
+    let read
+    try {
+      read = await readCapped(res, REDIRECTS_MAX_BYTES)
+    } catch {
+      cancelBody(res)
+      return rules
+    }
+    // Oversized: readCapped hands back a passthrough stream instead of bytes.
+    // A `_redirects` past 64 KB is not a routing table this gateway will parse.
+    if (read.stream) cancelBody(res)
+    else rules = parseRedirects(new TextDecoder().decode(read.body))
+  } else {
+    cancelBody(res)
+  }
+  if (key) {
+    redirectsCache.set(key, rules, {
+      expires: now + REDIRECTS_TTL_MS,
+      size: 256 + rules.size * 128,
+    })
+  }
+  return rules
+}
+
+function parseRedirects(text) {
+  const rules = new Map()
+  for (const line of text.split('\n')) {
+    const trimmed = line.trim()
+    if (!trimmed || trimmed.startsWith('#')) continue
+    const [from, to, status] = trimmed.split(/\s+/)
+    if (!from || !to) continue
+    // Same-site absolute targets only. A rule pointing off-site, or climbing
+    // out of the CID with `..`, is one this gateway will not carry out: it is
+    // untrusted content asking to be handed somebody else's traffic.
+    if (!to.startsWith('/') || to.includes('..')) continue
+    // Wildcards and placeholders are skipped rather than approximated.
+    if (from.includes('*') || from.includes(':')) continue
+    if (!rules.has(from)) rules.set(from, { to, status: Number(status) || 200 })
+  }
+  return rules
+}
+
 // Pull the WNS subdomain out of a Host header, for any served zone.
 // `alice.wei.limo` -> { sub: 'alice.wei', zone: 'wei.limo' }.
 // Returns null for a zone apex, or a host in none of the served zones.
@@ -749,12 +853,12 @@ export async function handleRequest(request, env, { clientIp = 'unknown' } = {})
     }))
     // Path-gateway fallbacks (`<origin>/ipfs/<cid>/<path>`), proxy mode only.
     // Deliberately last and deliberately never used for a redirect: a path
-    // gateway serves every CID from one origin, so the site's `_redirects` /
-    // SPA fallback does not apply and extensionless deep paths 404 there even
-    // though `/` and the real filenames are fine. That is a worse answer than a
-    // subdomain gateway and a much better one than the 429 a retiring gateway
-    // returns. In proxy mode the bytes still arrive under <label>.<zone>, so
-    // nothing about origin isolation changes for the visitor.
+    // gateway serves every CID from one origin, so it applies none of the
+    // site's own routing. The gateway reads `_redirects` itself when a path
+    // target 404s (see redirectRulesFor), which closes most of that gap —
+    // exact rules only, so a splat or an SPA catch-all still behaves better on
+    // a subdomain gateway. In proxy mode the bytes arrive under <label>.<zone>
+    // either way, so nothing about origin isolation changes for the visitor.
     if (mode === 'proxy') {
       for (const origin of envList(env, 'IPFS_PATH_GATEWAY', '')) {
         const base = origin.replace(/\/+$/, '')
@@ -762,7 +866,14 @@ export async function handleRequest(request, env, { clientIp = 'unknown' } = {})
         try {
           host = new URL(base).host
         } catch {}
-        targets.push({ host, url: `${base}/${resolved.kind}/${resolved.id}${url.pathname}${query}` })
+        targets.push({
+          host,
+          url: `${base}/${resolved.kind}/${resolved.id}${url.pathname}${query}`,
+          // Only path targets carry a root, and its presence is the signal that
+          // this upstream applies none of the site's own routing — see
+          // redirectRuleFor. A subdomain gateway needs no such help.
+          root: `${base}/${resolved.kind}/${resolved.id}`,
+        })
       }
     }
     idHeader = [resolved.kind === 'ipns' ? 'x-ipns-name' : 'x-ipfs-cid', resolved.id]
@@ -841,11 +952,7 @@ export async function handleRequest(request, env, { clientIp = 'unknown' } = {})
       Number(readEnv(env, 'PROXY_TIMEOUT_MS', PROXY_TIMEOUT_MS)) || PROXY_TIMEOUT_MS
     // Try the ones that were working most recently first; see byHealth.
     const attempts = byHealth(targets, now)
-    const discard = (res) => {
-      try {
-        res.body?.cancel()?.catch?.(() => {})
-      } catch {}
-    }
+    const discard = cancelBody
     for (let i = 0; i < attempts.length; i++) {
       const candidate = attempts[i]
       let res
@@ -904,6 +1011,65 @@ export async function handleRequest(request, env, { clientIp = 'unknown' } = {})
       }
     }
     if (rejected) discard(rejected)
+
+    // A path gateway applies none of the site's routing, so a link that the
+    // site declares in `_redirects` arrives here as a 404. Consult the rules
+    // once before serving it. Deliberately AFTER the failover loop rather than
+    // inside it: a 404 is still this content's real answer and must not cause a
+    // failover — it just gets one declared rewrite honoured first.
+    //
+    // Only path targets (`servedBy.root`) reach this. A subdomain gateway
+    // already applied the rules, so a 404 from one is final.
+    if (
+      upstream.status === 404 &&
+      servedBy?.root &&
+      (request.method === 'GET' || request.method === 'HEAD')
+    ) {
+      const rules = await redirectRulesFor(servedBy.root, resolved, {
+        timeoutMs: proxyTimeoutMs,
+        now: Date.now(),
+      })
+      // A rule pointing at the path it was reached by would just 404 again.
+      const rule = rules.get(url.pathname)
+      if (rule && rule.to !== url.pathname) {
+        if (rule.status === 301 || rule.status === 302) {
+          discard(upstream)
+          done(null)
+          // `to` is same-site and absolute (parseRedirects enforces both), so
+          // this stays on <label>.<zone> and comes back through this gateway.
+          return new Response(null, {
+            status: rule.status,
+            headers: {
+              location: rule.to,
+              'cache-control': 'public, max-age=300',
+              'x-wns-name': sub,
+              'x-wns-mode': resolved.kind,
+              'x-wns-upstream': servedBy.host,
+              [idHeader[0]]: idHeader[1],
+            },
+          })
+        }
+        // A 200 rule rewrites the path without moving the address bar, which is
+        // the whole point of `/docs 200 /docs.html` rather than a 301.
+        let rewritten = null
+        try {
+          rewritten = await proxyFetch(`${servedBy.root}${rule.to}${ipfsQuery(url.search)}`, {
+            method: request.method,
+            accept: request.headers.get('accept') || '*/*',
+            timeoutMs: proxyTimeoutMs,
+          })
+        } catch {}
+        // Only a working rewrite replaces the 404; a broken rule leaves the
+        // honest answer in place rather than inventing a worse one.
+        if (rewritten && rewritten.ok) {
+          discard(upstream)
+          upstream = rewritten
+        } else if (rewritten) {
+          discard(rewritten)
+        }
+      }
+    }
+
     // Forward only a safe subset. Never propagate Set-Cookie: upstream content
     // is untrusted and must not be able to set cookies on a *.wei.limo origin.
     //

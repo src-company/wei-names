@@ -128,10 +128,12 @@ services:
       # separated, tried after every subdomain entry and only in `proxy` mode.
       #
       # A path gateway serves every CID from one origin, so the site's
-      # _redirects does not apply and extensionless deep paths (/docs for
-      # /docs.html) 404 there — which is why it sits last. Everything else still
-      # works, and in proxy mode the bytes reach the visitor under
-      # <name>.wei.limo either way, so origin isolation is unchanged.
+      # own routing is not applied by the upstream. The gateway reads the
+      # site's _redirects itself when a path target 404s (exact rules only), so
+      # /docs -> /docs.html works here too; a splat or SPA catch-all still needs
+      # a subdomain gateway, which is why this sits last. In proxy mode the
+      # bytes reach the visitor under <name>.wei.limo either way, so origin
+      # isolation is unchanged.
       #
       # Set in the dashboard rather than here: this is the natural place for a
       # self-hosted kubo that already holds the pins, and publishing an open

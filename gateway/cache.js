@@ -101,6 +101,16 @@ export class TtlCache {
     }
   }
 
+  // Drop everything, byte and group accounting included. Nothing in the gateway
+  // needs this at runtime — an entry leaves via its TTL or via eviction — but a
+  // module-level cache that outlives a request has to be resettable, or one
+  // test's held body silently answers the next one's assertion.
+  clear() {
+    this.map.clear()
+    this.groupBytes.clear()
+    this.bytes = 0
+  }
+
   get size() {
     return this.map.size
   }

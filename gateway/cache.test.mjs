@@ -176,5 +176,20 @@ eq('not-immutable does not match', parseCacheControl('max-age=31536000, x-immuta
   eq('group cap: ungrouped entries are unaffected', c.get('plain', Date.now()), 'v')
 }
 
+// clear() must reset the byte and group accounting too, not just the map —
+// otherwise a cleared cache still believes it is full and evicts immediately.
+{
+  const c = new TtlCache({ maxEntries: 10, maxBytes: 1000, maxGroupBytes: 500 })
+  c.set('a', 1, { expires: Date.now() + 1000, size: 400, group: 'g' })
+  c.set('b', 2, { expires: Date.now() + 1000, size: 400 })
+  c.clear()
+  eq('clear: empties the map', c.size, 0)
+  eq('clear: resets the byte total', c.bytes, 0)
+  eq('clear: resets group accounting', c.groupSize('g'), 0)
+  c.set('c', 3, { expires: Date.now() + 1000, size: 900 })
+  eq('clear: the cache is usable again', c.get('c', Date.now()), 3)
+}
+
+
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail ? 1 : 0)
