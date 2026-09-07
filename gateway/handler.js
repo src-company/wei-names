@@ -262,28 +262,9 @@ const RATE_LIMIT_MAX_CLIENTS = 20_000
 // sleeping through a real refill.
 export const buckets = new Map()
 
-// The client, as far as this process can honestly tell.
-//
-// `cf-connecting-ip` first, and it matters which: this service is fronted by
-// Cloudflare (every response carries cf-ray), and Cloudflare OVERWRITES that
-// header, so a client cannot choose its own value. `x-forwarded-for` is the
-// opposite — a proxy APPENDS to whatever arrived, so the leftmost entry is
-// whatever the client typed. Keying on it would let one source rotate a header
-// and get a fresh budget per request, which is a limiter that limits nobody.
-//
-// So x-forwarded-for is only a fallback for running without Cloudflare in
-// front, and there the leftmost entry is the best available answer. Everything
-// unidentifiable shares one bucket: shared is the safe direction, since the
-// alternative is an unlimited lane reachable by dropping a header.
-function clientKey(request) {
-  return (
-    request.headers.get('cf-connecting-ip') ||
-    request.headers.get('true-client-ip') ||
-    request.headers.get('x-forwarded-for')?.split(',')[0].trim() ||
-    request.headers.get('x-real-ip') ||
-    'unknown'
-  )
-}
+// Client identity belongs to the runtime adapter: Node knows its socket peer
+// and trusted proxies; Cloudflare supplies a platform-authenticated header.
+// Callers without transport context share a bucket rather than trusting headers.
 
 // True when this request is over budget. Charges a token when it isn't.
 function rateLimited(key, now, rps, burst) {
@@ -411,7 +392,7 @@ async function resolveTarget(sub, opts) {
   return { resolved: content ? { kind: content.ns, id: content.id } : null }
 }
 
-export async function handleRequest(request, env) {
+export async function handleRequest(request, env, { clientIp = 'unknown' } = {}) {
   const url = new URL(request.url)
   const zones = String(readEnv(env, 'ZONE', ZONE)).split(',').map((s) => s.trim()).filter(Boolean)
 
@@ -428,7 +409,7 @@ export async function handleRequest(request, env) {
   // resolution so a refused request costs no RPC and no upstream fetch.
   const rps = Number(readEnv(env, 'RATE_LIMIT_RPS', RATE_LIMIT_RPS))
   const burst = Number(readEnv(env, 'RATE_LIMIT_BURST', RATE_LIMIT_BURST))
-  if (rateLimited(clientKey(request), Date.now(), rps, burst)) {
+  if (rateLimited(clientIp || 'unknown', Date.now(), rps, burst)) {
     return new Response('Too many requests, slow down.\n', {
       status: 429,
       headers: {
