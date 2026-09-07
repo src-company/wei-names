@@ -62,3 +62,40 @@ assert.equal(accepted.buildRpcProvider().endpoint, 'https://suggested.example', 
 assert.equal(accepted.getRpcProvider().endpoint, 'https://suggested.example');
 assert.match(app, /Only save a node you trust/);
 console.log('RPC trust regressions passed (URL, saved settings, reset, explicit acceptance, wallet reads).');
+
+const vendor = await import(new URL('./vendor/ethers.min.js', import.meta.url));
+const ethers = vendor.default ?? vendor;
+// Import the actual shipping normalizer; the root package is CommonJS.
+const normalizeCode = fs.readFileSync(new URL('./vendor/ens-normalize.min.js', import.meta.url));
+const { ens_normalize } = await import('data:text/javascript;base64,' + normalizeCode.toString('base64'));
+let lookups = [];
+const recipient = '0x1111111111111111111111111111111111111111';
+const ctx = vm.createContext({
+  ethers, ens_normalize, textEncoder: new TextEncoder(),
+  readContract: { resolve: async id => { lookups.push(id); return recipient; } },
+});
+vm.runInContext("const ROOT_NODE = '0x' + '00'.repeat(32);\n" +
+  ['normalizeLabelContract', 'normalizeLabel', 'normalizeRecipientName', 'computeIdFull', 'resolveRecipient'].map(n => lift(app,n)).join('\n'), ctx);
+for (const invalid of ['vital\u200dik.wei', 'vit\u0430lik.wei', 'a..b.wei', '-alice.wei', 'alice-.wei', 'a'.repeat(256)+'.wei']) {
+  lookups = [];
+  assert.equal(await ctx.resolveRecipient(invalid), null, JSON.stringify(invalid));
+  assert.equal(lookups.length, 0, 'unsafe names never reach the RPC');
+}
+for (const [input, full] of [
+  [' ALICE.WEI ', 'alice.wei'], ['alice', 'alice.wei'], ['blog.alice.wei', 'blog.alice.wei'],
+  ['wei', 'wei.wei'], ['alice.wei.wei', 'alice.wei.wei'],
+  ['cafe\u0301.wei', 'café.wei'], ['💩.wei', '💩.wei'],
+]) {
+  lookups = [];
+  const result = await ctx.resolveRecipient(input);
+  assert.equal(result?.name, full, input);
+  assert.equal(result?.address, recipient);
+  assert.equal(lookups[0], BigInt(ethers.namehash(full)), 'displayed full name matches hashed identity');
+}
+assert.equal(ctx.normalizeLabel('vital\u200dik'), 'vital\u200dik', 'permissive management remains available');
+ctx.ens_normalize = null;
+lookups = [];
+assert.equal(await ctx.resolveRecipient('alice.wei'), null, 'missing library fails closed');
+assert.equal(lookups.length, 0);
+assert.equal((await ctx.resolveRecipient(recipient)).address, recipient, 'direct addresses remain usable without the library');
+console.log('Recipient regressions passed (lookalikes, suffix identity, valid Unicode, missing library, direct addresses).');

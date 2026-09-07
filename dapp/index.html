@@ -3590,16 +3590,29 @@ function renderRenewQuote() {
   note.innerHTML = text;
 }
 
+// Payments require strict normalization even though management intentionally
+// supports every contract-valid name. Keep the full suffix so labels named
+// "wei" cannot be stripped twice or hashed as a different recipient.
+function normalizeRecipientName(input) {
+  if (typeof ens_normalize !== 'function') return null;
+  try {
+    let full = ens_normalize(input.trim());
+    if (!full) return null;
+    if (!full.endsWith('.wei')) full += '.wei';
+    for (const label of full.split('.')) {
+      if (normalizeLabelContract(label) !== label) return null;
+    }
+    return full;
+  } catch (_) {
+    return null;
+  }
+}
+
 async function resolveRecipient(input) {
   // If it's already an address, return it
   if (ethers.isAddress(input)) return { address: input, name: null };
 
-  // Check if it looks like a .wei name
-  let name = input.trim();
-  if (name.endsWith('.wei')) name = name.slice(0, -4);
-
-  // Normalize the name (supports both top-level and subdomains)
-  const normalized = normalizeFullName(name);
+  const normalized = normalizeRecipientName(input);
   if (!normalized) return null;
 
   try {
@@ -3614,7 +3627,7 @@ async function resolveRecipient(input) {
     if (!resolved || resolved === ethers.ZeroAddress) {
       return null;
     }
-    return { address: resolved, name: normalized + '.wei' };
+    return { address: resolved, name: normalized };
   } catch (e) {
     return null;
   }
