@@ -130,6 +130,62 @@ function ipfsQuery(search) {
 // shedding requests that would otherwise have been served.
 const PROXY_MAX_INFLIGHT = 10
 const PROXY_MAX_QUEUE = 200
+
+// How long an upstream gets to produce response HEADERS. Not the body: the
+// semaphore slot is released once headers arrive, so a slow large file costs
+// bandwidth, not a slot, and capping the whole transfer would truncate it.
+//
+// Without this a gateway that accepts the connection and then hangs holds a
+// slot until the runtime's own default gives up — minutes, on Node. That is the
+// failure mode wns.js already documents for blastapi.io, and a failover list
+// makes it worse rather than better: one hung entry used to stall one request,
+// and would now stall it once per entry, in series.
+//
+// Env-tunable (PROXY_TIMEOUT_MS) for the same reason the rate limits are: the
+// right value depends on which gateways are in the list, and finding that out
+// under load should not need a redeploy.
+const PROXY_TIMEOUT_MS = 8_000
+
+// An upstream that just failed is skipped for COOLDOWN_MS rather than retried
+// on every single request. Same reasoning as the RPC benching in wns.js: a
+// retiring gateway answering 429 for a minute at a time is not a one-off, and
+// paying a full round trip per request to rediscover it turns a degraded
+// upstream into a slow gateway for everyone.
+//
+// Benched entries are not removed, only deprioritised — the order becomes
+// healthy-first, benched-after, so nothing is ever unreachable and a recovered
+// gateway returns to the front on its own when the bench expires. A 404 never
+// benches: the gateway is fine, the file isn't there.
+const PROXY_COOLDOWN_MS = 30_000
+export const upstreamHealth = new Map()
+
+function benchUpstream(host) {
+  upstreamHealth.set(host, Date.now() + PROXY_COOLDOWN_MS)
+  // Bounded like the rate-limit buckets: the host list is operator-configured
+  // and tiny, but nothing here should be able to grow without a ceiling.
+  if (upstreamHealth.size > 100) {
+    const oldest = upstreamHealth.keys().next()
+    if (!oldest.done) upstreamHealth.delete(oldest.value)
+  }
+}
+
+// Healthy entries first, benched ones after, each group keeping its configured
+// order. Never returns fewer entries than it was given.
+function byHealth(targets, now) {
+  if (targets.length < 2) return targets
+  const healthy = []
+  const benched = []
+  for (const t of targets) {
+    const until = upstreamHealth.get(t.host)
+    if (until === undefined || now >= until) {
+      if (until !== undefined) upstreamHealth.delete(t.host)
+      healthy.push(t)
+    } else {
+      benched.push(t)
+    }
+  }
+  return healthy.concat(benched)
+}
 let proxyBusy = 0
 const proxyWaiting = []
 
@@ -741,37 +797,55 @@ export async function handleRequest(request, env, { clientIp = 'unknown' } = {})
     let rejected = null
     let lastError = null
     let servedBy = targets[0]
+    const proxyTimeoutMs =
+      Number(readEnv(env, 'PROXY_TIMEOUT_MS', PROXY_TIMEOUT_MS)) || PROXY_TIMEOUT_MS
+    // Try the ones that were working most recently first; see byHealth.
+    const attempts = byHealth(targets, now)
     const discard = (res) => {
       try {
         res.body?.cancel()?.catch?.(() => {})
       } catch {}
     }
-    for (let i = 0; i < targets.length; i++) {
-      const candidate = targets[i]
+    for (let i = 0; i < attempts.length; i++) {
+      const candidate = attempts[i]
       let res
       try {
         await proxyAcquire()
+        // The timer is cleared the moment headers land, so the abort covers
+        // connect-and-hang and nothing else — a large body still streams.
+        const controller = new AbortController()
+        const timer = setTimeout(() => controller.abort(), proxyTimeoutMs)
         try {
           res = await fetch(candidate.url, {
             method: request.method,
             headers: { accept: request.headers.get('accept') || '*/*' },
+            signal: controller.signal,
           })
         } finally {
+          clearTimeout(timer)
           proxyRelease()
         }
       } catch (e) {
         lastError = e
+        // A full outbound queue is this gateway's own back-pressure, not the
+        // upstream misbehaving — benching it for that would be self-inflicted.
+        if (!e?.overloaded) benchUpstream(candidate.host)
         // A full outbound queue is this gateway shedding load, not the upstream
         // being unwell — every candidate would hit the same closed door, so
         // stop rather than spending the whole list discovering that.
         if (e?.overloaded) break
         continue
       }
-      if (i < targets.length - 1 && shouldFailover(res.status)) {
-        if (rejected) discard(rejected)
-        rejected = res
-        servedBy = candidate
-        continue
+      if (shouldFailover(res.status)) {
+        benchUpstream(candidate.host)
+        if (i < attempts.length - 1) {
+          if (rejected) discard(rejected)
+          rejected = res
+          servedBy = candidate
+          continue
+        }
+      } else {
+        upstreamHealth.delete(candidate.host)
       }
       upstream = res
       servedBy = candidate
@@ -786,7 +860,7 @@ export async function handleRequest(request, env, { clientIp = 'unknown' } = {})
         // An unreachable IPFS gateway is upstream trouble like any other; without
         // this it escaped handleRequest entirely and server.js turned it into a
         // bare 500 with no retry-after and no cache-control.
-        return upstreamError(lastError, 'fetching ' + targets[targets.length - 1].url)
+        return upstreamError(lastError, 'fetching ' + attempts[attempts.length - 1].url)
       }
     }
     if (rejected) discard(rejected)

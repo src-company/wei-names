@@ -146,6 +146,7 @@ The gateway also keeps a `RESERVED_LABELS` guard as defense-in-depth.
 | `WEB3_GATEWAY` | `w3link.io` | web3:// HTTP gateways for on-chain (ERC-4804) dapps → `https://<addr>.<chainId>.<gw>`. Comma-separated, same failover rules |
 | `WEB3_CHAIN_ID` | `1` | Chain id used in the web3:// gateway host (mainnet) |
 | `RPC_URLS` | built-in list | Comma-separated mainnet RPCs. **Set a dedicated authenticated endpoint in production** — see [Load behaviour](#load-behaviour) |
+| `PROXY_TIMEOUT_MS` | `8000` | How long an upstream IPFS gateway gets to return **headers** in `proxy` mode. Not the body — the transfer is uncapped, only the connect-and-hang is. Exceeding it fails over to the next entry and benches this one |
 | `PAGE_TIMEOUT_MS` | `15000` | Per-endpoint timeout for contract page reads (`request()` / `html()`), which return whole documents — longer than a registry lookup's `5000` |
 | `WNS_CONTRACT` | mainnet WNS | Override the registry address |
 | `RESERVED_LABELS` | — | Extra labels to never treat as `.wei` names (added to the built-in set, which is empty) |
@@ -184,6 +185,28 @@ list. If every entry fails, the last upstream *status* is returned rather than a
 flat 502, so "the fleet is rate-limiting us" stays distinguishable from "the
 fleet is unreachable". `x-wns-upstream` on every response names the entry that
 actually answered.
+
+### Benching and timeouts
+
+Two things stop a failover list from being slower than no list at all:
+
+- **A timeout.** `PROXY_TIMEOUT_MS` (8s) caps how long an upstream gets to
+  return *headers*. Bodies stream uncapped — the semaphore slot is released once
+  headers land, so a large file costs bandwidth, not a slot. Without this cap a
+  gateway that accepts the connection and then hangs holds a slot until the
+  runtime's own default gives up, and a list turns that from one stall into one
+  stall *per entry, in series*. `wns.js` documents the same failure for
+  `blastapi.io` on the RPC side.
+- **Benching.** An entry that fails — timeout, connection error, 429 or 5xx — is
+  deprioritised for 30s instead of being re-tried by every request. During a
+  brownout minute the first request pays one wasted round trip and the rest go
+  straight to a working entry. Benched entries are reordered, never dropped, so
+  even with every entry benched the list is still walked and a name cannot go
+  offline because the gateway lost confidence in all of them. A success clears
+  the bench immediately; an expired one returns to the front on its own.
+
+A **404 never benches**. The gateway is fine, the file isn't there, and one
+visitor's typo must not demote a working upstream for everybody.
 
 In `redirect` mode only the **first** subdomain entry is used, and path
 gateways are skipped entirely. A 302 is handed out once and cannot be taken

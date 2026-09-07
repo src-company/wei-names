@@ -5,7 +5,7 @@
 // test can assert not just the response but which calls were and weren't made.
 // No network, no chain, no dependencies.
 
-import { handleRequest, buckets } from './handler.js'
+import { handleRequest, buckets, upstreamHealth } from './handler.js'
 
 let pass = 0
 let fail = 0
@@ -737,8 +737,13 @@ proxyResponse = null
 // Every ipfsName() shares one contenthash, so the proxy cache is keyed on path
 // alone here — each case below needs its own path or it is served the previous
 // one's body.
-async function proxyGetEnv(hostAndPath, extra, method = 'GET') {
+// Upstream health is module state that outlives a request by design, so it is
+// cleared between scenarios — otherwise a gateway benched by one case silently
+// reorders the next one's list and the assertion under test is not the one
+// being made. The benching cases below pass keepHealth to opt out.
+async function proxyGetEnv(hostAndPath, extra, { method = 'GET', keepHealth = false } = {}) {
   calls = []
+  if (!keepHealth) upstreamHealth.clear()
   return handleRequest(new Request('https://' + hostAndPath, { method }), {
     ...PROXY_ENV,
     ...extra,
@@ -780,6 +785,7 @@ eq('failover: a failing upstream is never cached', res.headers.get('cache-contro
 // flattening every gateway being unwell into an indistinguishable 502.
 routes = ipfsName(72)
 seen = []
+upstreamHealth.clear()
 proxyResponse = byHost([
   ['brown.out', () => new Response('retiring', { status: 429 })],
   ['healthy.gw', () => new Response('also down', { status: 503 })],
@@ -858,6 +864,96 @@ res = await proxyGetEnv('f78.wei.limo/empty-list', { IPFS_SUBDOMAIN_GATEWAY: ' ,
 eq('failover: an empty list falls back to the default gateway', res.status, 200)
 eq('failover: which is dweb.link', res.headers.get('x-wns-upstream'), 'dweb.link')
 proxyResponse = null
+
+// --- upstream benching -------------------------------------------------------
+
+// A gateway that just failed is skipped for a cooldown instead of being re-tried
+// on every request. During the retirement brownout the fleet answers 429 for a
+// minute at a time; without this, every request in that minute pays a full
+// round trip to rediscover it.
+routes = ipfsName(80)
+upstreamHealth.clear()
+seen = []
+proxyResponse = byHost([
+  ['brown.out', () => new Response('retiring', { status: 429 })],
+  ['healthy.gw', () => new Response('pinned', { status: 200 })],
+])
+res = await proxyGetEnv('b80.wei.limo/bench-a', TWO_GW, { keepHealth: true })
+eq('bench: first request fails over', res.status, 200)
+eq('bench: paying one wasted round trip', seen.length, 2)
+eq('bench: and benches the bad gateway', upstreamHealth.has('brown.out'), true)
+
+seen = []
+res = await proxyGetEnv('b80.wei.limo/bench-b', TWO_GW, { keepHealth: true })
+eq('bench: the next request still succeeds', res.status, 200)
+eq('bench: without re-trying the benched gateway', seen.length, 1)
+eq('bench: going straight to the healthy one', res.headers.get('x-wns-upstream'), 'healthy.gw')
+
+// Benched is deprioritised, never removed: with every entry benched the list is
+// still walked, so a total-outage bench can't take a name offline by itself.
+routes = ipfsName(81)
+upstreamHealth.clear()
+upstreamHealth.set('brown.out', Date.now() + 30_000)
+upstreamHealth.set('healthy.gw', Date.now() + 30_000)
+seen = []
+proxyResponse = byHost([
+  ['brown.out', () => new Response('retiring', { status: 429 })],
+  ['healthy.gw', () => new Response('pinned', { status: 200 })],
+])
+res = await proxyGetEnv('b81.wei.limo/all-benched', TWO_GW, { keepHealth: true })
+eq('bench: everything benched still serves', res.status, 200)
+
+// Recovery is automatic: an expired bench puts the entry back at the front.
+routes = ipfsName(82)
+upstreamHealth.clear()
+upstreamHealth.set('brown.out', Date.now() - 1)
+seen = []
+proxyResponse = byHost([
+  ['brown.out', () => new Response('back up', { status: 200 })],
+  ['healthy.gw', () => new Response('pinned', { status: 200 })],
+])
+res = await proxyGetEnv('b82.wei.limo/recovered', TWO_GW, { keepHealth: true })
+eq('bench: an expired bench is retried first', res.headers.get('x-wns-upstream'), 'brown.out')
+eq('bench: and a success clears it', upstreamHealth.has('brown.out'), false)
+
+// A 404 says nothing about the gateway's health, so it must not bench it —
+// otherwise one visitor's typo demotes a working gateway for everybody.
+routes = ipfsName(83)
+upstreamHealth.clear()
+seen = []
+proxyResponse = byHost([['brown.out', () => new Response('nope', { status: 404 })]])
+res = await proxyGetEnv('b83.wei.limo/typo', { IPFS_SUBDOMAIN_GATEWAY: 'brown.out' }, { keepHealth: true })
+eq('bench: a 404 is served', res.status, 404)
+eq('bench: and never benches the gateway', upstreamHealth.has('brown.out'), false)
+
+// A gateway that accepts the connection and then hangs is the expensive case:
+// uncapped it holds a semaphore slot until the runtime gives up, and a failover
+// list would pay that once per entry, in series.
+routes = ipfsName(84)
+upstreamHealth.clear()
+seen = []
+proxyResponse = async (u, init) => {
+  const host = new URL(u).host
+  seen.push(u)
+  if (host.includes('brown.out')) {
+    return new Promise((resolve, reject) => {
+      init.signal.addEventListener('abort', () => reject(new Error('aborted')))
+    })
+  }
+  return new Response('pinned', { status: 200 })
+}
+let began = Date.now()
+res = await proxyGetEnv(
+  'b84.wei.limo/hangs',
+  { ...TWO_GW, PROXY_TIMEOUT_MS: '120' },
+  { keepHealth: true },
+)
+eq('timeout: a hanging gateway is abandoned, not waited on', res.status, 200)
+eq('timeout: and the next one serves', res.headers.get('x-wns-upstream'), 'healthy.gw')
+eq('timeout: after the configured wait, not the runtime default', Date.now() - began < 3_000, true)
+eq('timeout: a hang benches like any other failure', upstreamHealth.has('brown.out'), true)
+proxyResponse = null
+upstreamHealth.clear()
 
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail ? 1 : 0)

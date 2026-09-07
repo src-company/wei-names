@@ -139,6 +139,13 @@ services:
       # through its bandwidth.
       - key: IPFS_PATH_GATEWAY
         sync: false
+      # How long an upstream IPFS gateway gets to return HEADERS in proxy mode
+      # (bodies stream uncapped). A gateway that accepts the connection and then
+      # hangs otherwise holds an outbound slot until Node's own default gives
+      # up, and a failover list pays that once per entry, in series. Failing
+      # this benches the entry for 30s, like the RPC endpoints in wns.js.
+      - key: PROXY_TIMEOUT_MS
+        value: "8000"
       # web3:// HTTP gateway for on-chain (ERC-4804) dapps in `auto`/`manual`
       # mode, where serving means translating a URL into calldata:
       # https://<addr>.<WEB3_CHAIN_ID>.<WEB3_GATEWAY><path>.
