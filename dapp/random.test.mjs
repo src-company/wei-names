@@ -340,7 +340,7 @@ function eq(name, got, want) {
     ['https://a.example', 'https://b.example', 'https://b.example']);
 }
 {
-  // A custom ?rpc= / wns_rpc node replaces the public list everywhere else in the
+  // An explicitly saved wns_rpc node replaces the public list everywhere else in the
   // app; the log walk must not quietly reach past it to a public endpoint.
   const { run, ctx, calls } = sandbox();
   ctx.customRpcs = () => ['https://custom.example'];

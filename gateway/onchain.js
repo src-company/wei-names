@@ -227,23 +227,25 @@ function safeContentType(v) {
 }
 
 function safeCacheControl(v) {
-  return safeHeaderValue(v) && /^[a-z0-9 ,;="'._-]+$/i.test(v)
+  // Quoted extensions may contain punctuation, including URLs. Stripping a
+  // whole field because of an extension must never discard no-store/s-maxage.
+  return safeHeaderValue(v) && /^[\x20-\x7e]+$/.test(v)
 }
 
 // The whole of Rule 4: two headers out of a contract-authored array, each
-// validated, everything else silently dropped. Last occurrence wins, matching
-// how a single-valued header would collapse anyway.
+// validated, everything else silently dropped. Content-Type is single-valued;
+// Cache-Control is a directive list, so repeated fields must be combined.
 export function pickHeaders(headers) {
   let contentType
-  let cacheControl
+  const cacheControls = []
   for (const [k, v] of headers) {
     const name = String(k).trim().toLowerCase()
     if (name === 'content-type' && safeContentType(v)) contentType = v.trim()
-    else if (name === 'cache-control' && safeCacheControl(v)) cacheControl = v.trim()
+    else if (name === 'cache-control') cacheControls.push(safeCacheControl(v) ? v.trim() : 'no-store')
   }
   return {
     contentType: contentType || DEFAULT_CONTENT_TYPE,
-    cacheControl: cacheControl || DEFAULT_CACHE_CONTROL,
+    cacheControl: cacheControls.length ? cacheControls.join(', ') : DEFAULT_CACHE_CONTROL,
   }
 }
 
@@ -276,6 +278,7 @@ export function pathToResource(pathname) {
 export async function fetchErc5219(address, pathname, search, opts) {
   const resource = pathToResource(pathname)
   const params = [...new URLSearchParams(search || '')].map(([k, v]) => [k, v])
+  const fetchedAt = Date.now()
   const res = await ethCall(encodeRequestCall(resource, params), {
     ...opts,
     contract: address,
@@ -293,6 +296,7 @@ export async function fetchErc5219(address, pathname, search, opts) {
   const { contentType, cacheControl } = pickHeaders(decoded.headers)
   return {
     status: safeStatus(decoded.statusCode),
+    fetchedAt,
     body: decoded.body,
     contentType,
     cacheControl,
@@ -302,6 +306,7 @@ export async function fetchErc5219(address, pathname, search, opts) {
 // Call `html()`. Returns null if the contract has no such function (an EOA or
 // an unrelated contract just reverts / returns empty). Throws on RPC failure.
 export async function fetchErc8244(address, opts) {
+  const fetchedAt = Date.now()
   let res
   try {
     res = await ethCall(HTML, {
@@ -328,6 +333,7 @@ export async function fetchErc8244(address, opts) {
   if (body.length === 0) return null
   return {
     status: 200,
+    fetchedAt,
     body,
     contentType: DEFAULT_CONTENT_TYPE,
     cacheControl: DEFAULT_CACHE_CONTROL,

@@ -128,7 +128,10 @@ eq('keep a parameterised media type', pickHeaders(decodeRequestReturn(RET_CT_WIT
 })
 eq('header name match is case-insensitive', pickHeaders([['CACHE-CONTROL', 'no-store']]).cacheControl, 'no-store')
 eq('a value that is not a media type is dropped', pickHeaders([['content-type', 'javascript:alert(1)']]).contentType, 'text/html; charset=utf-8')
-eq('last occurrence wins', pickHeaders([['cache-control', 'no-store'], ['cache-control', 'max-age=5']]).cacheControl, 'max-age=5')
+eq('repeated policies preserve all restrictions', pickHeaders([['cache-control', 'no-store'], ['cache-control', 'max-age=5']]).cacheControl, 'no-store, max-age=5')
+eq('invalid supplied policy fails closed', pickHeaders([['cache-control', 'no-store\r\nX-Evil: 1']]).cacheControl, 'no-store')
+eq('invalid policy cannot be overridden by a later field', pickHeaders([['cache-control', '\u0100'], ['cache-control', 'max-age=5']]).cacheControl, 'no-store, max-age=5')
+eq('quoted extensions preserve the supplied policy', pickHeaders([['cache-control', 'max-age=300, s-maxage=0, ext="https://example.com"']]).cacheControl, 'max-age=300, s-maxage=0, ext="https://example.com"')
 
 // --- 4. status clamping -----------------------------------------------------
 

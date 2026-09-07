@@ -209,13 +209,17 @@ the noisy one. A token bucket (`RATE_LIMIT_RPS` / `RATE_LIMIT_BURST`) refuses
 the source *before* any RPC or upstream fetch, so a refused request costs
 nothing. `/healthz` is exempt.
 
-It keys on `cf-connecting-ip`, and it matters which: Cloudflare **overwrites**
-that header, so a client cannot choose its own value, while `x-forwarded-for` is
-**appended** to whatever arrived — keying on its leftmost entry would hand out a
-fresh budget per request and limit nobody. `x-forwarded-for` is only the
-fallback for running without Cloudflare in front. Note this bounds a single
-source; a distributed flood spreads across addresses and per-IP limiting cannot
-see it.
+The runtime adapter supplies the client identity. The Worker uses Cloudflare's
+overwritten `cf-connecting-ip`. Node defaults to the socket peer and ignores all
+client-supplied forwarding headers. Behind a reverse proxy, configure
+`TRUSTED_PROXY_CIDRS` with that proxy's actual IP addresses or CIDR networks
+(comma-separated IPv4/IPv6). Only trusted peers may supply `X-Forwarded-For`;
+the chain is walked right-to-left until the first untrusted hop. Every trusted
+proxy must append the peer it observed or overwrite the header, and clients
+must not be able to connect from a trusted network. Never use an all-addresses
+range. Invalid configuration fails startup; invalid headers fall back to the
+socket peer. Without this setting, visitors behind a proxy share its budget.
+This limits one source; a distributed flood still spreads across addresses.
 
 **Proxy-mode bodies are held, and one name cannot evict another.** In `proxy`
 mode the gateway fetches the whole document from the IPFS gateway on every hit;

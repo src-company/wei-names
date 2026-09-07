@@ -807,10 +807,11 @@ body.modal-open { overflow: hidden; }
       <label class="rpc-label" for="rpcInput">Custom RPC endpoint (optional)</label>
       <input id="rpcInput" class="rpc-input" type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://your-node.example/rpc">
       <p class="rpc-hint">Leave blank to use the built-in public RPCs. A private or paid node avoids rate limits and the "stuck waiting for confirmation" issue.</p>
+      <p class="rpc-hint">Only save a node you trust: it supplies name addresses used for payments and NFT transfers. A node suggested by a link is inactive until you save it.</p>
       <div id="rpcTestMsg" class="rpc-test" aria-live="polite"></div>
       <div class="rpc-actions">
         <button class="secondary" onclick="resetRpcSettings()">Reset</button>
-        <button onclick="saveRpcSettings()">Save &amp; test</button>
+        <button onclick="saveRpcSettings()">Trust, save &amp; test</button>
       </div>
     </div>
   </div>
@@ -1220,22 +1221,20 @@ function providerFor(url) {
 
 // Optional user-supplied RPC so power users can bypass the shared public
 // endpoints (which can rate-limit / silently fail) without forking the dapp:
-//   ?rpc=https://my-node        (URL param, comma-separated for multiple)
+//   Network settings -> Trust, save & test
 //   localStorage.setItem('wns_rpc', 'https://my-node')
 // When set, these REPLACE the public list (used exclusively), so behaviour is
 // deterministic and a healthy private node isn't undercut by a flaky public one.
 function customRpcs() {
   const out = [];
   try {
-    const q = new URLSearchParams(location.search).get('rpc');
-    if (q) out.push(...q.split(','));
     const ls = localStorage.getItem('wns_rpc');
     if (ls) out.push(...ls.split(','));
   } catch (e) {}
   return out.map(s => s.trim()).filter(u => /^https?:\/\//i.test(u));
 }
 
-// Build the read provider. With one endpoint (a custom ?rpc= / wns_rpc override)
+// Build the read provider. With one endpoint (an explicitly saved wns_rpc override)
 // use it directly; with several, wrap them in a FallbackProvider that fails over on
 // EVERY call — if the top endpoint errors or stalls, ethers advances to the next
 // within the same request (see providerFor for why the FetchRequest tweak is what
@@ -1330,8 +1329,7 @@ async function getRpc() {
 getRpc().catch(() => {});
 
 // --- Custom RPC settings UI ---
-// The ?rpc= override, read defensively (a malformed location.search must not throw
-// inside the settings sheet).
+// A link may suggest an endpoint in the settings sheet, but never activate it.
 function urlRpc() {
   try { return new URLSearchParams(location.search).get('rpc'); } catch (e) { return null; }
 }
@@ -1342,7 +1340,7 @@ function openRpcSettings() {
   $('rpcInput').value = ls || url || '';
   const msg = $('rpcTestMsg');
   msg.className = 'rpc-test';
-  msg.textContent = url && !ls ? 'Currently set via ?rpc= in the URL.' : '';
+  msg.textContent = url && !ls ? 'Suggested by this link — inactive until you trust and save it.' : '';
   $('rpcModalOverlay').classList.add('active');
   document.body.classList.add('modal-open');
 }
@@ -1380,13 +1378,10 @@ async function saveRpcSettings() {
   msg.className = 'rpc-test';
   try {
     const bn = await testRpcUrl(raw);
-    try { localStorage.setItem('wns_rpc', raw); } catch (e) {}
+    localStorage.setItem('wns_rpc', raw);
     invalidateRpc(); // force re-init on the new endpoint
     await getRpc();
-    // customRpcs() merges ?rpc= with the saved value rather than replacing it, so say
-    // so instead of implying the endpoint just saved is the only one in use.
-    msg.textContent = 'Connected ✓  (block ' + bn + ')' +
-      (urlRpc() ? ' — used alongside the ?rpc= endpoint from the URL.' : '');
+    msg.textContent = 'Connected ✓  (block ' + bn + ')';
     msg.className = 'rpc-test success';
     setTimeout(closeRpcSettings, 1000);
   } catch (e) {
@@ -1400,11 +1395,7 @@ function resetRpcSettings() {
   invalidateRpc();
   $('rpcInput').value = '';
   const msg = $('rpcTestMsg');
-  // Reset clears only the saved endpoint; a ?rpc= in the URL still overrides the
-  // public list, so don't announce a fallback that didn't happen.
-  msg.textContent = urlRpc()
-    ? 'Saved endpoint cleared — still using the ?rpc= endpoint from the URL.'
-    : 'Back to the built-in public RPCs.';
+  msg.textContent = 'Back to the built-in public RPCs.';
   msg.className = 'rpc-test';
   getRpc().catch(() => {});
 }
@@ -1824,7 +1815,7 @@ function usableLabel(raw) {
 }
 
 // Fallback corpus, used when eth_getLogs is unavailable — several public endpoints
-// refuse it outright, and a custom ?rpc= node may too. Two lists of short words,
+// refuse it outright, and a saved custom node may too. Two lists of short words,
 // every pair 7-13 characters.
 const RANDOM_HEADS = ['amber','brisk','civic','coral','dusky','ember','fleet','frost','gilt','glass',
   'ivory','jade','keen','lucid','lush','mellow','mint','noble','onyx','opal','pale','plain','quiet',
@@ -3599,16 +3590,29 @@ function renderRenewQuote() {
   note.innerHTML = text;
 }
 
+// Payments require strict normalization even though management intentionally
+// supports every contract-valid name. Keep the full suffix so labels named
+// "wei" cannot be stripped twice or hashed as a different recipient.
+function normalizeRecipientName(input) {
+  if (typeof ens_normalize !== 'function') return null;
+  try {
+    let full = ens_normalize(input.trim());
+    if (!full) return null;
+    if (!full.endsWith('.wei')) full += '.wei';
+    for (const label of full.split('.')) {
+      if (normalizeLabelContract(label) !== label) return null;
+    }
+    return full;
+  } catch (_) {
+    return null;
+  }
+}
+
 async function resolveRecipient(input) {
   // If it's already an address, return it
   if (ethers.isAddress(input)) return { address: input, name: null };
 
-  // Check if it looks like a .wei name
-  let name = input.trim();
-  if (name.endsWith('.wei')) name = name.slice(0, -4);
-
-  // Normalize the name (supports both top-level and subdomains)
-  const normalized = normalizeFullName(name);
+  const normalized = normalizeRecipientName(input);
   if (!normalized) return null;
 
   try {
@@ -3623,7 +3627,7 @@ async function resolveRecipient(input) {
     if (!resolved || resolved === ethers.ZeroAddress) {
       return null;
     }
-    return { address: resolved, name: normalized + '.wei' };
+    return { address: resolved, name: normalized };
   } catch (e) {
     return null;
   }

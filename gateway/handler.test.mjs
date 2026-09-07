@@ -574,6 +574,7 @@ const from = (ip, path = '/') =>
   handleRequest(
     new Request('https://rl.wei.limo' + path, { headers: { 'x-forwarded-for': ip } }),
     RL_ENV,
+    { clientIp: ip },
   )
 
 routes = nameRoutes(40, addr(0xc0de40), {
@@ -608,6 +609,7 @@ const cf = (ip, xff, path) =>
       headers: { 'cf-connecting-ip': ip, 'x-forwarded-for': xff },
     }),
     RL_ENV,
+    { clientIp: ip },
   )
 await cf('9.9.9.9', 'spoof-1', '/?a=1')
 await cf('9.9.9.9', 'spoof-2', '/?a=2')

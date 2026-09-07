@@ -8,6 +8,8 @@ import { handleRequest } from './handler.js'
 
 export default {
   fetch(request, env) {
-    return handleRequest(request, env)
+    // Cloudflare supplies this value at Worker ingress; the shared handler
+    // never infers trust from an arbitrary incoming forwarding header.
+    return handleRequest(request, env, { clientIp: request.headers.get('cf-connecting-ip') || 'unknown' })
   },
 }

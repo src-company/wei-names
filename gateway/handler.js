@@ -262,28 +262,9 @@ const RATE_LIMIT_MAX_CLIENTS = 20_000
 // sleeping through a real refill.
 export const buckets = new Map()
 
-// The client, as far as this process can honestly tell.
-//
-// `cf-connecting-ip` first, and it matters which: this service is fronted by
-// Cloudflare (every response carries cf-ray), and Cloudflare OVERWRITES that
-// header, so a client cannot choose its own value. `x-forwarded-for` is the
-// opposite — a proxy APPENDS to whatever arrived, so the leftmost entry is
-// whatever the client typed. Keying on it would let one source rotate a header
-// and get a fresh budget per request, which is a limiter that limits nobody.
-//
-// So x-forwarded-for is only a fallback for running without Cloudflare in
-// front, and there the leftmost entry is the best available answer. Everything
-// unidentifiable shares one bucket: shared is the safe direction, since the
-// alternative is an unlimited lane reachable by dropping a header.
-function clientKey(request) {
-  return (
-    request.headers.get('cf-connecting-ip') ||
-    request.headers.get('true-client-ip') ||
-    request.headers.get('x-forwarded-for')?.split(',')[0].trim() ||
-    request.headers.get('x-real-ip') ||
-    'unknown'
-  )
-}
+// Client identity belongs to the runtime adapter: Node knows its socket peer
+// and trusted proxies; Cloudflare supplies a platform-authenticated header.
+// Callers without transport context share a bucket rather than trusting headers.
 
 // True when this request is over budget. Charges a token when it isn't.
 function rateLimited(key, now, rps, burst) {
@@ -342,7 +323,7 @@ function rememberPage(key, page, address) {
     // +512 for the entry's own overhead, so the byte budget isn't fooled by
     // many tiny bodies. Grouped by address so one contract's share is bounded.
     pageCache.set(key, page, {
-      expires: Date.now() + ttl * 1000,
+      expires: page.fetchedAt + ttl * 1000,
       size: page.body.length + 512,
       group: address,
     })
@@ -411,7 +392,7 @@ async function resolveTarget(sub, opts) {
   return { resolved: content ? { kind: content.ns, id: content.id } : null }
 }
 
-export async function handleRequest(request, env) {
+export async function handleRequest(request, env, { clientIp = 'unknown' } = {}) {
   const url = new URL(request.url)
   const zones = String(readEnv(env, 'ZONE', ZONE)).split(',').map((s) => s.trim()).filter(Boolean)
 
@@ -428,7 +409,7 @@ export async function handleRequest(request, env) {
   // resolution so a refused request costs no RPC and no upstream fetch.
   const rps = Number(readEnv(env, 'RATE_LIMIT_RPS', RATE_LIMIT_RPS))
   const burst = Number(readEnv(env, 'RATE_LIMIT_BURST', RATE_LIMIT_BURST))
-  if (rateLimited(clientKey(request), Date.now(), rps, burst)) {
+  if (rateLimited(clientIp || 'unknown', Date.now(), rps, burst)) {
     return new Response('Too many requests, slow down.\n', {
       status: 429,
       headers: {
@@ -549,7 +530,7 @@ export async function handleRequest(request, env) {
     // coalesces every concurrent reader of the name rather than one per URL.
     const pageKey =
       resolved.mode === '5219' ? `${resolved.address}|${url.pathname}${url.search}` : resolved.address
-    let page = pageCache.get(pageKey, now)
+    let page = pageCache.get(pageKey, Date.now())
     if (!page) {
       try {
         if (prefetched) {
@@ -593,6 +574,9 @@ export async function handleRequest(request, env) {
     const headers = new Headers({
       'content-type': page.contentType,
       'cache-control': page.cacheControl,
+      // Include the original read's elapsed time on GET and HEAD. Round up so
+      // sub-second timing cannot extend the contract's freshness deadline.
+      'age': String(Math.max(0, Math.ceil((Date.now() - page.fetchedAt) / 1000))),
       'x-content-type-options': 'nosniff',
       'x-wns-name': sub,
       'x-wns-contract': resolved.address,
