@@ -315,6 +315,117 @@ contract WeiTermsAdversarialTest is Test {
         assertEq(address(terms).balance, 0, "nothing left behind");
     }
 
+    /*//////////////////////////////////////////////////////////////
+                          METADATA ACROSS A RENEWAL
+    //////////////////////////////////////////////////////////////*/
+
+    /// Every resolver record is keyed by `recordVersion[tokenId]`, and that counter moves only in
+    /// `_register`, when an expired name is taken by someone new. `renew()` writes one field —
+    /// `expiresAt` — so a renewal cannot invalidate a record. Drive the whole surface through a
+    /// ten-year top-up and read it all back.
+    function test_ARenewalLosesNoRecords() public {
+        uint256 id = _register("richname", alice);
+        uint256 fee = nft.getFee(8);
+
+        bytes memory hash = hex"e30101701220c3c4733ec8affd06cf9e9ff50ffc6bcd2ec85a6170004bb709669c31de94391a";
+        vm.startPrank(alice);
+        nft.setAddr(id, address(0xCAFE));
+        nft.setContenthash(id, hash);
+        nft.setText(id, "url", "https://wei.domains");
+        nft.setText(id, "com.github", "z0r0z");
+        nft.setAddrForCoin(id, 0, hex"00112233445566778899aabbccddeeff00112233");
+        nft.setPrimaryName(id);
+        uint256 sub = nft.registerSubdomain("blog", id);
+        nft.setAddr(sub, address(0xBEEF));
+        vm.stopPrank();
+
+        uint256 versionBefore = nft.recordVersion(id);
+        uint64 expiryBefore = uint64(nft.expiresAt(id));
+
+        // Ten further years, bought by a stranger — renewal is permissionless, and paying for
+        // someone else's name must not disturb it any more than paying for your own.
+        vm.prank(stranger);
+        terms.renew{value: fee * 10}(id, 10);
+
+        assertEq(nft.expiresAt(id), expiryBefore + 10 * TERM, "the expiry moved, and only it");
+        assertEq(nft.recordVersion(id), versionBefore, "the record version did not move");
+
+        assertEq(nft.ownerOf(id), alice, "still alice's");
+        assertEq(nft.resolve(id), address(0xCAFE), "addr survived");
+        assertEq(nft.contenthash(id), hash, "contenthash survived");
+        assertEq(nft.text(id, "url"), "https://wei.domains", "text survived");
+        assertEq(nft.text(id, "com.github"), "z0r0z", "every text key survived");
+        assertEq(nft.addr(id, 0), hex"00112233445566778899aabbccddeeff00112233", "coin addr survived");
+        assertEq(nft.primaryName(alice), id, "the display name survived");
+
+        // The subdomain hangs off the parent's epoch, which a renewal does not touch either.
+        assertEq(nft.ownerOf(sub), alice, "the subdomain is still held");
+        assertEq(nft.resolve(sub), address(0xBEEF), "and still resolves");
+    }
+
+    /// The same through the helper's batch entry point, and through a name renewed while it sits
+    /// in grace — the branch where the dapp offers renewal as the only remaining action.
+    function test_ABatchRenewalInGraceLosesNoRecords() public {
+        uint256 id = _register("gracename", alice);
+        uint256 fee = nft.getFee(9);
+
+        vm.startPrank(alice);
+        nft.setAddr(id, address(0xCAFE));
+        nft.setText(id, "url", "https://wei.domains");
+        nft.setPrimaryName(id);
+        vm.stopPrank();
+
+        // Into grace: expired, but not past the 90-day window.
+        vm.warp(nft.expiresAt(id) + 30 days);
+        uint256 versionBefore = nft.recordVersion(id);
+        uint64 expiryBefore = uint64(nft.expiresAt(id));
+
+        uint256[] memory ids = new uint256[](1);
+        uint256[] memory n = new uint256[](1);
+        (ids[0], n[0]) = (id, 5);
+
+        vm.prank(alice);
+        terms.renewMany{value: fee * 5}(ids, n);
+
+        assertEq(nft.expiresAt(id), expiryBefore + 5 * TERM, "extended from the old expiry");
+        assertEq(nft.recordVersion(id), versionBefore, "the record version did not move");
+        assertEq(nft.resolve(id), address(0xCAFE), "addr survived the grace renewal");
+        assertEq(nft.text(id, "url"), "https://wei.domains", "text survived it");
+        assertEq(nft.primaryName(alice), id, "and the display name survived it");
+    }
+
+    /// The counterpart, so the boundary is pinned from both sides: a name allowed to lapse past
+    /// grace and taken by someone new does *not* carry the old holder's records over. That is the
+    /// one place a version bump is meant to happen.
+    function test_ReRegistrationAfterGraceDoesNotInheritRecords() public {
+        uint256 id = _register("lapsed", alice);
+
+        vm.startPrank(alice);
+        nft.setAddr(id, address(0xCAFE));
+        nft.setText(id, "url", "https://wei.domains");
+        nft.setPrimaryName(id);
+        vm.stopPrank();
+
+        uint256 versionBefore = nft.recordVersion(id);
+
+        // Past expiry and past the whole grace period, then taken by a stranger.
+        vm.warp(nft.expiresAt(id) + 91 days);
+        bytes32 secret = keccak256("relapse");
+        vm.startPrank(stranger);
+        nft.commit(keccak256(abi.encode(bytes("lapsed"), stranger, secret)));
+        vm.warp(block.timestamp + MIN_COMMIT_AGE + 1);
+        nft.reveal{value: nft.getFee(6) + nft.getPremium(id)}("lapsed", secret);
+        vm.stopPrank();
+
+        assertEq(nft.ownerOf(id), stranger, "the name changed hands");
+        assertTrue(nft.recordVersion(id) > versionBefore, "and the record version moved");
+        // `resolve` falls back to the holder when no addr record is set, so the new owner rather
+        // than zero is what proves the old record is gone — it would still read 0xCAFE otherwise.
+        assertEq(nft.resolve(id), stranger, "the old addr is gone, and it resolves to the new owner");
+        assertEq(nft.text(id, "url"), "", "the old text is gone");
+        assertEq(nft.primaryName(alice), 0, "and it is no longer alice's display name");
+    }
+
     /// The helper must never end a call holding a name, whatever the recipient does.
     function test_RegisterNeverLeavesTheNameHere() public {
         RejectsERC721 rec = new RejectsERC721();

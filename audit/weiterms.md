@@ -105,6 +105,19 @@ money — `renewMany` is all-or-nothing, so it cannot leave a partial extension 
 **Delivery.** A recipient whose `onERC721Received` reverts still receives the name, and the helper
 ends the call holding no token, no approval and no operator rights (T-8, below).
 
+**Metadata across a renewal.** Every resolver record — `addr`, `contenthash`, `text`, per-coin
+addresses — is stored keyed by `recordVersion[tokenId]`, and that counter moves in exactly one
+place: `_register`, when a name that lapsed past grace is taken by someone new. `NameNFT.renew()`
+writes a single field, `expiresAt`. So a renewal cannot invalidate a record by construction, and
+three PoCs drive it rather than assert it: the full record surface plus a subdomain and a display
+name survives a ten-year top-up *paid by a stranger*; the same survives a five-year `renewMany`
+on a name sitting in grace, which is the branch where the dapp offers renewal as the only
+remaining action; and the boundary is pinned from the other side too — a name allowed to lapse
+past grace and re-registered by someone else does **not** carry the previous holder's records
+over, which is the one place the version bump is meant to happen. (`resolve` falls back to the
+holder when no addr record is set, so a re-registered name reads as the new owner rather than
+zero.)
+
 **Live behaviour.** `test/ForkMultiYear.t.sol` was run against mainnet with `RUN_FORK_TERMS=true`
 — it self-skips otherwise, and a bare `forge test` reports it as passing while executing nothing,
 which is worth knowing. All fourteen cases pass with real gas, including custody across a live
@@ -239,5 +252,5 @@ price guarantee the client was not taking up. That is fixed. The remaining items
 know about rather than defects to fix, and each is now pinned by a test that fails loudly if it
 ever stops being true.
 
-**Coverage after this pass**: 51 unit cases (40 existing + 11 adversarial), 14 live-fork cases,
+**Coverage after this pass**: 54 unit cases (40 existing + 14 adversarial), 14 live-fork cases,
 56 dapp cases (35 existing + 21 for the new guards).
