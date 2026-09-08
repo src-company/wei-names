@@ -646,6 +646,11 @@ one year to the **current** expiry. Calls therefore compound, and N years is N c
 
 `MAX_TERMS` is 25, applied per call and per `renewMany` entry.
 
+`quote` reads the name's record without checking one exists, so an unregistered token id prices at
+the zero-length tier and returns a confident, wrong number. Nothing can be lost through it —
+spending that quote reverts inside `NameNFT.renew`, and `renewMany` is all-or-nothing — but check
+`expiresAt(tokenId) != 0` before treating a non-zero quote as evidence a name is renewable.
+
 Properties, each covered by a test in `test/WeiTerms.t.sol`:
 
 - **No authority over names.** `renew()` ignores `msg.sender`, so the helper needs no approval and
@@ -686,6 +691,9 @@ Commit again for a different one.
 
 The premium is charged once by `reveal()` and never repeats, so a multi-year quote is
 `premium + terms * fee`, not `terms * (premium + fee)`.
+
+Reviewed in [`audit/weiterms.md`](audit/weiterms.md) against the deployed instance, which is
+byte-identical to `src/WeiTerms.sol` including the metadata trailer.
 
 ---
 
