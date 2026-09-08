@@ -316,6 +316,60 @@ contract WeiTermsAdversarialTest is Test {
     }
 
     /*//////////////////////////////////////////////////////////////
+                       THE COMMITMENT'S OWNER FIELD
+    //////////////////////////////////////////////////////////////*/
+
+    /// The sharpest form of the question the binding answers. `register`'s calldata puts the
+    /// label, the inner secret, the recipient and the term count in the mempool in the clear —
+    /// everything needed to derive the secret. An attacker holding all of it still cannot settle
+    /// the commitment at the registry, because `reveal()` derives its commitment from
+    /// `msg.sender`, and the committed one names the helper.
+    function test_ALeakedRevealCannotBeSettledDirectlyAtTheRegistry() public {
+        bytes32 inner = keccak256("leaked");
+        vm.prank(alice);
+        uint256 fee = _commitFor("leakage", inner, alice, 6);
+
+        // Everything the reveal would have carried, reconstructed by an onlooker.
+        bytes32 secret = keccak256(abi.encode(inner, alice, uint256(6)));
+
+        vm.prank(stranger);
+        vm.expectRevert(); // CommitmentNotFound: keccak(label, stranger, secret) is a different hash
+        nft.reveal{value: fee * 6}("leakage", secret);
+
+        // Nor by pretending to be the helper's own address as the recipient.
+        vm.prank(stranger);
+        vm.expectRevert();
+        terms.register{value: fee * 6}("leakage", inner, stranger, 6);
+
+        // The commitment is untouched by either attempt: the intended settlement still works.
+        vm.prank(alice);
+        uint256 id = terms.register{value: fee * 6}("leakage", inner, alice, 6);
+        assertEq(nft.ownerOf(id), alice, "still settles for the person who committed");
+    }
+
+    /// `commit()` stores a hash against a timestamp and nothing else — it never records who
+    /// called it. The owner field lives entirely in the preimage, and binds the *revealer*, not
+    /// the committer. So a third party may pay to submit someone's commitment, and it changes
+    /// nothing about who can settle it or where the name lands.
+    function test_AnyoneMaySubmitTheCommitmentAndItChangesNothing() public {
+        bytes32 inner = keccak256("bystander");
+        bytes32 secret = keccak256(abi.encode(inner, alice, uint256(3)));
+        bytes32 commitment = keccak256(abi.encode(bytes("bystand"), address(terms), secret));
+
+        // A stranger submits it. Nothing about the commitment is theirs.
+        vm.prank(stranger);
+        nft.commit(commitment);
+        vm.warp(block.timestamp + MIN_COMMIT_AGE + 1);
+
+        uint256 fee = nft.getFee(7);
+        vm.prank(stranger);
+        uint256 id = terms.register{value: fee * 3}("bystand", inner, alice, 3);
+
+        assertEq(nft.ownerOf(id), alice, "the name goes where the secret says, not to the payer");
+        assertEq(nft.expiresAt(id), block.timestamp + 3 * TERM, "for the committed term count");
+    }
+
+    /*//////////////////////////////////////////////////////////////
                           METADATA ACROSS A RENEWAL
     //////////////////////////////////////////////////////////////*/
 

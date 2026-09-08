@@ -105,6 +105,19 @@ money — `renewMany` is all-or-nothing, so it cannot leave a partial extension 
 **Delivery.** A recipient whose `onERC721Received` reverts still receives the name, and the helper
 ends the call holding no token, no approval and no operator rights (T-8, below).
 
+**The commitment's owner field.** `makeCommitment(label, owner, secret)` looks like a delegation
+field and is not one. `commit()` stores a hash against a timestamp and never records who called
+it; `reveal()` recomputes the commitment from **`msg.sender`**. So naming `WeiTerms` there does
+not hand it authority — it *restricts* settlement to it, and that restriction is what makes the
+reveal safe to broadcast. Two PoCs: an onlooker holding the entire leaked reveal — label, inner
+secret, recipient, term count — cannot settle it directly at the registry, because
+`keccak(label, attacker, secret)` is a different hash, and cannot redirect it through the helper
+either; and the commitment survives both attempts intact. Separately, because `commit()` is
+permissionless and records nothing about its caller, a third party may pay to submit someone
+else's commitment and it changes neither who can settle it nor where the name lands. There is no
+trust step in the forwarding itself: the only reveal that succeeds is one whose `to` matches the
+bound secret, and the line after the mint transfers to that same `to`.
+
 **Metadata across a renewal.** Every resolver record — `addr`, `contenthash`, `text`, per-coin
 addresses — is stored keyed by `recordVersion[tokenId]`, and that counter moves in exactly one
 place: `_register`, when a name that lapsed past grace is taken by someone new. `NameNFT.renew()`
@@ -252,5 +265,5 @@ price guarantee the client was not taking up. That is fixed. The remaining items
 know about rather than defects to fix, and each is now pinned by a test that fails loudly if it
 ever stops being true.
 
-**Coverage after this pass**: 54 unit cases (40 existing + 14 adversarial), 14 live-fork cases,
+**Coverage after this pass**: 56 unit cases (40 existing + 16 adversarial), 14 live-fork cases,
 56 dapp cases (35 existing + 21 for the new guards).
