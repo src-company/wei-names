@@ -87,6 +87,8 @@ function sandbox(weiTerms) {
     lift('showTermRow'),
     lift('hideTermRow'),
     lift('onTermChange'),
+    lift('priceRose'),
+    lift('readPendingTerms'),
   ].join('\n\n'), ctx, { filename: 'index.html' });
   return { termRow, termSelect, termNote, run: c => vm.runInContext(c, ctx) };
 }
@@ -197,6 +199,48 @@ const DEPLOYED = '0x00000000000000000000000000000000000000Fe';
     termSelect.value = bad;
     eq(`control: "${bad}" falls back to one year`, run('selectedTerms()'), 1);
   }
+}
+
+// -- holding the price the user agreed to ------------------------------------
+// The fee is owner-settable on the registry, and a commitment can sit for a day. WeiTerms caps
+// spending at msg.value, so a caller who sends the price it was quoted is safe by construction —
+// but the dapp re-reads the fee at send time, so without this comparison it would send the new
+// price, multiplied by the term count, without ever showing it.
+{
+  const { run } = sandbox(DEPLOYED);
+  const fee = 500000000000000n;
+
+  ok('price guard: an unchanged price passes', run(`priceRose('${fee * 10n}', ${fee * 10n}n)`) === false);
+  ok('price guard: a cheaper price passes', run(`priceRose('${fee * 10n}', ${fee * 9n}n)`) === false);
+  ok('price guard: a dearer price stops', run(`priceRose('${fee * 10n}', ${fee * 10n + 1n}n)`) === true);
+  // A ten-year commitment multiplies any fee move by ten, which is the whole reason for this.
+  ok('price guard: a doubled fee across ten years stops',
+    run(`priceRose('${fee * 10n}', ${fee * 20n}n)`) === true);
+
+  // Commitments made before this shipped carry no agreed price. They must still be revealable.
+  ok('price guard: no recorded price never blocks', run(`priceRose(null, ${fee}n)`) === false);
+  ok('price guard: an empty recorded price never blocks', run(`priceRose('', ${fee}n)`) === false);
+  ok('price guard: an unparseable price never blocks', run(`priceRose('nonsense', ${fee}n)`) === false);
+}
+
+// -- reading a term count back out of storage --------------------------------
+// The count is folded into the commitment secret, so a wrong one buys nothing — but it is also
+// multiplied into msg.value, so a wrong one decides what the wallet is asked to approve.
+{
+  const { run } = sandbox(DEPLOYED);
+  eq('stored terms: a plain count reads back', run('readPendingTerms({ terms: 7 })'), 7);
+  eq('stored terms: ten, the most the UI offers', run('readPendingTerms({ terms: 10 })'), 10);
+  eq('stored terms: absent means one year', run('readPendingTerms({})'), 1);
+  eq('stored terms: null means one year', run('readPendingTerms({ terms: null })'), 1);
+  eq('stored terms: no pending at all means one year', run('readPendingTerms(null)'), 1);
+
+  // Anything else is refused rather than clamped: the commitment is bound to one count, so
+  // quietly substituting another would spend gas on a reveal that cannot match.
+  for (const bad of ['0', '-3', '11', '1e30', '1.5', 'abc', 'null', 'undefined']) {
+    ok(`stored terms: ${bad} is refused, not clamped`,
+      run(`readPendingTerms({ terms: ${bad === 'null' || bad === 'undefined' ? '"' + bad + '"' : JSON.stringify(bad)} })`) === null);
+  }
+  ok('stored terms: a number past the cap is refused', run('readPendingTerms({ terms: 1e30 })') === null);
 }
 
 // -- before the contract is deployed -----------------------------------------

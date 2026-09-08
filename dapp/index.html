@@ -2458,6 +2458,9 @@ async function doCommit() {
       terms,
       commitOwner,
       commitment,
+      // The price the user was looking at when they chose this term count. The reveal compares
+      // against it instead of paying whatever the fee happens to be up to a day later.
+      quotedWei: _termFee == null ? null : termsTotal(_termFee, _termPremium, terms).toString(),
       timestamp: Math.floor(Date.now() / 1000),
       confirmed: false
     };
@@ -2529,6 +2532,26 @@ async function doCommit() {
 // the names that carry one.
 function termsTotal(fee, premium, terms) {
   return (premium || 0n) + fee * BigInt(terms);
+}
+
+// The registry owner can move the fee between the moment a price is shown and the moment the
+// transaction is signed, and a term count multiplies that move by up to ten. WeiTerms only
+// reverts rather than overspend when the caller sends the price it was quoted; the dapp re-reads
+// the fee at send time, so nothing would revert — it would silently cost more. Carrying the
+// agreed price and comparing against it is what puts that protection back.
+function priceRose(agreedWei, liveWei) {
+  if (agreedWei === null || agreedWei === undefined || agreedWei === '') return false;
+  try { return BigInt(liveWei) > BigInt(agreedWei); } catch (_) { return false; }
+}
+
+// A term count comes back out of localStorage, where nothing guarantees it is still the integer
+// that went in. It is folded into the commitment secret on-chain, so a wrong one cannot buy
+// anything — but it is also multiplied into msg.value, so a wrong one can put an absurd number in
+// front of the user's wallet. Read it as null rather than trust it.
+function readPendingTerms(pending) {
+  if (!pending || pending.terms === undefined || pending.terms === null) return 1;
+  const n = Number(pending.terms);
+  return Number.isInteger(n) && n >= 1 && n <= MAX_TERMS ? n : null;
 }
 
 // Which contract a commitment is bound to decides what can pay for it. One year goes through
@@ -2668,17 +2691,35 @@ async function doReveal() {
     if (!results[0] || !results[1]) {
       throw new Error('Failed to fetch fee data');
     }
-    const terms = pending.terms || 1;
+    const terms = readPendingTerms(pending);
+    if (terms === null) {
+      showStatus('This commitment is unreadable. Cancel it and commit again.', 'error');
+      return;
+    }
     const total = termsTotal(results[0][0], results[1][0], terms);
+
+    // A fee raised between the commit and the reveal would otherwise be paid without comment,
+    // multiplied by the term count. Stop once, show the new price, and let a second press take it.
+    if (priceRose(pending.quotedWei, total)) {
+      pending.quotedWei = total.toString();
+      savePending(pending);
+      displayPending(pending);
+      showStatus('The price changed — ' + fmtEth(total, 6) + ' ETH for ' + terms +
+        (terms === 1 ? ' year' : ' years') + '. Press Register again to accept it.', 'error');
+      return;
+    }
 
     showStatus('Registering ' + pending.name + '.wei...', '');
     let tx;
     if (pending.commitOwner === WEI_TERMS && WEI_TERMS) {
       // Reveal and every further year in one transaction. The recipient and the term count are
-      // folded into the secret, so a copy that changes either matches no commitment.
+      // folded into the secret, so a copy that changes either matches no commitment. Deliver to
+      // the address the secret was derived from — the guard above proves it is the connected one,
+      // and using it directly leaves no way for the two to disagree.
       const helper = new ethers.Contract(WEI_TERMS, WEI_TERMS_ABI, _signer);
       tx = await wcTransaction(
-        helper.register(pending.name, pending.secret, _connectedAddress, terms, { value: total }),
+        helper.register(pending.name, pending.secret, pending.owner || _connectedAddress, terms,
+          { value: total }),
         'Approve registration'
       );
     } else if (pending.commitOwner === ZROUTER) {
@@ -2984,6 +3025,14 @@ function clearPending() {
 let pendingTimerId = 0; // Unique ID to prevent stale timer callbacks
 let pendingTimeoutId = null; // Actual setTimeout ID for cleanup
 
+// The recorded price, if there is a readable one. A figure that will not parse is simply not
+// shown — the panel has to render either way, and the reveal re-reads the live price regardless.
+function pendingPriceHtml(pending) {
+  if (!pending || !pending.quotedWei) return '';
+  try { return ' · about <b>' + fmtEth(BigInt(pending.quotedWei), 6) + ' ETH</b>'; }
+  catch (_) { return ''; }
+}
+
 function displayPending(pending) {
   const el = $('pending');
   if (!el) return;
@@ -2991,10 +3040,21 @@ function displayPending(pending) {
   $('pendingName').textContent = pending.name + '.wei';
   // A commitment made for several years can only be revealed by WeiTerms, which takes ETH —
   // so say so, and take the token options away rather than let them fail at the reveal.
-  const terms = pending.terms || 1;
-  const multi = terms > 1;
+  const terms = readPendingTerms(pending);
+  // What makes a commitment ETH-only is which contract it is bound to, not what its term count
+  // reads as — so an unreadable count must not quietly offer the token options back.
+  const multi = (pending.commitOwner === WEI_TERMS && !!WEI_TERMS) || terms > 1;
   const termsEl = $('pendingTerms');
-  if (termsEl) termsEl.innerHTML = multi ? 'Registering for <b>' + terms + ' years</b> — paid in ETH' : '';
+  // Commit and reveal are up to a day apart, so the panel a user comes back to has to carry the
+  // price as well as the term count — a year of a one-character name is a thousand times a
+  // five-character one, and ten of them is the number actually being approved.
+  if (termsEl) {
+    termsEl.innerHTML = !multi ? ''
+      : terms === null
+        ? 'This commitment is unreadable — cancel it and commit again.'
+        : 'Registering for <b>' + terms + ' years</b>' + pendingPriceHtml(pending) +
+          ' — paid in ETH';
+  }
   const payEl = $('payMethod');
   if (payEl) {
     payEl.style.display = multi ? 'none' : '';
@@ -4812,6 +4872,17 @@ async function doRenew() {
     const rc = readContract || contract;
     const fee = await rc.getFee(byteLength(currentTokenName));
     const terms = termsAvailable() ? renewTermCount() : 1;
+
+    // The quote in the panel was priced when the panel opened. If the fee moved since, the
+    // multi-year path would send the new one multiplied by the term count without ever having
+    // shown it. Repaint, and let a second press accept the number now on screen.
+    if (terms > 1 && _renewFee != null && fee !== _renewFee) {
+      _renewFee = fee;
+      renderRenewQuote();
+      showStatus('The price changed — the quote above is current. Press Renew again to accept it.',
+        'error');
+      return;
+    }
 
     showStatus('Renewing...', '');
     // One year goes straight to the registry — no reason to route it through anything. More than
