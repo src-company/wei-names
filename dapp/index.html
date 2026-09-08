@@ -779,6 +779,20 @@ body.modal-open { overflow: hidden; }
 .names-tag { font-size:9px; text-transform:uppercase; letter-spacing:0.06em; opacity:0.55;
              border:1px solid var(--border-muted); padding:1px 5px; margin-left:6px; vertical-align:1px; }
 .names-tag.warn { opacity:1; border-color:currentColor; }
+.names-line { display:flex; align-items:baseline; gap:10px; }
+.names-line > .names-row { flex:1 1 auto; min-width:0; }
+.names-check { flex:0 0 auto; margin:0; cursor:pointer; accent-color:var(--fg); }
+/* A row that cannot be bulk-renewed keeps the checkbox's width so the names stay in one
+   column, but shows nothing and takes no clicks. */
+.names-check.gap { visibility:hidden; pointer-events:none; }
+.names-bulk { border:1px solid var(--border); padding:12px; margin-bottom:16px; font-size:12px;
+  display:flex; flex-wrap:wrap; align-items:center; gap:10px; }
+.names-bulk select { font-family:inherit; font-size:12px; padding:4px 6px;
+  background:var(--bg); color:var(--fg); border:1px solid var(--border); }
+.names-bulk .grow { flex:1 1 auto; min-width:0; }
+.names-bulk button.act { font-family:inherit; font-size:12px; padding:6px 14px; cursor:pointer;
+  background:var(--fg); color:var(--bg); border:1px solid var(--fg); }
+.names-bulk button.act:disabled { cursor:default; opacity:0.35; }
 .names-note { font-size:10px; opacity:0.45; line-height:1.5; margin-top:14px; }
 .names-more { background:none; border:none; color:var(--fg); font-family:inherit; font-size:11px;
               letter-spacing:0.04em; opacity:0.55; padding:6px 0; width:auto; cursor:pointer;
@@ -1092,7 +1106,9 @@ const WEI_TERMS = '0x0000002ba1dd65dBe75388F6672826FaC6Ec69fe';
 const WEI_TERMS_ABI = [
   'function register(string label, bytes32 innerSecret, address to, uint256 terms) payable returns (uint256)',
   'function renew(uint256 tokenId, uint256 terms) payable',
-  'function quote(uint256 tokenId, uint256 terms) view returns (uint256)'
+  'function renewMany(uint256[] tokenIds, uint256[] terms) payable',
+  'function quote(uint256 tokenId, uint256 terms) view returns (uint256)',
+  'function quoteMany(uint256[] tokenIds, uint256[] terms) view returns (uint256)'
 ];
 const MAX_TERMS = 10;   // the contract allows 25; ten is as far as the UI goes
 const TERM_SECS = 365 * 86400;
@@ -6008,11 +6024,18 @@ const NAMES_SOON = 30 * 86400;            // how early "expiring soon" starts
 const NAMES_CHUNK = 249;                  // subcalls per aggregate3, 3 per name
 // Worst first: what needs doing outranks what is merely true.
 const NAMES_RANK = { grace: 0, soon: 1, active: 2, unknown: 3, orphan: 4, expired: 5 };
+// renewMany pays one NameNFT.renew per name per year, so a basket is bounded by gas rather than
+// by the contract, which caps only the per-entry term count. 200 keeps the worst case far inside
+// a block at any name count, and a batch that would exceed it is refused before it costs gas.
+const NAMES_MAX_RENEWALS = 200;
 
 let _namesState = null;   // last completed scan, kept for instant repaints
 let _namesCount = 0;      // what the toggle is currently advertising
 let _namesSeq = 0;        // invalidates a scan the account changed out from under
 let _namesScanning = false;
+let _namesSel = null;     // token ids ticked for a bulk renewal, as strings; null = not yet defaulted
+let _namesQuote = null;   // { key, total } — the quoteMany answer the button will send, verbatim
+let _namesQuoteSeq = 0;
 
 // Every tokenId this address has ever received. Cached in localStorage with the
 // block the scan reached, so the full-range walk is paid once per address per
@@ -6139,6 +6162,35 @@ function namesClassify(rows, me, rootExpiry, now) {
   }).sort(namesOrder);
 }
 
+// ---- bulk renewal -----------------------------------------------------------
+// What renewMany can actually extend. A subdomain reverts (NameNFT.renew rejects any record with
+// a parent), a name past grace reverts (Expired), and a row whose expiry would not read cannot be
+// priced — so none of the three may enter a basket that is all-or-nothing.
+function namesRenewable(r) {
+  return !!r && !r.sub && (r.status === 'active' || r.status === 'soon' || r.status === 'grace');
+}
+
+// What arrives ticked: the rows with a deadline on them. If nothing is expiring, nothing is
+// pre-selected — spending on a whole portfolio should be a decision, not a default.
+function namesDefaultSel(rows) {
+  return (rows || [])
+    .filter(r => namesRenewable(r) && (r.status === 'grace' || r.status === 'soon'))
+    .map(r => String(r.id));
+}
+
+// The selection intersected with what is renewable right now. A rescan can land between a tick
+// and a press, and a name that lapsed past grace in that window has to drop out of the basket
+// rather than revert it — renewMany is all-or-nothing, so one bad entry costs the whole batch.
+function namesSelected(rows, sel) {
+  const want = sel instanceof Set ? sel : new Set(sel || []);
+  return (rows || []).filter(r => namesRenewable(r) && want.has(String(r.id)));
+}
+
+// renewMany runs one renew per name per year, so the ceiling is gas, not the contract.
+function namesOverGasCap(count, terms) {
+  return count * terms > NAMES_MAX_RENEWALS;
+}
+
 function namesOrder(a, b) {
   const ra = NAMES_RANK[a.status], rb = NAMES_RANK[b.status];
   if (ra !== rb) return (ra === undefined ? 9 : ra) - (rb === undefined ? 9 : rb);
@@ -6183,6 +6235,7 @@ async function namesScan(force) {
     _namesCount = held;
     namesSetToggle();
     namesRender();
+    if (namesBulkOn()) namesBulkRequote();
   } catch (e) {
     if (seq !== _namesSeq) return;
     if (body) body.innerHTML = '<div class="names-sum">' + escapeHtml(namesError(e)) + '</div>'
@@ -6223,6 +6276,24 @@ function namesWhen(r, now) {
   return 'expires ' + namesDate(r.expires);
 }
 
+// The bulk controls only exist once the helper is deployed. With WEI_TERMS empty every row
+// renders exactly as it did before — no wrapper, no checkbox, no bar.
+function namesBulkOn() {
+  return !!WEI_TERMS;
+}
+
+// A row that cannot be bulk-renewed still reserves the checkbox's width, so the names stay in
+// one column rather than stepping in and out by status.
+function namesCheck(r, sel) {
+  if (!namesRenewable(r)) {
+    return '<input type="checkbox" class="names-check gap" disabled tabindex="-1" aria-hidden="true">';
+  }
+  const on = (sel instanceof Set ? sel : new Set(sel || [])).has(String(r.id));
+  return '<input type="checkbox" class="names-check" data-id="' + escapeHtml(String(r.id)) + '"'
+       + (on ? ' checked' : '') + ' onchange="namesTick(this)"'
+       + ' aria-label="renew ' + escapeHtml(r.name || r.label) + ' in a batch">';
+}
+
 function namesRow(r, st, now) {
   const dim = r.status === 'expired' || r.status === 'orphan';
   let tag = '';
@@ -6234,18 +6305,166 @@ function namesRow(r, st, now) {
   // An orphan has no name left to look up — getFullName gave nothing, so there is
   // no hash that would find it, and no suffix that would be true. Show the label it
   // still carries, and leave it unclickable.
-  if (!r.name) {
-    return '<div class="names-row dim"><span class="n">' + escapeHtml(r.label)
-         + (r.sub ? '' : '.wei') + tag + '</span>' + when + '</div>';
-  }
-  return '<a class="names-row' + (dim ? ' dim' : '') + '" href="#'
-       + encodeURIComponent(r.name.replace(/\.wei$/, '')) + '" onclick="namesPick()">'
-       + '<span class="n">' + escapeHtml(r.name) + tag + '</span>' + when + '</a>';
+  const box = !r.name
+    ? '<div class="names-row dim"><span class="n">' + escapeHtml(r.label)
+      + (r.sub ? '' : '.wei') + tag + '</span>' + when + '</div>'
+    : '<a class="names-row' + (dim ? ' dim' : '') + '" href="#'
+      + encodeURIComponent(r.name.replace(/\.wei$/, '')) + '" onclick="namesPick()">'
+      + '<span class="n">' + escapeHtml(r.name) + tag + '</span>' + when + '</a>';
+  if (!namesBulkOn()) return box;
+  return '<div class="names-line">' + namesCheck(r, (st && st.sel) || _namesSel) + box + '</div>';
 }
 
 // The row's href does the work — the hash handler loads the name and paints the
 // manage panel. This only brings that panel back into view, since it sits above a
 // list the reader has just scrolled down through.
+// The term count for the batch. Same 1..MAX_TERMS clamp the other two term controls use.
+function namesBulkTerms() {
+  const sel = $('namesTermSelect');
+  return sel ? validTerms(sel.value) : 1;
+}
+
+// The line under the bulk controls. Pure, so every state it can reach is assertable: `quote` is
+// null while a price is in flight, { total } once it lands, { error: true } when no endpoint
+// would serve it.
+function namesBulkNote(count, terms, quote) {
+  if (!count) return 'Tick names to renew them together.';
+  const head = count + ' name' + (count === 1 ? '' : 's') + ' · ' + terms
+             + ' year' + (terms === 1 ? '' : 's') + ' · ';
+  if (namesOverGasCap(count, terms)) {
+    return count + ' names for ' + terms + ' years is ' + (count * terms) + ' renewals — more '
+         + 'than one transaction should carry. Tick fewer names, or buy fewer years.';
+  }
+  if (quote && quote.error) return head + 'price unavailable';
+  if (!quote || quote.total == null) return head + 'pricing…';
+  return head + '<b>' + fmtEth(quote.total, 6) + ' ETH</b>';
+}
+
+// Renewal extends from each name's own expiry, so a batch does not level them — it adds the same
+// number of years to every one. Say that once, rather than per row.
+function namesBulkHtml(rows) {
+  if (!namesBulkOn()) return '';
+  const pool = rows.filter(namesRenewable);
+  if (!pool.length) return '';
+  const n = namesSelected(rows, _namesSel).length;
+  return '<div class="names-bulk">'
+       + '<select id="namesTermSelect" onchange="namesBulkRequote()">' + termOptionsHtml() + '</select>'
+       + '<span class="grow" id="namesBulkNote">' + namesBulkNote(n, 1, null) + '</span>'
+       + '<button class="names-more" onclick="namesSelectAll()">all ' + pool.length + '</button>'
+       + '<button class="names-more" onclick="namesSelectNone()">none</button>'
+       + '<button class="act" id="namesBulkBtn" onclick="doRenewAll()">Renew</button>'
+       + '</div>';
+}
+
+// Repaints only the note and the button. The select and the row checkboxes are left alone, so
+// ticking a name does not reset the term count or lose the reader's place in the list.
+function namesBulkPaint() {
+  const note = $('namesBulkNote');
+  if (!note) return;
+  const st = _namesState;
+  const rows = st ? st.rows : [];
+  const n = namesSelected(rows, _namesSel).length;
+  const terms = namesBulkTerms();
+  note.innerHTML = namesBulkNote(n, terms, _namesQuote);
+  const btn = $('namesBulkBtn');
+  if (btn) {
+    btn.disabled = !n || namesOverGasCap(n, terms) || !_namesQuote
+      || _namesQuote.error || _namesQuote.total == null || isProcessing;
+  }
+}
+
+function namesTick(el) {
+  if (!el) return;
+  if (!(_namesSel instanceof Set)) _namesSel = new Set(_namesSel || []);
+  const id = String(el.dataset ? el.dataset.id : '');
+  if (el.checked) _namesSel.add(id); else _namesSel.delete(id);
+  namesBulkRequote();
+}
+
+function namesSelectAll() {
+  const st = _namesState;
+  _namesSel = new Set((st ? st.rows : []).filter(namesRenewable).map(r => String(r.id)));
+  namesRender();
+  namesBulkRequote();
+}
+
+function namesSelectNone() {
+  _namesSel = new Set();
+  namesRender();
+  namesBulkRequote();
+}
+
+// The contract's own answer, sent verbatim. Pricing the basket locally would mean re-deriving
+// the length tiers here and hoping they agree; asking quoteMany and sending exactly what it says
+// is also what arms the helper's protection — a fee raised under the pending transaction makes
+// the batch revert rather than quietly cost more.
+async function namesBulkRequote() {
+  const st = _namesState;
+  const rows = st ? st.rows : [];
+  const picked = namesSelected(rows, _namesSel);
+  const terms = namesBulkTerms();
+  const seq = ++_namesQuoteSeq;
+
+  if (!picked.length || namesOverGasCap(picked.length, terms)) {
+    _namesQuote = null;
+    namesBulkPaint();
+    return;
+  }
+  _namesQuote = null;
+  namesBulkPaint();
+  const ids = picked.map(r => r.id);
+  const each = picked.map(() => terms);
+  try {
+    const total = await withRpc(p =>
+      new ethers.Contract(WEI_TERMS, WEI_TERMS_ABI, p).quoteMany(ids, each));
+    if (seq !== _namesQuoteSeq) return;
+    _namesQuote = { key: ids.map(String).join(',') + '@' + terms, total };
+  } catch (e) {
+    if (seq !== _namesQuoteSeq) return;
+    _namesQuote = { error: true };
+  }
+  namesBulkPaint();
+}
+
+async function doRenewAll() {
+  if (isProcessing || !_signer || !_namesState) return;
+  const rows = _namesState.rows;
+  const picked = namesSelected(rows, _namesSel);
+  const terms = namesBulkTerms();
+  // Re-check against the rows as they stand, not as they stood when the quote was taken.
+  if (!picked.length || namesOverGasCap(picked.length, terms)) return namesBulkPaint();
+  const quote = _namesQuote;
+  if (!quote || quote.error || quote.total == null) return namesBulkPaint();
+  // The quote has to be for this exact basket. Anything else and the price on screen is not the
+  // price about to be sent, which is the whole point of quoting it.
+  if (quote.key !== picked.map(r => String(r.id)).join(',') + '@' + terms) {
+    namesBulkRequote();
+    return;
+  }
+
+  isProcessing = true;
+  namesBulkPaint();
+  try {
+    showStatus('Renewing ' + picked.length + ' name' + (picked.length === 1 ? '' : 's') + '…', '');
+    const helper = new ethers.Contract(WEI_TERMS, WEI_TERMS_ABI, _signer);
+    const tx = await wcTransaction(
+      helper.renewMany(picked.map(r => r.id), picked.map(() => terms), { value: quote.total }),
+      'Approve renewal');
+    showStatus('Waiting for confirmation...', '', tx.hash);
+    await waitForTx(tx);
+    showStatus(picked.length + ' name' + (picked.length === 1 ? '' : 's') + ' renewed for '
+      + terms + ' year' + (terms === 1 ? '' : 's') + '!', 'success', tx.hash);
+    _namesSel = null;      // let the fresh scan re-derive what still needs attention
+    _namesQuote = null;
+    namesScan(true);
+  } catch (e) {
+    handleError(e);
+  } finally {
+    isProcessing = false;
+    namesBulkPaint();
+  }
+}
+
 function namesPick() {
   setTimeout(() => {
     const el = $('nameInput');
@@ -6308,6 +6527,12 @@ function namesRender() {
        + ' expiring within ' + Math.round(NAMES_SOON / 86400) + ' days. Renewal extends from the '
        + 'current expiry rather than from today, so nothing is lost by doing it early.</div>';
   }
+
+  // Default the selection here rather than in the scan, so the bar is consistent from whichever
+  // path repainted it. Only ever null once — a rescan keeps whatever is ticked, and an unticked
+  // selection stays an empty Set rather than falling back to the default again.
+  if (_namesSel === null) _namesSel = new Set(namesDefaultSel(rows));
+  h += namesBulkHtml(rows);
 
   h += '<div class="names-rows">';
   for (const r of rows) h += namesRow(r, st, now);
@@ -6372,6 +6597,11 @@ function namesOnDisconnect() {
   _namesState = null;
   _namesCount = 0;
   _namesScanning = false;
+  // A selection is a set of token ids belonging to one address. Carrying it across a
+  // disconnect would tick names the next account does not hold.
+  _namesSel = null;
+  _namesQuote = null;
+  _namesQuoteSeq++;
   const panel = $('namesPanel'), body = $('namesBody'), sec = $('namesSection');
   if (panel) panel.classList.remove('show');
   if (body) body.innerHTML = '';

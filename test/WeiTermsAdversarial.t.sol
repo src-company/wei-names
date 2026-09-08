@@ -316,6 +316,73 @@ contract WeiTermsAdversarialTest is Test {
     }
 
     /*//////////////////////////////////////////////////////////////
+                        QUOTE A BASKET, SEND THAT
+    //////////////////////////////////////////////////////////////*/
+
+    /// What the dapp's bulk renewal does: ask `quoteMany` for a mixed-tier basket and send back
+    /// exactly that number. Paying the quote to the wei must settle, take precisely the quote,
+    /// and make no refund call at all — the existing batch coverage pays with slack, which is a
+    /// different path through `_refund`.
+    function test_AnExactQuoteManyPaymentSettlesAndRefundsNothing() public {
+        uint256[] memory lengths = new uint256[](1);
+        uint256[] memory fees = new uint256[](1);
+        (lengths[0], fees[0]) = (3, 0.05 ether);
+        vm.prank(owner);
+        nft.setLengthFees(lengths, fees);
+
+        uint256 a = _register("abc", alice);          // the dear tier
+        uint256 b = _register("ordinary", alice);     // the ordinary one
+        uint64[2] memory startAt = [uint64(nft.expiresAt(a)), uint64(nft.expiresAt(b))];
+
+        uint256[] memory ids = new uint256[](2);
+        uint256[] memory n = new uint256[](2);
+        (ids[0], ids[1]) = (a, b);
+        (n[0], n[1]) = (4, 10);
+
+        uint256 cost = terms.quoteMany(ids, n);
+        assertEq(cost, 0.05 ether * 4 + nft.getFee(8) * 10, "priced per name, per tier");
+
+        uint256 before = alice.balance;
+        vm.prank(alice);
+        terms.renewMany{value: cost}(ids, n);
+
+        assertEq(nft.expiresAt(a), startAt[0] + 4 * TERM, "the dear name got its four");
+        assertEq(nft.expiresAt(b), startAt[1] + 10 * TERM, "and the other its ten");
+        assertEq(before - alice.balance, cost, "the quote was the price, to the wei");
+        assertEq(address(terms).balance, 0, "and nothing was left behind");
+    }
+
+    /// The other half of sending the exact quote: it is what arms the helper's protection. A fee
+    /// raised under the pending batch has no slack to eat, so the whole thing reverts rather than
+    /// costing more than the number on screen.
+    function test_AnExactQuoteManyPaymentRevertsIfTheFeeRises() public {
+        uint256 a = _register("firstname", alice);
+        uint256 b = _register("othername", alice);
+        uint64 startA = uint64(nft.expiresAt(a));
+
+        uint256[] memory ids = new uint256[](2);
+        uint256[] memory n = new uint256[](2);
+        (ids[0], ids[1]) = (a, b);
+        (n[0], n[1]) = (3, 3);
+        uint256 cost = terms.quoteMany(ids, n);
+
+        // The registry owner moves the schedule while the batch is pending.
+        uint256[] memory lengths = new uint256[](1);
+        uint256[] memory fees = new uint256[](1);
+        (lengths[0], fees[0]) = (9, nft.getFee(9) * 2);
+        vm.prank(owner);
+        nft.setLengthFees(lengths, fees);
+
+        uint256 balBefore = alice.balance;
+        vm.prank(alice);
+        vm.expectRevert(); // InsufficientFee
+        terms.renewMany{value: cost}(ids, n);
+
+        assertEq(nft.expiresAt(a), startA, "nothing was extended");
+        assertEq(alice.balance, balBefore, "and nothing was taken");
+    }
+
+    /*//////////////////////////////////////////////////////////////
                        THE COMMITMENT'S OWNER FIELD
     //////////////////////////////////////////////////////////////*/
 

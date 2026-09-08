@@ -644,6 +644,11 @@ one year to the **current** expiry. Calls therefore compound, and N years is N c
 | `quoteMany(uint256[] tokenIds, uint256[] terms) view` | Cost of a basket |
 | `sweep(address to)` | Send any stray ETH out; open to anyone |
 
+The dapp exposes `renewMany` from the **your names** panel: tick names, choose a term count, and
+it prices the basket with `quoteMany` and sends exactly that. Names in grace or expiring within
+30 days arrive ticked; subdomains and names past grace cannot be ticked, since `NameNFT.renew`
+rejects both and the batch is all-or-nothing.
+
 `MAX_TERMS` is 25, applied per call and per `renewMany` entry.
 
 `quote` reads the name's record without checking one exists, so an unregistered token id prices at

@@ -72,12 +72,17 @@ function liftConst(name) {
 }
 
 const CONSTS = ['NAMES_DEPLOY_BLOCK', 'NAMES_TRANSFER', 'NAMES_LOG_FIRST', 'NAMES_GRACE',
-  'NAMES_SOON', 'NAMES_CHUNK', 'NAMES_RANK', 'LOG_ENDPOINTS_FIRST'];
+  'NAMES_SOON', 'NAMES_CHUNK', 'NAMES_RANK', 'LOG_ENDPOINTS_FIRST', 'NAMES_MAX_RENEWALS',
+  'MAX_TERMS'];
 
 const ALL = ['anyEndpoint', 'namesReceived', 'namesRead', 'namesRoot', 'namesRootExpiry',
   'namesClassify', 'namesOrder', 'namesScan', 'namesError', 'namesDate', 'namesDays',
   'namesWhen', 'namesRow', 'namesPick', 'namesFooter', 'namesRender', 'namesPanelOpen',
-  'namesSetToggle', 'toggleNames', 'namesOnConnect', 'namesOnDisconnect'];
+  'namesSetToggle', 'toggleNames', 'namesOnConnect', 'namesOnDisconnect',
+  // bulk renewal
+  'namesRenewable', 'namesDefaultSel', 'namesSelected', 'namesOverGasCap', 'namesBulkOn',
+  'namesCheck', 'namesBulkTerms', 'namesBulkNote', 'namesBulkHtml', 'namesBulkPaint',
+  'namesTick', 'namesSelectAll', 'namesSelectNone', 'validTerms', 'termOptionsHtml'];
 
 const ME = '0x1C0Aa8cCD568d90d61659F060D1bFb1e6f855A20';
 const ME_LC = ME.toLowerCase();
@@ -111,7 +116,8 @@ function makeEl(id) {
 // resolves to the sandbox global instead of the source's declaration.
 function sandbox(opts = {}) {
   const els = new Map();
-  for (const id of ['namesSection', 'namesPanel', 'namesBody', 'namesToggle', 'nameInput']) {
+  for (const id of ['namesSection', 'namesPanel', 'namesBody', 'namesToggle', 'nameInput',
+                    'namesBulkNote', 'namesBulkBtn', 'namesTermSelect']) {
     els.set(id, makeEl(id));
   }
   const calls = { aggregate3: [], getLogs: [], toggleWallet: 0 };
@@ -121,6 +127,17 @@ function sandbox(opts = {}) {
     ethers, console, setTimeout, clearTimeout,
     BigInt, Date, Math, Number, String, JSON, Promise, Object, Array, Set, RegExp, Error,
     CONTRACT: '0x0000000000696760E15f265e828DB644A0c242EB',
+    // The helper's address decides whether the bulk controls exist at all. Injected rather than
+    // lifted so both the deployed and the undeployed state are reachable from one source.
+    WEI_TERMS: opts.weiTerms === undefined ? '0x0000002ba1dd65dBe75388F6672826FaC6Ec69fe' : opts.weiTerms,
+    fmtEth: (wei, dp = 4) => {
+      const n = parseFloat(ethers.formatEther(wei));
+      if (n === 0) return '0';
+      if (n < 0.0001) return '<0.0001';
+      return n.toLocaleString('en-US', { maximumFractionDigits: dp });
+    },
+    isProcessing: false,
+    namesBulkRequote: () => {},
     iface: { __tag: 'nft' },
     erc20BalNonceIface: { __tag: 'erc20' },
     document: { getElementById: id => els.get(id) || null },
@@ -153,7 +170,8 @@ function sandbox(opts = {}) {
 
   const lifted = opts.lifted || ALL;
   const prelude = 'let _namesState = null; let _namesCount = 0; let _namesSeq = 0;'
-    + ' let _namesScanning = false; let _logEndpoint = null;';
+    + ' let _namesScanning = false; let _logEndpoint = null;'
+    + ' let _namesSel = null; let _namesQuote = null; let _namesQuoteSeq = 0;';
   vm.runInContext([prelude, ...CONSTS.map(liftConst), ...lifted.map(lift)].join('\n\n'), ctx);
 
   return {
@@ -669,6 +687,159 @@ const classified = (over = {}) => Object.assign(
   eq('days: never negative', run('namesDays(-99999)'), 'today');
   eq('date: no date for no expiry', run('namesDate(0)'), '');
   ok('date: a real timestamp renders', /\d{4}/.test(run(`namesDate(${NOW})`)), run(`namesDate(${NOW})`));
+}
+
+// -- bulk renewal ------------------------------------------------------------
+// renewMany is all-or-nothing, so what may enter a basket is the whole safety question: a
+// subdomain reverts (NameNFT.renew rejects a record with a parent), a name past grace reverts
+// (Expired), and one bad entry costs the entire batch.
+{
+  const { run } = sandbox();
+  const R = o => JSON.stringify(Object.assign({ id: '0x01', sub: false, status: 'active' }, o));
+
+  ok('bulk: an active name can be renewed', run(`namesRenewable(${R({})})`) === true);
+  ok('bulk: one expiring soon can', run(`namesRenewable(${R({ status: 'soon' })})`) === true);
+  ok('bulk: one in grace can — that is the point', run(`namesRenewable(${R({ status: 'grace' })})`) === true);
+  ok('bulk: one past grace cannot, renew() reverts Expired',
+    run(`namesRenewable(${R({ status: 'expired' })})`) === false);
+  ok('bulk: an orphan cannot', run(`namesRenewable(${R({ status: 'orphan' })})`) === false);
+  ok('bulk: an unreadable expiry cannot be priced, so it cannot enter',
+    run(`namesRenewable(${R({ status: 'unknown' })})`) === false);
+  ok('bulk: a subdomain cannot, renew() reverts Unauthorized',
+    run(`namesRenewable(${R({ sub: true })})`) === false);
+  ok('bulk: not even an active subdomain',
+    run(`namesRenewable(${R({ sub: true, status: 'active' })})`) === false);
+  ok('bulk: nothing at all is not renewable', run('namesRenewable(null)') === false);
+}
+
+// What arrives ticked is what has a deadline on it. Pre-ticking a whole portfolio would put a
+// bill in front of someone who came to look at a list.
+{
+  const { run } = sandbox();
+  const rows = JSON.stringify([
+    { id: '0x01', sub: false, status: 'active' },
+    { id: '0x02', sub: false, status: 'soon' },
+    { id: '0x03', sub: false, status: 'grace' },
+    { id: '0x04', sub: false, status: 'expired' },
+    { id: '0x05', sub: true, status: 'soon' },
+  ]);
+  eq('bulk: only the names with a deadline arrive ticked',
+    run(`namesDefaultSel(${rows}).join(',')`), '0x02,0x03');
+  eq('bulk: a portfolio with nothing expiring arrives untouched',
+    run(`namesDefaultSel([{ id: '0x01', sub: false, status: 'active' }]).length`), 0);
+  eq('bulk: no rows at all is not an error', run('namesDefaultSel(null).length'), 0);
+}
+
+// A rescan can land between a tick and a press. Anything that stopped being renewable in that
+// window has to fall out of the basket rather than revert it.
+{
+  const { run } = sandbox();
+  const rows = JSON.stringify([
+    { id: '0x01', sub: false, status: 'soon' },
+    { id: '0x02', sub: false, status: 'expired' },
+    { id: '0x03', sub: true, status: 'active' },
+  ]);
+  eq('bulk: a ticked name that lapsed past grace drops out',
+    run(`namesSelected(${rows}, ['0x01','0x02']).map(r => r.id).join(',')`), '0x01');
+  eq('bulk: a ticked subdomain drops out too',
+    run(`namesSelected(${rows}, ['0x01','0x03']).map(r => r.id).join(',')`), '0x01');
+  eq('bulk: an id that is no longer in the list is simply gone',
+    run(`namesSelected(${rows}, ['0xff']).length`), 0);
+  eq('bulk: a Set works as well as an array',
+    run(`namesSelected(${rows}, new Set(['0x01'])).length`), 1);
+}
+
+// One renew call per name per year, so the ceiling is gas rather than the contract, which caps
+// only the per-entry term count.
+{
+  const { run } = sandbox();
+  ok('bulk: one name for ten years is nothing', run('namesOverGasCap(1, 10)') === false);
+  ok('bulk: twenty names for ten years is exactly the cap', run('namesOverGasCap(20, 10)') === false);
+  ok('bulk: one more renewal than that is refused', run('namesOverGasCap(21, 10)') === true);
+  ok('bulk: and the cap is on renewals, not names', run('namesOverGasCap(100, 1)') === false);
+}
+
+// Every state the line under the controls can reach.
+{
+  const { run } = sandbox();
+  eq('note: nothing ticked asks for a tick', run('namesBulkNote(0, 5, null)'),
+    'Tick names to renew them together.');
+  ok('note: a price in flight says so', run('namesBulkNote(3, 2, null)').includes('pricing…'));
+  ok('note: and names the basket', run('namesBulkNote(3, 2, null)').includes('3 names · 2 years'));
+  ok('note: one name reads as one name, one year as one year',
+    run('namesBulkNote(1, 1, null)').includes('1 name · 1 year ·'));
+  ok('note: a landed quote shows the total',
+    run('namesBulkNote(2, 10, { total: 5000000000000000n })').includes('0.005 ETH'));
+  ok('note: an endpoint that would not serve it says so, rather than showing zero',
+    run('namesBulkNote(2, 10, { error: true })').includes('price unavailable'));
+  ok('note: over the gas cap it explains itself in renewals',
+    run('namesBulkNote(21, 10, { total: 1n })').includes('210 renewals'));
+  ok('note: and does not quote a price it will not send',
+    !run('namesBulkNote(21, 10, { total: 1n })').includes('ETH'));
+}
+
+// The bar and the checkboxes, through the real renderer.
+{
+  const { html } = render([
+    classified({ status: 'grace', expires: REAL - 86400 }),
+    classified({ id: '0x02', name: 'bob.wei', label: 'bob' }),
+    classified({ id: '0x03', name: 'blog.alice.wei', label: 'blog', sub: true }),
+  ]);
+  ok('bulk render: the bar is there', html.includes('names-bulk'), html.slice(0, 300));
+  ok('bulk render: it counts what could be renewed, not what is held',
+    html.includes('>all 2<'), html);
+  ok('bulk render: the lapsed name arrives ticked', /data-id="0x01"[^>]*checked/.test(html), html);
+  ok('bulk render: the healthy one does not', !/data-id="0x02"[^>]*checked/.test(html), html);
+  ok('bulk render: the subdomain gets a spacer, not a checkbox',
+    html.includes('names-check gap'), html);
+  ok('bulk render: and no tickable box of its own', !/data-id="0x03"/.test(html), html);
+  ok('bulk render: rows stay links to their own panel', html.includes('href="#bob"'), html);
+}
+
+// With the helper undeployed there is no bulk anything, and rows render as they always did.
+{
+  const s = sandbox({ weiTerms: '' });
+  s.put('__st', { addr: ME_LC, rows: [classified({ status: 'soon' })], primary: 0n, missing: 0, stale: false });
+  s.run('_namesState = __st; namesRender();');
+  const html = s.els.get('namesBody').innerHTML;
+  ok('undeployed: no bulk bar', !html.includes('names-bulk'), html.slice(0, 300));
+  ok('undeployed: no checkbox', !html.includes('names-check'), html.slice(0, 300));
+  ok('undeployed: no wrapper around the row', !html.includes('names-line'), html.slice(0, 300));
+  ok('undeployed: the row is still a link', html.includes('<a class="names-row'), html.slice(0, 300));
+}
+
+// Ticking, and the two bulk shortcuts.
+{
+  const s = sandbox();
+  s.put('__st', {
+    addr: ME_LC, primary: 0n, missing: 0, stale: false,
+    rows: [
+      classified({ status: 'soon' }),
+      classified({ id: '0x02', name: 'bob.wei', label: 'bob' }),
+      classified({ id: '0x03', name: 'blog.alice.wei', label: 'blog', sub: true }),
+    ],
+  });
+  s.run('_namesState = __st; _namesSel = new Set(namesDefaultSel(__st.rows));');
+  eq('tick: the expiring name starts ticked', s.run('_namesSel.size'), 1);
+
+  s.run('namesTick({ dataset: { id: "0x02" }, checked: true });');
+  eq('tick: ticking a second adds it', s.run('_namesSel.size'), 2);
+  s.run('namesTick({ dataset: { id: "0x01" }, checked: false });');
+  eq('tick: unticking removes it', s.run('[..._namesSel].join(",")'), '0x02');
+
+  s.run('namesSelectAll();');
+  eq('tick: "all" takes every renewable name and no subdomain',
+    s.run('[..._namesSel].sort().join(",")'), '0x01,0x02');
+  s.run('namesSelectNone();');
+  eq('tick: "none" clears it', s.run('_namesSel.size'), 0);
+}
+
+// The selection belongs to one address.
+{
+  const s = sandbox();
+  s.run('_namesSel = new Set(["0x01"]); _namesQuote = { total: 1n }; namesOnDisconnect();');
+  ok('disconnect: the selection is dropped', s.run('_namesSel') === null);
+  ok('disconnect: and so is the price', s.run('_namesQuote') === null);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
