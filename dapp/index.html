@@ -781,7 +781,10 @@ body.modal-open { overflow: hidden; }
 .names-tag.warn { opacity:1; border-color:currentColor; }
 .names-line { display:flex; align-items:baseline; gap:10px; }
 .names-line > .names-row { flex:1 1 auto; min-width:0; }
-.names-check { flex:0 0 auto; margin:0; cursor:pointer; accent-color:var(--fg); }
+/* Every <input> on the page is styled width:100% for the big search box; without an
+   explicit width here a checkbox inherits that and swallows the whole flex row, squeezing
+   the name link down to a sliver. */
+.names-check { flex:0 0 auto; width:auto; margin:0; cursor:pointer; accent-color:var(--fg); }
 /* A row that cannot be bulk-renewed keeps the checkbox's width so the names stay in one
    column, but shows nothing and takes no clicks. */
 .names-check.gap { visibility:hidden; pointer-events:none; }
