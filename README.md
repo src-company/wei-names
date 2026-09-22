@@ -812,6 +812,19 @@ The constructor stakes its whole balance rather than just `msg.value`, which swe
 
 Token IDs are namehashes and `NameNFT` implements no `ERC721Enumerable`, so "the set of holders" doesn't exist on-chain to index into. Holders opt in per round with `enter(tokenId, boostPid)`, which checks ownership and eligibility live. That registry *is* the candidate set — no snapshot, no Merkle root, no indexer, nothing to trust.
 
+### Batch entry from the dapp
+
+`enter` checks `nft.ownerOf(tokenId) == msg.sender`, so — unlike `WeiTerms.renew` — it cannot be
+called on a holder's behalf by any helper contract; a forwarder's calls would all revert
+`NotOwner`. The dapp's **your names** panel still offers a batch: it lists everything a held
+name is eligible for (top-level, live weight, no ticket yet this round) and submits with **ERC-5792
+`wallet_sendCalls`** where the connected wallet supports atomic batching — one approval, each call
+still running as the holder's own account — and falls back to one signed `enter()` per name
+otherwise. `atomicRequired` is left `false`: these are independent actions with nothing shared
+between them, so a wallet that can only best-effort a batch should still submit whichever calls it
+can rather than refuse the lot because one might fail. No new contract, no custody, no ETH — the
+batch is entirely a wallet-level convenience over the same permissionless `enter()`.
+
 ### Odds = the same weight governance uses
 
 ```

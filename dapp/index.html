@@ -6036,6 +6036,10 @@ const NAMES_RANK = { grace: 0, soon: 1, active: 2, unknown: 3, orphan: 4, expire
 // by the contract, which caps only the per-entry term count. 200 keeps the worst case far inside
 // a block at any name count, and a batch that would exceed it is refused before it costs gas.
 const NAMES_MAX_RENEWALS = 200;
+// enter() is non-payable and moves nothing, so the only ceiling here is gas: keeping one
+// wallet_sendCalls bundle (the atomic path) comfortably inside a block, and not asking a wallet
+// that can't batch (the sequential fallback) to sign an unreasonable run of separate approvals.
+const NAMES_MAX_ROLL_ENTRIES = 50;
 
 let _namesState = null;   // last completed scan, kept for instant repaints
 let _namesCount = 0;      // what the toggle is currently advertising
@@ -6047,6 +6051,12 @@ let _namesTerms = 1;      // the bulk term count. Survives namesRender rebuildin
                            // drop a chosen term count back to one year.
 let _namesQuote = null;   // { key, total } — the quoteMany answer the button will send, verbatim
 let _namesQuoteSeq = 0;
+
+// Roll entry has no price to quote — enter() takes no ETH — so this state is simpler than the
+// renewal basket: just a selection and a snapshot of who is eligible right now.
+let _rollSel = null;       // token ids ticked for a batch entry, as strings; null = not yet defaulted
+let _namesRollInfo = null; // { round, open, byId: Map<id, {weight, entered}> } as of the last scan
+let _namesRollSeq = 0;     // invalidates an eligibility fetch the account or a rescan changed out from under
 
 // Every tokenId this address has ever received. Cached in localStorage with the
 // block the scan reached, so the full-range walk is paid once per address per
@@ -6202,6 +6212,21 @@ function namesOverGasCap(count, terms) {
   return count * terms > NAMES_MAX_RENEWALS;
 }
 
+// Nothing arrives ticked for a batch entry. A renewal has a deadline pushing it; entering the
+// lottery is a name holder's choice to make, never one the panel nudges by pre-selecting it.
+function namesRollDefaultSel() {
+  return [];
+}
+
+function namesRollSelected(rows, sel, info) {
+  const want = sel instanceof Set ? sel : new Set(sel || []);
+  return (rows || []).filter(r => namesRollEligible(r, info) && want.has(String(r.id)));
+}
+
+function namesRollOverCap(n) {
+  return n > NAMES_MAX_ROLL_ENTRIES;
+}
+
 function namesOrder(a, b) {
   const ra = NAMES_RANK[a.status], rb = NAMES_RANK[b.status];
   if (ra !== rb) return (ra === undefined ? 9 : ra) - (rb === undefined ? 9 : rb);
@@ -6247,6 +6272,13 @@ async function namesScan(force) {
     namesSetToggle();
     namesRender();
     if (namesBulkOn()) namesBulkRequote();
+    // namesRollBulkHtml's template can't express a disabled button on its own — paint it here
+    // too, off whatever _namesRollInfo a previous scan already left, so the roll button never
+    // shows enabled with nothing ticked while its own eligibility fetch is still in flight.
+    namesRollPaint();
+    // Fire-and-forget: the roll eligibility fetch repaints itself when it lands, and must not
+    // hold up the rest of the panel — most visits find no round open to check at all.
+    namesRollScan(_namesState.rows);
   } catch (e) {
     if (seq !== _namesSeq) return;
     if (body) body.innerHTML = '<div class="names-sum">' + escapeHtml(namesError(e)) + '</div>'
@@ -6305,6 +6337,35 @@ function namesCheck(r, sel) {
        + ' aria-label="renew ' + escapeHtml(r.name || r.label) + ' in a batch">';
 }
 
+// The roll column only exists while a round is actually open — most visits to this panel find
+// none running, and there is nothing to enter into. Set once the eligibility fetch lands.
+function namesRollOn() {
+  return !!(_namesRollInfo && _namesRollInfo.open);
+}
+
+// Eligible mirrors what enter() itself checks: a top-level name (weightOf is 0 for a subdomain
+// or an expired one — the same "not live" the contract reverts on) that has not already taken a
+// ticket this round. `info` defaults to the last fetch so callers rendering off stale row data
+// still ask the right question.
+function namesRollEligible(r, info) {
+  info = info || _namesRollInfo;
+  if (!r || r.sub || !info || !info.open) return false;
+  const e = info.byId.get(String(r.id));
+  return !!e && e.weight > 0n && !e.entered;
+}
+
+// Same spacer pattern as the renewal checkbox: a row that can't enter still reserves the
+// column's width rather than shifting every row next to it.
+function namesRollCheck(r, sel, info) {
+  if (!namesRollEligible(r, info)) {
+    return '<input type="checkbox" class="names-check gap" disabled tabindex="-1" aria-hidden="true">';
+  }
+  const on = (sel instanceof Set ? sel : new Set(sel || [])).has(String(r.id));
+  return '<input type="checkbox" class="names-check" data-id="' + escapeHtml(String(r.id)) + '"'
+       + (on ? ' checked' : '') + ' onchange="namesRollTick(this)"'
+       + ' aria-label="enter ' + escapeHtml(r.name || r.label) + ' in the roll">';
+}
+
 function namesRow(r, st, now) {
   const dim = r.status === 'expired' || r.status === 'orphan';
   let tag = '';
@@ -6322,8 +6383,12 @@ function namesRow(r, st, now) {
     : '<a class="names-row' + (dim ? ' dim' : '') + '" href="#'
       + encodeURIComponent(r.name.replace(/\.wei$/, '')) + '" onclick="namesPick()">'
       + '<span class="n">' + escapeHtml(r.name) + tag + '</span>' + when + '</a>';
-  if (!namesBulkOn()) return box;
-  return '<div class="names-line">' + namesCheck(r, (st && st.sel) || _namesSel) + box + '</div>';
+  // Up to two independent checkbox columns — renewal and roll entry — each gated on its own
+  // control being on. Either, both or neither; the wrapper only appears when at least one does.
+  const checks = (namesBulkOn() ? namesCheck(r, (st && st.sel) || _namesSel) : '')
+               + (namesRollOn() ? namesRollCheck(r, (st && st.rollSel) || _rollSel, st && st.rollInfo) : '');
+  if (!checks) return box;
+  return '<div class="names-line">' + checks + box + '</div>';
 }
 
 // The row's href does the work — the hash handler loads the name and paints the
@@ -6406,12 +6471,14 @@ function namesSelectAll() {
   _namesSel = new Set((st ? st.rows : []).filter(namesRenewable).map(r => String(r.id)));
   namesRender();
   namesBulkRequote();
+  namesRollPaint(); // the render just rebuilt its button too, with the disabled state unset
 }
 
 function namesSelectNone() {
   _namesSel = new Set();
   namesRender();
   namesBulkRequote();
+  namesRollPaint(); // same rebuild, same fixup
 }
 
 // The contract's own answer, sent verbatim. Pricing the basket locally would mean re-deriving
@@ -6443,6 +6510,119 @@ async function namesBulkRequote() {
     if (seq !== _namesQuoteSeq) return;
     _namesQuote = { error: true };
   }
+  namesBulkPaint();
+}
+
+// ---- bulk roll entry ---------------------------------------------------------
+// enter() takes no ETH and moves nothing, so there is no price to quote and no shared pool to
+// protect — each entry is independent, and a name that fails (a race, a round that closes
+// mid-batch) should not cost the others theirs. What this needs instead is a fresh read of who
+// is actually eligible right now: a round has to be open, and a name only gets one ticket.
+
+// Fetches WeiRoll's round state once, then — only if a round is open — weightOf and ticketOf
+// for every top-level row in one batch. Subdomains are skipped client-side: weightOf is 0 for
+// one by construction, so reading it would only spend an RPC call to learn what is already known.
+async function namesRollScan(rows) {
+  if (!LOTTERY) { _namesRollInfo = null; return; }
+  const seq = ++_namesRollSeq;
+  try {
+    const st = await withRpc(p => rollRead(p).state());
+    if (seq !== _namesRollSeq) return;
+    const round = Number(st.round);
+    const open = Number(st.phase) === 1; // Phase.Open — see the enum in WeiRoll.sol
+
+    if (!open) {
+      _namesRollInfo = { round, open: false, byId: new Map() };
+      namesRender();
+      namesBulkPaint(); // this render rebuilt the renewal button too; its own quote is unchanged
+      return;
+    }
+
+    const tops = (rows || []).filter(r => !r.sub);
+    const calls = [];
+    for (const r of tops) {
+      calls.push({ target: LOTTERY, iface: rollIface, fn: 'weightOf', args: [r.id] });
+      calls.push({ target: LOTTERY, iface: rollIface, fn: 'ticketOf', args: [round, r.id] });
+    }
+    const res = calls.length ? await aggregate3(calls) : [];
+    if (seq !== _namesRollSeq) return;
+
+    const byId = new Map();
+    tops.forEach((r, i) => {
+      const w = res[i * 2], t = res[i * 2 + 1];
+      if (!w || !t) return; // a failed read is not a claim of eligibility
+      byId.set(String(r.id), { weight: w[0], entered: t[0] > 0n });
+    });
+    _namesRollInfo = { round, open: true, byId };
+  } catch (_) {
+    if (seq !== _namesRollSeq) return;
+    _namesRollInfo = null;
+  }
+  namesRender();
+  namesBulkPaint(); // ditto: fix up the renewal button this render just reset
+  namesRollPaint(); // and its own — the template has no way to mark itself disabled
+}
+
+// Count and cap message share the renewal bar's phrasing; the price half just isn't there.
+function namesRollNote(count) {
+  if (!count) return 'Tick names to enter them in this round. No ETH — entering costs only gas.';
+  if (namesRollOverCap(count)) {
+    return count + ' names is more than one batch should carry (cap ' + NAMES_MAX_ROLL_ENTRIES
+         + '). Tick fewer.';
+  }
+  const approvals = window._walletSendCalls
+    ? 'one approval'
+    : count + ' separate approval' + (count === 1 ? '' : 's');
+  return count + ' name' + (count === 1 ? '' : 's') + ' · no ETH, gas only · ' + approvals;
+}
+
+// Only present while a round is open and at least one held name can still take a ticket —
+// hidden the rest of the time, same as the renewal bar hides when the helper isn't deployed.
+function namesRollBulkHtml(rows) {
+  if (!namesRollOn()) return '';
+  const pool = rows.filter(r => namesRollEligible(r));
+  if (!pool.length) return '';
+  const n = namesRollSelected(rows, _rollSel).length;
+  return '<div class="names-bulk">'
+       + '<span class="grow" id="namesRollNote">' + namesRollNote(n) + '</span>'
+       + '<button class="names-more" onclick="namesRollSelectAll()">all ' + pool.length + '</button>'
+       + '<button class="names-more" onclick="namesRollSelectNone()">none</button>'
+       + '<button class="act" id="namesRollBtn" onclick="doEnterRollMany()">Enter the roll</button>'
+       + '</div>';
+}
+
+// Nothing async to wait on here — ticking just recounts the selection and repaints.
+function namesRollPaint() {
+  const note = $('namesRollNote');
+  if (!note) return;
+  const st = _namesState;
+  const rows = st ? st.rows : [];
+  const n = namesRollSelected(rows, _rollSel).length;
+  note.innerHTML = namesRollNote(n);
+  const btn = $('namesRollBtn');
+  if (btn) btn.disabled = !n || namesRollOverCap(n) || isProcessing;
+}
+
+function namesRollTick(el) {
+  if (!el) return;
+  if (!(_rollSel instanceof Set)) _rollSel = new Set(_rollSel || []);
+  const id = String(el.dataset ? el.dataset.id : '');
+  if (el.checked) _rollSel.add(id); else _rollSel.delete(id);
+  namesRollPaint();
+}
+
+function namesRollSelectAll() {
+  const st = _namesState;
+  _rollSel = new Set((st ? st.rows : []).filter(r => namesRollEligible(r)).map(r => String(r.id)));
+  namesRender();
+  namesRollPaint();
+  namesBulkPaint(); // the render rebuilt the renewal button too; its own quote is unchanged
+}
+
+function namesRollSelectNone() {
+  _rollSel = new Set();
+  namesRender();
+  namesRollPaint();
   namesBulkPaint();
 }
 
@@ -6482,6 +6662,131 @@ async function doRenewAll() {
   } finally {
     isProcessing = false;
     namesBulkPaint();
+  }
+}
+
+// ---- batch roll entry --------------------------------------------------------
+// enter() checks nft.ownerOf(tokenId) == msg.sender, so it cannot be called on a holder's behalf
+// by any helper contract — unlike renew(), which is deliberately permissionless, entry is
+// deliberately not. A WeiTerms-style forwarder is a dead end here: msg.sender would be the
+// helper, never the holder, and every call would revert NotOwner. The only way to submit several
+// enter() calls under one approval is to have the wallet itself batch them — ERC-5792
+// wallet_sendCalls, where each call still runs with the connected account as its own sender —
+// which is exactly what the (already-detected, previously unused) _walletSendCalls capability is
+// for. Wallets that cannot do that fall back to one signature per name.
+
+// Best-effort status poll for a wallet_sendCalls bundle. The method and its response shape are
+// still settling across wallets, so this treats a poll that errors or times out as "submitted,
+// unknown outcome" rather than a failure — the rescan after this always shows the truth (ticketOf
+// > 0 per name), which is the actual source of truth regardless of what the wallet reports.
+async function rollPollCallsStatus(id, tries = 10, delayMs = 1500) {
+  for (let i = 0; i < tries; i++) {
+    try {
+      const res = await window._connectedWalletProvider.request({
+        method: 'wallet_getCallsStatus', params: [id]
+      });
+      const status = res && res.status;
+      // Both the numeric (100/200/400/500) and string ('PENDING'/'CONFIRMED'/...) status
+      // conventions have shipped across wallets at different times; treat either as done once
+      // it stops reading as pending.
+      const pending = status === 100 || status === 'PENDING' || status === undefined;
+      if (!pending) return res;
+    } catch (_) { return null; } // not supported here — the rescan is still the truth
+    await new Promise(r => setTimeout(r, delayMs));
+  }
+  return null; // gave up polling; still not a failure, just unknown
+}
+
+// The ERC-5792 call list for a batch: unboosted enter() per name, explicit zero value since
+// enter() is non-payable. Pure and deterministic, so the encoding is what gets tested — the
+// wallet plumbing around it (rollEnterAtomic) cannot be exercised outside a real wallet.
+function namesRollCalls(picked) {
+  return picked.map(r => ({
+    to: LOTTERY,
+    data: rollIface.encodeFunctionData('enter', [r.id, 0]),
+    value: '0x0'
+  }));
+}
+
+// The atomic path: one wallet_sendCalls bundle, one approval. atomicRequired is deliberately
+// false — these are independent actions with nothing shared between them, so a wallet that can
+// only best-effort a batch should still submit whichever calls it can rather than refuse the
+// whole thing because one might fail.
+async function rollEnterAtomic(picked) {
+  const calls = namesRollCalls(picked);
+  showStatus('Entering ' + picked.length + ' name' + (picked.length === 1 ? '' : 's')
+    + ' into the round…', '');
+  const res = await window._connectedWalletProvider.request({
+    method: 'wallet_sendCalls',
+    params: [{
+      version: '2.0.0',
+      chainId: '0x1',
+      from: window._connectedAddress,
+      atomicRequired: false,
+      calls
+    }]
+  });
+  const bundleId = typeof res === 'string' ? res : (res && res.id);
+  showStatus('Submitted — confirming…', '');
+  if (bundleId) await rollPollCallsStatus(bundleId);
+  showStatus(picked.length + ' name' + (picked.length === 1 ? '' : 's')
+    + ' submitted to the round. Rescanning to confirm which landed…', 'success');
+}
+
+// The fallback: one enter() per name, each its own signed transaction. Independent actions, so
+// one failing must not stop the rest — a user decline is the one exception, since declining one
+// popup is a signal to stop, not to skip ahead to the next.
+async function rollEnterSequential(picked) {
+  let ok = 0;
+  const failed = [];
+  for (let i = 0; i < picked.length; i++) {
+    const r = picked[i];
+    const label = r.name || r.label || String(r.id);
+    showStatus('Entering ' + (i + 1) + ' of ' + picked.length + ' — ' + label + '…', '');
+    try {
+      const c = new ethers.Contract(LOTTERY, LOTTERY_ABI, _signer);
+      const tx = await wcTransaction(c.enter(r.id, 0), 'Confirm lottery entry (' + (i + 1) + '/' + picked.length + ')');
+      await waitForTx(tx);
+      ok++;
+    } catch (e) {
+      const msg = (e && (e.message || e.reason) || String(e)).toLowerCase();
+      if (msg.includes('user rejected') || msg.includes('user denied') || msg.includes('user cancelled')) {
+        break; // declining one is a signal to stop, not to skip ahead
+      }
+      failed.push(label);
+    }
+  }
+  if (ok) {
+    showStatus(ok + ' of ' + picked.length + ' entered'
+      + (failed.length ? ' — ' + failed.length + ' failed (' + failed.slice(0, 3).join(', ')
+        + (failed.length > 3 ? ', …' : '') + ')' : '') + '!', 'success');
+  } else if (failed.length) {
+    showStatus('None entered — ' + failed.slice(0, 3).join(', ') + (failed.length > 3 ? ', …' : ''), 'error');
+  }
+  // A run that was entirely declines shows nothing further; the in-progress line already
+  // reflected how far it got.
+}
+
+async function doEnterRollMany() {
+  if (isProcessing || !window._signer || !_namesState) return;
+  const rows = _namesState.rows;
+  // Re-check against the rows and round state as they stand, not as they stood when ticked —
+  // a round can close, or a name can already have been entered elsewhere, while this sat open.
+  const picked = namesRollSelected(rows, _rollSel);
+  if (!picked.length || namesRollOverCap(picked.length)) return namesRollPaint();
+
+  isProcessing = true;
+  namesRollPaint();
+  try {
+    if (window._walletSendCalls) await rollEnterAtomic(picked);
+    else await rollEnterSequential(picked);
+    _rollSel = null; // let the fresh scan re-derive who still has a ticket to take
+    namesScan(true);
+  } catch (e) {
+    handleError(e);
+  } finally {
+    isProcessing = false;
+    namesRollPaint();
   }
 }
 
@@ -6552,7 +6857,9 @@ function namesRender() {
   // path repainted it. Only ever null once — a rescan keeps whatever is ticked, and an unticked
   // selection stays an empty Set rather than falling back to the default again.
   if (_namesSel === null) _namesSel = new Set(namesDefaultSel(rows));
+  if (_rollSel === null) _rollSel = new Set(namesRollDefaultSel());
   h += namesBulkHtml(rows);
+  h += namesRollBulkHtml(rows);
 
   h += '<div class="names-rows">';
   for (const r of rows) h += namesRow(r, st, now);
@@ -6623,6 +6930,9 @@ function namesOnDisconnect() {
   _namesTerms = 1;
   _namesQuote = null;
   _namesQuoteSeq++;
+  _rollSel = null;
+  _namesRollInfo = null;
+  _namesRollSeq++;
   const panel = $('namesPanel'), body = $('namesBody'), sec = $('namesSection');
   if (panel) panel.classList.remove('show');
   if (body) body.innerHTML = '';

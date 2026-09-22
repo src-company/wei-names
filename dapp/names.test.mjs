@@ -73,7 +73,7 @@ function liftConst(name) {
 
 const CONSTS = ['NAMES_DEPLOY_BLOCK', 'NAMES_TRANSFER', 'NAMES_LOG_FIRST', 'NAMES_GRACE',
   'NAMES_SOON', 'NAMES_CHUNK', 'NAMES_RANK', 'LOG_ENDPOINTS_FIRST', 'NAMES_MAX_RENEWALS',
-  'MAX_TERMS'];
+  'MAX_TERMS', 'NAMES_MAX_ROLL_ENTRIES', 'LOTTERY', 'LOTTERY_ABI', 'rollIface'];
 
 const ALL = ['anyEndpoint', 'namesReceived', 'namesRead', 'namesRoot', 'namesRootExpiry',
   'namesClassify', 'namesOrder', 'namesScan', 'namesError', 'namesDate', 'namesDays',
@@ -83,7 +83,12 @@ const ALL = ['anyEndpoint', 'namesReceived', 'namesRead', 'namesRoot', 'namesRoo
   'namesRenewable', 'namesDefaultSel', 'namesSelected', 'namesOverGasCap', 'namesBulkOn',
   'namesCheck', 'namesBulkTerms', 'namesBulkNote', 'namesBulkHtml', 'namesBulkPaint',
   'namesTick', 'namesSelectAll', 'namesSelectNone', 'validTerms', 'termOptionsHtml',
-  'namesTermsChange'];
+  'namesTermsChange',
+  // bulk roll entry
+  'namesRollOn', 'namesRollEligible', 'namesRollCheck', 'namesRollSelected',
+  'namesRollOverCap', 'namesRollDefaultSel', 'namesRollScan', 'namesRollNote',
+  'namesRollBulkHtml', 'namesRollPaint', 'namesRollTick', 'namesRollSelectAll',
+  'namesRollSelectNone', 'namesRollCalls', 'rollRead'];
 
 const ME = '0x1C0Aa8cCD568d90d61659F060D1bFb1e6f855A20';
 const ME_LC = ME.toLowerCase();
@@ -126,7 +131,7 @@ function sandbox(opts = {}) {
 
   const ctx = {
     ethers, console, setTimeout, clearTimeout,
-    BigInt, Date, Math, Number, String, JSON, Promise, Object, Array, Set, RegExp, Error,
+    BigInt, Date, Math, Number, String, JSON, Promise, Object, Array, Set, Map, RegExp, Error,
     CONTRACT: '0x0000000000696760E15f265e828DB644A0c242EB',
     // The helper's address decides whether the bulk controls exist at all. Injected rather than
     // lifted so both the deployed and the undeployed state are reachable from one source.
@@ -143,7 +148,12 @@ function sandbox(opts = {}) {
     erc20BalNonceIface: { __tag: 'erc20' },
     document: { getElementById: id => els.get(id) || null },
     $: id => els.get(id) || null,
-    window: { _connectedAddress: opts.me === undefined ? ME : opts.me },
+    window: {
+      _connectedAddress: opts.me === undefined ? ME : opts.me,
+      _walletSendCalls: !!opts.walletSendCalls,
+      _connectedWalletProvider: opts.walletProvider || null,
+      _signer: opts.signer === undefined ? {} : opts.signer,
+    },
     escapeHtml: s => String(s ?? '').replace(/[&<>"']/g, c =>
       ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])),
     localComputeId: label => BigInt(ethers.keccak256(ethers.toUtf8Bytes('root:' + label))),
@@ -172,7 +182,9 @@ function sandbox(opts = {}) {
   const lifted = opts.lifted || ALL;
   const prelude = 'let _namesState = null; let _namesCount = 0; let _namesSeq = 0;'
     + ' let _namesScanning = false; let _logEndpoint = null;'
-    + ' let _namesSel = null; let _namesTerms = 1; let _namesQuote = null; let _namesQuoteSeq = 0;';
+    + ' let _namesSel = null; let _namesTerms = 1; let _namesQuote = null; let _namesQuoteSeq = 0;'
+    + ' let _rollSel = null; let _namesRollInfo = null; let _namesRollSeq = 0;'
+    + ' let isProcessing = false;';
   vm.runInContext([prelude, ...CONSTS.map(liftConst), ...lifted.map(lift)].join('\n\n'), ctx);
 
   return {
@@ -885,6 +897,193 @@ const classified = (over = {}) => Object.assign(
   html = s.els.get('namesBody').innerHTML;
   ok('term select: survives "none" rebuilding the bar too',
     html.includes('value="6" selected'), html.slice(0, 400));
+}
+
+
+// -- bulk roll entry ----------------------------------------------------------
+// enter() checks nft.ownerOf(tokenId) == msg.sender, so unlike renewal there is no helper
+// contract that could call it on a holder's behalf — every call here has to actually run as the
+// connected account. Eligibility mirrors what the contract itself would accept: a top-level name
+// with live weight, not already ticketed this round, while a round is actually open.
+//
+// info is built inside the sandbox (not in this module) since the lifted functions only exist
+// in that realm — `mkInfo` returns the JS source for one, built from a plain description.
+function mkInfo(open, entries) {
+  const rows = Object.entries(entries || {})
+    .map(([id, e]) => `['${id}', { weight: ${e.weight}n, entered: ${!!e.entered} }]`).join(', ');
+  return `{ round: 0, open: ${!!open}, byId: new Map([${rows}]) }`;
+}
+
+{
+  const { run } = sandbox();
+  const R = o => JSON.stringify(Object.assign({ id: '0x01', sub: false }, o));
+  const live = w => ({ weight: w });
+
+  ok('roll: an active name with weight can enter',
+    run(`namesRollEligible(${R({})}, ${mkInfo(true, { '0x01': live(1) })})`));
+  ok('roll: a subdomain cannot — weightOf is 0 for one by construction',
+    !run(`namesRollEligible(${R({ sub: true })}, ${mkInfo(true, { '0x01': live(1) })})`));
+  ok('roll: zero weight cannot (expired, or not live)',
+    !run(`namesRollEligible(${R({})}, ${mkInfo(true, { '0x01': live(0) })})`));
+  ok('roll: already entered cannot — one ticket per name per round',
+    !run(`namesRollEligible(${R({})}, ${mkInfo(true, { '0x01': { weight: 1, entered: true } })})`));
+  ok('roll: no round open, nothing can',
+    !run(`namesRollEligible(${R({})}, ${mkInfo(false, { '0x01': live(1) })})`));
+  ok('roll: no info fetched yet, nothing can', !run(`namesRollEligible(${R({})}, null)`));
+  ok('roll: a read that never landed is not a claim of eligibility',
+    !run(`namesRollEligible(${R({})}, ${mkInfo(true, {})})`));
+  ok('roll: nothing at all is not eligible', !run(`namesRollEligible(null, ${mkInfo(true, {})})`));
+}
+
+// A rescan can land between a tick and a press — a name that got entered elsewhere, or whose
+// round just closed, has to fall out of the basket rather than waste a call.
+{
+  const { run } = sandbox();
+  const rows = JSON.stringify([
+    { id: '0x01', sub: false }, { id: '0x02', sub: false }, { id: '0x03', sub: true },
+  ]);
+  const info = mkInfo(true, {
+    '0x01': { weight: 1, entered: false },
+    '0x02': { weight: 1, entered: true },   // ticked earlier, entered since
+  });
+  eq('roll selected: an id that was entered elsewhere drops out',
+    run(`namesRollSelected(${rows}, ['0x01', '0x02'], ${info}).map(r => r.id).join(',')`), '0x01');
+  eq('roll selected: a subdomain never qualifies',
+    run(`namesRollSelected(${rows}, ['0x03'], ${info}).length`), 0);
+  eq('roll selected: a Set works as well as an array',
+    run(`namesRollSelected(${rows}, new Set(['0x01']), ${info}).length`), 1);
+}
+
+// Nothing arrives ticked — entering is a choice, never a deadline the panel nudges toward.
+{
+  const { run } = sandbox();
+  ok('roll: the default selection is always empty', run('namesRollDefaultSel().length') === 0);
+  ok('roll cap: under it is fine', !run('namesRollOverCap(NAMES_MAX_ROLL_ENTRIES)'));
+  ok('roll cap: one over is refused', run('namesRollOverCap(NAMES_MAX_ROLL_ENTRIES + 1)'));
+}
+
+// The note's wording is the only place the atomic-vs-sequential distinction reaches the reader
+// before they click — it has to say the truth about how many approvals this is about to cost.
+{
+  const { run } = sandbox();
+  eq('roll note: nothing ticked asks for a tick', run('namesRollNote(0)'),
+    'Tick names to enter them in this round. No ETH — entering costs only gas.');
+  ok('roll note: over cap explains itself in the cap number',
+    run('namesRollNote(NAMES_MAX_ROLL_ENTRIES + 1)').includes(String(50)));
+  ok('roll note: a batching wallet gets "one approval"',
+    run('window._walletSendCalls = true; namesRollNote(5)').includes('one approval'));
+  const seq = run('window._walletSendCalls = false; namesRollNote(5)');
+  ok('roll note: otherwise it is honest about N separate approvals',
+    seq.includes('5 separate approvals'));
+  const one = run('namesRollNote(1)');
+  ok('roll note: one name is singular either way',
+    one.includes('1 separate approval') && !one.includes('1 separate approvals'));
+  ok('roll note: says plainly there is no ETH to send', seq.includes('no ETH'));
+  ok('roll note: and never quotes an amount — there is none', !/[0-9]\.[0-9]+ ETH/.test(seq));
+}
+
+// The call list actually sent: unboosted, explicit zero value, one per selected name, in order.
+{
+  const { run } = sandbox();
+  const calls = run(`(() => {
+    const cs = namesRollCalls([{ id: 111n }, { id: 222n }]);
+    const [id0, boost0] = rollIface.decodeFunctionData('enter', cs[0].data);
+    const [id1] = rollIface.decodeFunctionData('enter', cs[1].data);
+    return { n: cs.length, allLottery: cs.every(c => c.to === LOTTERY),
+      allZeroValue: cs.every(c => c.value === '0x0'),
+      id0: id0.toString(), id1: id1.toString(), boost0: boost0.toString() };
+  })()`);
+  eq('roll calls: one call per picked name', calls.n, 2);
+  ok('roll calls: every call targets the lottery', calls.allLottery);
+  ok('roll calls: enter() is non-payable — value is explicit zero', calls.allZeroValue);
+  eq('roll calls: the first name is encoded first', calls.id0, '111');
+  eq('roll calls: and the second second, same order as picked', calls.id1, '222');
+  eq('roll calls: unboosted — batch entry never guesses a proposal id', calls.boost0, '0');
+}
+
+// Through the real renderer: the checkbox column only exists once a round is open, sits
+// alongside the renewal column rather than replacing it, and reserves its width for a name that
+// cannot take a ticket rather than shifting the row.
+{
+  const rows = [
+    classified({ status: 'active' }),                                    // eligible
+    classified({ id: '0x02', name: 'bob.wei', label: 'bob' }),            // already entered
+    classified({ id: '0x03', name: 'blog.alice.wei', label: 'blog', sub: true }), // subdomain
+  ];
+  const s = sandbox();
+  s.put('__st', { addr: ME_LC, rows, primary: 0n, missing: 0, stale: false });
+  s.run(`_namesState = __st; _namesRollInfo = ${mkInfo(true, {
+    '0x01': { weight: 1, entered: false },
+    '0x02': { weight: 1, entered: true },
+  })}; namesRender();`);
+  const html = s.els.get('namesBody').innerHTML;
+
+  ok('roll render: the bar appears once a round is open', html.includes('Enter the roll'), html.slice(0, 600));
+  ok('roll render: the eligible name gets a live checkbox',
+    /data-id="0x01"[^>]*onchange="namesRollTick/.test(html), html);
+  ok('roll render: the already-entered name gets the spacer, not a checkbox',
+    !new RegExp('data-id="0x02"[^>]*onchange="namesRollTick').test(html), html);
+  ok('roll render: the subdomain gets the spacer too',
+    !new RegExp('data-id="0x03"[^>]*onchange="namesRollTick').test(html), html);
+  ok('roll render: renewal checkboxes are still there alongside it',
+    html.includes('onchange="namesTick(this)"'), html.slice(0, 600));
+  ok('roll render: names stay links to their own manage panel', html.includes('href="#alice"'), html);
+}
+
+// With no round open, the whole roll surface is absent — no bar, no second checkbox — and rows
+// render exactly as the renewal-only panel already did.
+{
+  const rows = [classified({ status: 'active' })];
+  const s = sandbox();
+  s.put('__st', { addr: ME_LC, rows, primary: 0n, missing: 0, stale: false });
+  s.run('_namesState = __st; _namesRollInfo = null; namesRender();');
+  const html = s.els.get('namesBody').innerHTML;
+  ok('roll render: no bar when there is no info at all', !html.includes('Enter the roll'), html.slice(0, 400));
+  ok('roll render: still just the one checkbox column', (html.match(/names-check/g) || []).length === 1,
+    html.slice(0, 400));
+
+  s.run('_namesRollInfo = { round: 0, open: false, byId: new Map() }; namesRender();');
+  const html2 = s.els.get('namesBody').innerHTML;
+  ok('roll render: and none when the round is explicitly closed', !html2.includes('Enter the roll'));
+}
+
+
+// Ticking, and the two bulk shortcuts — mirrors the renewal control, minus anything async.
+{
+  const s = sandbox();
+  const rows = [
+    { id: '0x01', sub: false }, { id: '0x02', sub: false }, { id: '0x03', sub: true },
+  ];
+  s.put('__st', { addr: ME_LC, primary: 0n, missing: 0, stale: false, rows });
+  s.put('__info', {
+    round: 0, open: true,
+    byId: new Map([
+      ['0x01', { weight: 1n, entered: false }],
+      ['0x02', { weight: 1n, entered: false }],
+    ]),
+  });
+  s.run('_namesState = __st; _namesRollInfo = __info;');
+
+  s.run('namesRollTick({ dataset: { id: "0x01" }, checked: true });');
+  eq('roll tick: ticking adds it', s.run('_rollSel.size'), 1);
+  s.run('namesRollTick({ dataset: { id: "0x01" }, checked: false });');
+  eq('roll tick: unticking removes it', s.run('_rollSel.size'), 0);
+
+  s.run('namesRollSelectAll();');
+  eq('roll tick: "all" takes every eligible name and no subdomain',
+    s.run('[..._rollSel].sort().join(",")'), '0x01,0x02');
+  s.run('namesRollSelectNone();');
+  eq('roll tick: "none" clears it', s.run('_rollSel.size'), 0);
+}
+
+// The selection and the eligibility snapshot both belong to one address and one moment on
+// chain — carrying either across a disconnect would offer to enter names the next account
+// does not hold, or trust a round state that is no longer this account's to trust.
+{
+  const s = sandbox();
+  s.run('_rollSel = new Set(["0x01"]); _namesRollInfo = { round: 0, open: true, byId: new Map() }; namesOnDisconnect();');
+  ok('disconnect: the roll selection is dropped', s.run('_rollSel') === null);
+  ok('disconnect: and so is the eligibility snapshot', s.run('_namesRollInfo') === null);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
