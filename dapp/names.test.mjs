@@ -914,6 +914,80 @@ function mkInfo(open, entries) {
   return `{ round: 0, open: ${!!open}, byId: new Map([${rows}]) }`;
 }
 
+// namesRollScan itself: the fetch that builds the info the rest of this section consumes.
+// Through aggregate3 alone (state() included), so a plain mock exercises the real thing end to
+// end rather than standing in for it.
+{
+  const s = sandbox({
+    aggregate3: async c => c.map(call => {
+      if (call.fn === 'state') return [{ round: 0n, phase: 1n }]; // Open
+      if (call.fn === 'weightOf') return [String(call.args[0]) === '0x02' ? 0n : 5n];
+      if (call.fn === 'ticketOf') return [String(call.args[1]) === '0x03' ? 1n : 0n];
+      return null;
+    }),
+  });
+  s.put('__rows', [
+    { id: '0x01', sub: false }, { id: '0x02', sub: false }, // zero weight — expired or unlive
+    { id: '0x03', sub: false },                              // already entered
+    { id: '0x04', sub: true },                                // subdomain — never read
+  ]);
+  await s.run('namesRollScan(__rows)');
+  const info = s.run('_namesRollInfo');
+  ok('scan: reads the round as open', info.open === true, JSON.stringify(info));
+  ok('scan: an eligible name gets a live entry',
+    info.byId.get('0x01') && info.byId.get('0x01').weight === 5n
+    && info.byId.get('0x01').entered === false);
+  ok('scan: zero weight is recorded, not dropped', info.byId.get('0x02')?.weight === 0n);
+  ok('scan: already-entered is recorded too', info.byId.get('0x03')?.entered === true);
+  ok('scan: a subdomain is never even asked about', !info.byId.has('0x04'));
+}
+
+// A closed round costs nothing beyond the one state() read — no reason to price out 65 names'
+// worth of weightOf/ticketOf when none of them could enter anyway.
+{
+  const calls = [];
+  const s = sandbox({
+    aggregate3: async c => { calls.push(...c); return c.map(call =>
+      call.fn === 'state' ? [{ round: 0n, phase: 0n }] : null); }, // Idle
+  });
+  s.put('__rows', [{ id: '0x01', sub: false }]);
+  await s.run('namesRollScan(__rows)');
+  const info = s.run('_namesRollInfo');
+  eq('scan: a closed round reads as not open', info.open, false);
+  eq('scan: and nothing else was ever asked for', calls.length, 1);
+}
+
+// A state() read that fails leaves the panel with no claim about eligibility, not a stale or
+// half-built one.
+{
+  const s = sandbox({ aggregate3: async c => c.map(() => null) });
+  s.put('__rows', [{ id: '0x01', sub: false }]);
+  await s.run('namesRollScan(__rows)');
+  eq('scan: an unreadable round state clears the info rather than guessing', s.run('_namesRollInfo'), null);
+}
+
+// Chunked the same way namesRead already is: two subcalls per name, and a chunk must not split
+// a name's pair or the results would reassemble against the wrong id.
+{
+  const seen = [];
+  const s = sandbox({
+    aggregate3: async c => {
+      seen.push(c.length);
+      return c.map(call => call.fn === 'state' ? [{ round: 0n, phase: 1n }] : [1n]);
+    },
+  });
+  const rows = Array.from({ length: 200 }, (_, i) => ({ id: '0x' + (i + 1).toString(16), sub: false }));
+  s.put('__rows', rows);
+  await s.run('namesRollScan(__rows)');
+  // The state() call is its own aggregate3 batch; the 400 weight+ticket subcalls chunk after
+  // it, at NAMES_CHUNK rounded down to an even number so a chunk boundary never splits one
+  // name's weightOf/ticketOf pair across two calls.
+  eq('scan: the round read is its own call', seen[0], 1);
+  eq('scan: and the rest chunks just under NAMES_CHUNK, evenly', seen.slice(1), [248, 152]);
+  ok('scan: every chunk is a whole number of names', seen.slice(1).every(n => n % 2 === 0));
+  eq('scan: every name still got an entry', s.run('_namesRollInfo').byId.size, 200);
+}
+
 {
   const { run } = sandbox();
   const R = o => JSON.stringify(Object.assign({ id: '0x01', sub: false }, o));

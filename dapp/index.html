@@ -6526,8 +6526,12 @@ async function namesRollScan(rows) {
   if (!LOTTERY) { _namesRollInfo = null; return; }
   const seq = ++_namesRollSeq;
   try {
-    const st = await withRpc(p => rollRead(p).state());
+    // Through aggregate3 rather than withRpc, so this panel's reads share one RPC mechanism
+    // throughout — same as namesRootExpiry — instead of mixing it with a direct Contract call.
+    const [stRes] = await aggregate3([{ target: LOTTERY, iface: rollIface, fn: 'state', args: [] }]);
     if (seq !== _namesRollSeq) return;
+    if (!stRes) throw new Error('state() unreadable');
+    const st = stRes[0];
     const round = Number(st.round);
     const open = Number(st.phase) === 1; // Phase.Open — see the enum in WeiRoll.sol
 
@@ -6544,7 +6548,16 @@ async function namesRollScan(rows) {
       calls.push({ target: LOTTERY, iface: rollIface, fn: 'weightOf', args: [r.id] });
       calls.push({ target: LOTTERY, iface: rollIface, fn: 'ticketOf', args: [round, r.id] });
     }
-    const res = calls.length ? await aggregate3(calls) : [];
+    // Chunked the same as namesRead: an unchunked aggregate3 is one eth_call with all the
+    // calldata in it, and a portfolio past NAMES_CHUNK/2 names would risk the same calldata or
+    // gas ceiling namesRead already chunks around, just from a different reader. NAMES_CHUNK
+    // itself is tuned for 3 subcalls per name; rounded down to the nearest even number here so
+    // a chunk boundary never splits one name's weightOf/ticketOf pair across two calls.
+    const chunk = NAMES_CHUNK - (NAMES_CHUNK % 2);
+    const res = [];
+    for (let i = 0; i < calls.length; i += chunk) {
+      res.push(...await aggregate3(calls.slice(i, i + chunk)));
+    }
     if (seq !== _namesRollSeq) return;
 
     const byId = new Map();
@@ -6744,7 +6757,7 @@ async function rollEnterSequential(picked) {
     const label = r.name || r.label || String(r.id);
     showStatus('Entering ' + (i + 1) + ' of ' + picked.length + ' — ' + label + '…', '');
     try {
-      const c = new ethers.Contract(LOTTERY, LOTTERY_ABI, _signer);
+      const c = new ethers.Contract(LOTTERY, LOTTERY_ABI, window._signer);
       const tx = await wcTransaction(c.enter(r.id, 0), 'Confirm lottery entry (' + (i + 1) + '/' + picked.length + ')');
       await waitForTx(tx);
       ok++;
