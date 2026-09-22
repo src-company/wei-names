@@ -82,7 +82,8 @@ const ALL = ['anyEndpoint', 'namesReceived', 'namesRead', 'namesRoot', 'namesRoo
   // bulk renewal
   'namesRenewable', 'namesDefaultSel', 'namesSelected', 'namesOverGasCap', 'namesBulkOn',
   'namesCheck', 'namesBulkTerms', 'namesBulkNote', 'namesBulkHtml', 'namesBulkPaint',
-  'namesTick', 'namesSelectAll', 'namesSelectNone', 'validTerms', 'termOptionsHtml'];
+  'namesTick', 'namesSelectAll', 'namesSelectNone', 'validTerms', 'termOptionsHtml',
+  'namesTermsChange'];
 
 const ME = '0x1C0Aa8cCD568d90d61659F060D1bFb1e6f855A20';
 const ME_LC = ME.toLowerCase();
@@ -171,7 +172,7 @@ function sandbox(opts = {}) {
   const lifted = opts.lifted || ALL;
   const prelude = 'let _namesState = null; let _namesCount = 0; let _namesSeq = 0;'
     + ' let _namesScanning = false; let _logEndpoint = null;'
-    + ' let _namesSel = null; let _namesQuote = null; let _namesQuoteSeq = 0;';
+    + ' let _namesSel = null; let _namesTerms = 1; let _namesQuote = null; let _namesQuoteSeq = 0;';
   vm.runInContext([prelude, ...CONSTS.map(liftConst), ...lifted.map(lift)].join('\n\n'), ctx);
 
   return {
@@ -837,9 +838,53 @@ const classified = (over = {}) => Object.assign(
 // The selection belongs to one address.
 {
   const s = sandbox();
-  s.run('_namesSel = new Set(["0x01"]); _namesQuote = { total: 1n }; namesOnDisconnect();');
+  s.run('_namesSel = new Set(["0x01"]); _namesTerms = 7; _namesQuote = { total: 1n }; namesOnDisconnect();');
   ok('disconnect: the selection is dropped', s.run('_namesSel') === null);
   ok('disconnect: and so is the price', s.run('_namesQuote') === null);
+  eq('disconnect: and the term count resets to one year', s.run('_namesTerms'), 1);
+}
+
+// The bulk <select> is rebuilt from scratch on every "all", "none" and rescan — a plain
+// input {width:100%} rule elsewhere on the page already broke this control once (the checkbox
+// bug), and losing a chosen term count the same way would be a quieter version of the same
+// mistake: nothing errors, the price shown just stops matching what the reader picked.
+{
+  const { run } = sandbox();
+  ok('term select: marks the chosen year, not just the first one',
+    run('termOptionsHtml(5)').includes('value="5" selected'));
+  ok('term select: and only that one', !run('termOptionsHtml(5)').includes('value="1" selected'));
+  eq('term select: with nothing passed, one year is still the default',
+    run('termOptionsHtml()').match(/selected/g)?.length ?? 0, 1);
+  ok('term select: default selected is year one', run('termOptionsHtml()').includes('value="1" selected'));
+}
+{
+  const s = sandbox();
+  s.run('_namesTerms = 5;');
+  s.run('namesTermsChange({ value: "8" });');
+  eq('term select: onchange persists the new choice', s.run('_namesTerms'), 8);
+}
+{
+  // Through the real renderer: pick a term, then run every path that rebuilds the bar, and
+  // confirm the rebuilt <select> still carries it forward.
+  const s = sandbox();
+  s.put('__st', {
+    addr: ME_LC, primary: 0n, missing: 0, stale: false,
+    rows: [classified({ status: 'soon' }), classified({ id: '0x02', name: 'bob.wei', label: 'bob' })],
+  });
+  s.run('_namesState = __st; _namesTerms = 6; namesRender();');
+  let html = s.els.get('namesBody').innerHTML;
+  ok('term select: the first render honors an already-chosen term',
+    html.includes('value="6" selected'), html.slice(0, 400));
+
+  s.run('namesSelectAll();');
+  html = s.els.get('namesBody').innerHTML;
+  ok('term select: survives "all" rebuilding the bar',
+    html.includes('value="6" selected'), html.slice(0, 400));
+
+  s.run('namesSelectNone();');
+  html = s.els.get('namesBody').innerHTML;
+  ok('term select: survives "none" rebuilding the bar too',
+    html.includes('value="6" selected'), html.slice(0, 400));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

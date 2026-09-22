@@ -2598,10 +2598,15 @@ function validTerms(raw) {
   return Number.isInteger(n) && n >= 1 && n <= MAX_TERMS ? n : 1;
 }
 
-function termOptionsHtml() {
+// `selected` marks one option so a caller that rebuilds this list — the bulk renewal bar does,
+// on every tick-all/tick-none and every rescan — can put back what was chosen rather than
+// silently falling back to the browser's one-year default.
+function termOptionsHtml(selected) {
+  const sel = validTerms(selected);
   let html = '';
   for (let n = 1; n <= MAX_TERMS; n++) {
-    html += '<option value="' + n + '">' + n + (n === 1 ? ' year' : ' years') + '</option>';
+    html += '<option value="' + n + '"' + (n === sel ? ' selected' : '') + '>' + n
+          + (n === 1 ? ' year' : ' years') + '</option>';
   }
   return html;
 }
@@ -6037,6 +6042,9 @@ let _namesCount = 0;      // what the toggle is currently advertising
 let _namesSeq = 0;        // invalidates a scan the account changed out from under
 let _namesScanning = false;
 let _namesSel = null;     // token ids ticked for a bulk renewal, as strings; null = not yet defaulted
+let _namesTerms = 1;      // the bulk term count. Survives namesRender rebuilding the <select> —
+                           // without this, ticking "all" or a background rescan would silently
+                           // drop a chosen term count back to one year.
 let _namesQuote = null;   // { key, total } — the quoteMany answer the button will send, verbatim
 let _namesQuoteSeq = 0;
 
@@ -6321,10 +6329,19 @@ function namesRow(r, st, now) {
 // The row's href does the work — the hash handler loads the name and paints the
 // manage panel. This only brings that panel back into view, since it sits above a
 // list the reader has just scrolled down through.
-// The term count for the batch. Same 1..MAX_TERMS clamp the other two term controls use.
+// The term count for the batch. Same 1..MAX_TERMS clamp the other two term controls use. Reads
+// the live control when it exists (the source of truth while the bar is on screen) and falls
+// back to the persisted value otherwise, so a caller mid-rebuild still gets the right count.
 function namesBulkTerms() {
   const sel = $('namesTermSelect');
-  return sel ? validTerms(sel.value) : 1;
+  return sel ? validTerms(sel.value) : _namesTerms;
+}
+
+// The <select>'s onchange. Persists the choice before requoting, so the next rebuild — "all",
+// "none", or a rescan — restores it instead of resetting to one year.
+function namesTermsChange(el) {
+  _namesTerms = validTerms(el && el.value);
+  namesBulkRequote();
 }
 
 // The line under the bulk controls. Pure, so every state it can reach is assertable: `quote` is
@@ -6351,8 +6368,8 @@ function namesBulkHtml(rows) {
   if (!pool.length) return '';
   const n = namesSelected(rows, _namesSel).length;
   return '<div class="names-bulk">'
-       + '<select id="namesTermSelect" onchange="namesBulkRequote()">' + termOptionsHtml() + '</select>'
-       + '<span class="grow" id="namesBulkNote">' + namesBulkNote(n, 1, null) + '</span>'
+       + '<select id="namesTermSelect" onchange="namesTermsChange(this)">' + termOptionsHtml(_namesTerms) + '</select>'
+       + '<span class="grow" id="namesBulkNote">' + namesBulkNote(n, _namesTerms, null) + '</span>'
        + '<button class="names-more" onclick="namesSelectAll()">all ' + pool.length + '</button>'
        + '<button class="names-more" onclick="namesSelectNone()">none</button>'
        + '<button class="act" id="namesBulkBtn" onclick="doRenewAll()">Renew</button>'
@@ -6603,6 +6620,7 @@ function namesOnDisconnect() {
   // A selection is a set of token ids belonging to one address. Carrying it across a
   // disconnect would tick names the next account does not hold.
   _namesSel = null;
+  _namesTerms = 1;
   _namesQuote = null;
   _namesQuoteSeq++;
   const panel = $('namesPanel'), body = $('namesBody'), sec = $('namesSection');
