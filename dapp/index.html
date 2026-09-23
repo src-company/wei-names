@@ -5638,33 +5638,84 @@ function renderRoll(body, d, me) {
   let h = '';
 
   h += '<div class="roll-phase">' + (ROLL_PHASE[phase] || '—') + ' · round ' + d.round + '</div>';
-  const usd = d.usd ? fmtUsd(st.pot, d.usd) : '';
-  h += '<div class="roll-pot">'
-     + '<div class="roll-pot-label">Pot</div>'
-     + '<div class="roll-pot-amount">' + STETH_MARK + fmtPot(st.pot) + '</div>'
-     + '<div class="roll-pot-sub">stETH · earning via Lido' + (usd ? ' · ≈ ' + usd : '') + '</div></div>';
+
+  // The round that has been drawn but not yet collected. Its prize is reserved — never part of
+  // the next pot — so between a draw and its claim the pot reads 0 while real money sits here.
+  const pending = (d.infos || []).find(([, i]) => i.settled && i.winner !== 0n && !i.resolved);
+  const reserved = BigInt(st.reserved || 0);
+
+  // Hero: the pot, unless there is none and a prize is waiting to be collected — a bare "0"
+  // while 1 stETH sits reserved reads as a dead lottery, when it is one that just paid out.
+  if (st.pot === 0n && reserved > 0n && pending) {
+    const [pr, pi] = pending;
+    const pusd = d.usd ? fmtUsd(pi.prize, d.usd) : '';
+    const nm = d.names[pr] ? rollNameLink(d.names[pr]) : 'the winner';
+    h += '<div class="roll-pot">'
+       + '<div class="roll-pot-label">Round ' + pr + ' won</div>'
+       + '<div class="roll-pot-amount">' + STETH_MARK + fmtPot(pi.prize) + '</div>'
+       + '<div class="roll-pot-sub">stETH to ' + nm + (pusd ? ' · ≈ ' + pusd : '') + '</div></div>';
+  } else {
+    const usd = d.usd ? fmtUsd(st.pot, d.usd) : '';
+    h += '<div class="roll-pot">'
+       + '<div class="roll-pot-label">Pot</div>'
+       + '<div class="roll-pot-amount">' + STETH_MARK + fmtPot(st.pot) + '</div>'
+       + '<div class="roll-pot-sub">stETH · earning via Lido' + (usd ? ' · ≈ ' + usd : '') + '</div></div>';
+    // A pot AND a prize in escrow: say so, or the reserved stETH looks like it is in the pot.
+    if (reserved > 0n && pending) {
+      h += '<div class="roll-note" style="margin-top:-10px;">Plus ' + fmtEth(reserved, 4)
+         + ' stETH reserved for round ' + pending[0] + '\u2019s winner — not part of this pot.</div>';
+    }
+  }
 
   // Round meta
   const endTs = Number(st.roundEnd);
   const countdown = phase === 1
     ? '<span id="rollCountdown" data-end="' + endTs + '">' + fmtCountdown(endTs - now) + '</span>'
     : (phase === 2 ? 'closed' : (phase === 3 ? 'drawing' : '—'));
-  h += '<div class="roll-meta">'
-     + '<div><div class="roll-meta-k">Entries close</div><div class="roll-meta-v">' + countdown + '</div></div>'
-     + '<div><div class="roll-meta-k">Tickets</div><div class="roll-meta-v">' + Number(st.tickets) + '</div></div>'
-     + '</div>';
+  // Idle with a prize still in escrow has no entries and no tickets to report — two dashes say
+  // nothing. The live facts then are who won and how long they have left.
+  if (phase === 0 && pending) {
+    const [pr, pi] = pending;
+    const left = Number(pi.claimBy) - now;
+    h += '<div class="roll-meta">'
+       + '<div><div class="roll-meta-k">Won by</div><div class="roll-meta-v">'
+       + (d.names[pr] ? rollNameLink(d.names[pr]) : '#' + pi.winner.toString().slice(0, 8) + '\u2026') + '</div></div>'
+       + '<div><div class="roll-meta-k">Claim closes</div><div class="roll-meta-v">'
+       + (left > 0 ? '<span id="rollCountdown" data-end="' + Number(pi.claimBy) + '">' + fmtCountdown(left) + '</span>' : 'closed')
+       + '</div></div></div>';
+  } else {
+    h += '<div class="roll-meta">'
+       + '<div><div class="roll-meta-k">Entries close</div><div class="roll-meta-v">' + countdown + '</div></div>'
+       + '<div><div class="roll-meta-k">Tickets</div><div class="roll-meta-v">' + Number(st.tickets) + '</div></div>'
+       + '</div>';
+  }
 
-  // Claim (highest priority for a connected winner)
+  // Claim (highest priority for a connected winner). The deadline is the whole point: an
+  // unclaimed prize rolls back into the pot, so show what is at stake and how long is left.
   if (d.claimable.length) {
     for (const r of d.claimable) {
-      h += '<div class="roll-your"><b>You won round ' + r + '.</b> '
-         + '<button style="margin-top:8px;" onclick="rollClaim(' + r + ')">Claim prize</button></div>';
+      const info = (d.infos || []).find(([rr]) => rr === r);
+      const i = info && info[1];
+      const left = i ? Number(i.claimBy) - now : 0;
+      h += '<div class="roll-your"><b>\ud83c\udf89 You won round ' + r + '.</b>'
+         + (i ? ' ' + fmtEth(i.prize) + ' stETH is yours.' : '')
+         + (left > 0
+             ? '<div style="margin-top:6px;opacity:0.75;">Claim within <b>' + fmtCountdown(left)
+               + '</b> — after that it rolls back into the pot for the next round.</div>'
+             : '')
+         + '<button style="margin-top:8px;" onclick="rollClaim(' + r + ')">Claim '
+         + (i ? fmtEth(i.prize, 4) + ' stETH' : 'prize') + ' \u2192</button></div>';
     }
   }
 
   // Phase-specific action
   if (phase === 0) {
-    h += '<div class="roll-note">No round is running. The next funding of the pot opens one automatically.</div>';
+    h += '<div class="roll-note">'
+       + (pending
+           ? 'Round ' + pending[0] + ' has paid out. Fund the pot below to open round ' + d.round + ' — '
+             + 'it starts the moment ETH lands, and round ' + pending[0] + '\u2019s prize stays claimable either way.'
+           : 'No round is running. Fund the pot below to open round ' + d.round + ' — it starts the moment ETH lands.')
+       + '</div>';
   } else if (phase === 1) {
     h += '<label style="margin-top:4px;">Enter a name you hold</label>'
        + '<div class="input-wrap"><input type="text" id="rollNameInput" placeholder="yourname" autocomplete="off" autocapitalize="none" spellcheck="false" value="'
@@ -5728,8 +5779,10 @@ function renderRoll(body, d, me) {
     h += '<div class="roll-winners"><h4>Recent winners</h4>';
     for (const [r, i] of settled) {
       const nm = d.names[r] ? rollNameLink(d.names[r]) : ('#' + i.winner.toString().slice(0, 8) + '…');
+      const left = Number(i.claimBy) - now;
+      const tail = i.resolved ? '' : (left > 0 ? ' · ' + fmtCountdown(left) + ' to claim' : ' · unclaimed');
       h += '<div class="roll-win-row"><span class="n">' + nm + '</span>'
-         + '<span class="p">' + fmtEth(i.prize) + ' stETH' + (i.resolved ? '' : ' · unclaimed') + '</span></div>';
+         + '<span class="p">' + fmtEth(i.prize) + ' stETH' + tail + '</span></div>';
     }
     h += '</div>';
   }
@@ -5739,7 +5792,7 @@ function renderRoll(body, d, me) {
      + '<div class="input-wrap"><input type="text" id="rollDonateInput" placeholder="0.01" inputmode="decimal" autocomplete="off" spellcheck="false" value="'
      + escapeHtml(_rollDonateDraft) + '" oninput="rollDonateChanged()"><span class="suffix">ETH</span></div>'
      + '<button class="roll-add" onclick="rollDonate()">' + (me ? 'add to pot \u2192' : 'connect & add \u2192') + '</button>'
-     + '<div class="roll-note">A direct send to <a href="https://etherscan.io/address/' + LOTTERY + '" target="_blank" rel="noopener" class="roll-name-link">roll.wei</a> — staked into Lido and added to the prize. One-way: it grows whoever wins this round.</div></div>';
+     + '<div class="roll-note">A direct send to <a href="https://etherscan.io/address/' + LOTTERY + '" target="_blank" rel="noopener" class="roll-name-link">roll.wei</a> — staked into Lido and added to the prize. One-way: ' + (phase === 0 ? 'it opens round ' + d.round + ' and grows whoever wins it.' : 'it grows whoever wins this round.') + '</div></div>';
 
   // A quiet statement about what this is.
   h += '<div class="roll-forever">A perpetual machine: each ~30-day round pays a random holder, then '

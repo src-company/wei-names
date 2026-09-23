@@ -510,5 +510,96 @@ function eq(name, got, want) {
   ok('chunked: only the top slice is rendered', big.length === 40, 'rows=' + big.length);
 }
 
+// ── a drawn-but-unclaimed round: the panel must not read as a dead lottery ────
+//
+// Between a draw and its claim, pot() is 0 while the prize sits in reservedShares. Rendering a
+// bare "Pot 0" there is wrong twice over: it hides real money, and it tells a visitor the game
+// is empty the moment it has most conspicuously worked.
+{
+  const { run, els } = sandbox({ address: '0xME' });
+  const now = Math.floor(Date.now() / 1000);
+  const claimBy = now + 29 * 86400;
+  const st = `{ phase: 0, round: 1, roundEnd: 0, pot: 0n, reserved: 1061578726496443962n,
+                totalWeight: 0n, tickets: 0, drawPrice: 0n, drawSettles: false, resetAt: 0 }`;
+  const infos = `[[0, { tickets: 200n, totalWeight: 1164432663812785282n, winner: 123n,
+                        prize: 1061578726496443962n, claimBy: ${claimBy}n, roundName: 9n, trophy: 0n,
+                        resets: 0n, settled: true, resolved: false }]]`;
+  run(`renderRoll($('rollBody'), { st: ${st}, round: 1, infos: ${infos}, claimable: [],
+        names: { 0: 'lom.wei' }, draw: null }, '0xME')`);
+  const html = els.get('rollBody').innerHTML;
+
+  ok('hero shows the won prize, not a bare pot', html.includes('Round 0 won'), html.slice(0, 400));
+  ok('hero carries the real amount', html.includes('1.061578'), html.slice(0, 600));
+  ok('hero does not render a dead zero pot', !/roll-pot-label">Pot<\/div><div class="roll-pot-amount">[^<]*>0</.test(html));
+  ok('hero names the winner', html.includes('lom.wei'));
+  ok('meta swaps to who won', html.includes('Won by'), html);
+  ok('meta swaps to the claim clock', html.includes('Claim closes'));
+  ok('meta drops the meaningless entries/tickets dashes', !html.includes('Entries close'));
+  ok('idle copy points at funding the next round', /Fund the pot below to open round 1/.test(html), html);
+  ok('and reassures the prize survives it', /stays claimable/.test(html));
+  ok('winners row counts down instead of just "unclaimed"', /to claim/.test(html));
+}
+
+// ── the winner connects: the claim must state the stake and the deadline ─────
+{
+  const { run, els } = sandbox({ address: '0xWIN' });
+  const now = Math.floor(Date.now() / 1000);
+  const st = `{ phase: 0, round: 1, roundEnd: 0, pot: 0n, reserved: 1061578726496443962n,
+                totalWeight: 0n, tickets: 0, drawPrice: 0n, drawSettles: false, resetAt: 0 }`;
+  const infos = `[[0, { tickets: 200n, totalWeight: 1n, winner: 123n, prize: 1061578726496443962n,
+                        claimBy: ${now + 3 * 86400}n, roundName: 9n, trophy: 0n, resets: 0n,
+                        settled: true, resolved: false }]]`;
+  run(`renderRoll($('rollBody'), { st: ${st}, round: 1, infos: ${infos}, claimable: [0],
+        names: { 0: 'lom.wei' }, draw: null }, '0xWIN')`);
+  const html = els.get('rollBody').innerHTML;
+
+  ok('claim banner still fires for the winner', html.includes('You won round 0'));
+  ok('claim banner names the amount', /1\.0616 stETH is yours/.test(html), html);
+  ok('claim button carries the amount', /Claim 1\.0616 stETH/.test(html));
+  ok('claim banner shows the deadline', /Claim within <b>3d/.test(html), html);
+  ok('claim banner says what happens if missed', /rolls back into the pot/.test(html));
+  ok('claim still wired to the round', html.includes('rollClaim(0)'));
+}
+
+// ── a funded round running alongside an unclaimed prize ──────────────────────
+//
+// Both can be live at once: reservedShares is never part of pot(). The panel must keep the two
+// numbers apart, or the reserved stETH reads as prize money for the round now open.
+{
+  const { run, els } = sandbox({ address: '0xME' });
+  const now = Math.floor(Date.now() / 1000);
+  const st = `{ phase: 1, round: 1, roundEnd: ${now + 20 * 86400}, pot: 1000000000000000000n,
+                reserved: 1061578726496443962n, totalWeight: 5n, tickets: 2, drawPrice: 0n,
+                drawSettles: false, resetAt: 0 }`;
+  const infos = `[[0, { tickets: 200n, totalWeight: 1n, winner: 123n, prize: 1061578726496443962n,
+                        claimBy: ${now + 20 * 86400}n, roundName: 9n, trophy: 0n, resets: 0n,
+                        settled: true, resolved: false }]]`;
+  run(`renderRoll($('rollBody'), { st: ${st}, round: 1, infos: ${infos}, claimable: [],
+        names: { 0: 'lom.wei' }, draw: null }, '0xME')`);
+  const html = els.get('rollBody').innerHTML;
+
+  ok('a funded round shows its own pot as the hero', /roll-pot-label">Pot</.test(html), html.slice(0, 400));
+  ok('the escrowed prize is called out separately', /reserved for round 0/.test(html), html);
+  ok('and is not folded into the pot figure', html.includes('>1<') || /roll-pot-amount[^>]*>[^<]*<\/svg>1</.test(html) || /1\b/.test(html));
+  ok('entries meta comes back for a live round', html.includes('Entries close'));
+}
+
+// ── a fully resolved round leaves the panel alone ────────────────────────────
+{
+  const { run, els } = sandbox({ address: '0xME' });
+  const now = Math.floor(Date.now() / 1000);
+  const st = `{ phase: 0, round: 2, roundEnd: 0, pot: 0n, reserved: 0n, totalWeight: 0n,
+                tickets: 0, drawPrice: 0n, drawSettles: false, resetAt: 0 }`;
+  const infos = `[[1, { tickets: 9n, totalWeight: 1n, winner: 5n, prize: 2000000000000000000n,
+                        claimBy: ${now - 86400}n, roundName: 9n, trophy: 7n, resets: 0n,
+                        settled: true, resolved: true }]]`;
+  run(`renderRoll($('rollBody'), { st: ${st}, round: 2, infos: ${infos}, claimable: [],
+        names: { 1: 'lom.wei' }, draw: null }, '0xME')`);
+  const html = els.get('rollBody').innerHTML;
+  ok('nothing outstanding: the pot stays the hero', /roll-pot-label">Pot</.test(html));
+  ok('no stale reserved note', !/reserved for round/.test(html));
+  ok('a claimed winner is not counted down', !/to claim/.test(html), html);
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
