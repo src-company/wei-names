@@ -83,6 +83,31 @@ contract ForkRollRound1 is Test {
         assertEq(IWNS(NFT).ownerOf(badge), champ);
     }
 
+    /// @notice Nobody claims and nobody funded a round either: the forfeit restarts the lottery
+    ///         on its own. `rollOver` releases the shares, which makes the pot non-empty, which
+    ///         opens round 1 on the spot with the forfeited prize as its pot.
+    function testAForfeitAloneReopensTheLotteryFromIdle() public onlyFork {
+        assertTrue(ROLL.phase() == WeiRoll.Phase.Idle, "nothing funded yet");
+        assertEq(ROLL.pot(), 0);
+        uint256 prize = ROLL.prizeOf(0);
+
+        vm.warp(ROLL.claimBy(0) + 1);
+        // Still nobody's money until someone calls it — the rollover is not automatic.
+        assertTrue(ROLL.phase() == WeiRoll.Phase.Idle, "idle until rollOver is called");
+        assertEq(ROLL.pot(), 0, "shares stay reserved until then");
+
+        vm.prank(makeAddr("anyone"));
+        ROLL.rollOver(0);
+
+        assertEq(ROLL.reservedShares(), 0, "escrow released");
+        assertApproxEqAbs(ROLL.pot(), prize, 1e15, "the forfeited prize became the pot");
+        assertTrue(ROLL.phase() == WeiRoll.Phase.Open, "and that opened round 1");
+        assertEq(ROLL.round(), 1);
+        assertEq(ROLL.roundEnd(), block.timestamp + ROLL.ROUND_LENGTH(), "a fresh 30-day window");
+        assertEq(ROLL.prizeSharesOf(0), 0, "round 0 is closed out");
+        assertFalse(ROLL.canClaim(0, IWNS(NFT).ownerOf(ROLL.winnerOf(0))), "the winner lost it");
+    }
+
     /// @notice The other branch: nobody claims. The prize rolls into whatever is running.
     function testUnclaimedPrizeFoldsIntoTheOpenRound1() public onlyFork {
         uint256 prize = ROLL.prizeOf(0);
