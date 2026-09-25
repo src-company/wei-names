@@ -1,0 +1,520 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WeiDAO console</title>
+<style>
+:root{--bg:#0b0d10;--fg:#e6e9ef;--dim:#8b93a3;--line:#1e232b;--card:#12161b;--ok:#3fb950;--warn:#d29922;--bad:#f85149;--acc:#58a6ff}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;padding:24px}
+.wrap{max-width:1000px;margin:0 auto}
+h1{font-size:17px;margin:0 0 2px}
+.sub{color:var(--dim);font-size:12px;margin-bottom:20px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:14px 16px;margin-bottom:14px}
+.card h2{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--dim);margin:0 0 10px;font-weight:600}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+.stat{border:1px solid var(--line);border-radius:6px;padding:8px 10px}
+.stat .k{color:var(--dim);font-size:11px}
+.stat .v{font-size:14px;margin-top:2px;font-variant-numeric:tabular-nums}
+button{font:inherit;background:var(--acc);color:#04101f;border:0;border-radius:6px;padding:8px 14px;cursor:pointer;font-weight:600}
+button.sec{background:transparent;color:var(--fg);border:1px solid var(--line);font-weight:400}
+button.sm{padding:4px 10px;font-size:12px}
+button.danger{background:#7d2b2b;color:#fff}
+button:disabled{opacity:.4;cursor:not-allowed}
+input,textarea{font:inherit;background:#0d1117;color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:8px 10px}
+input[type=checkbox]{accent-color:var(--acc);cursor:pointer}
+label{display:block;font-size:12px;color:var(--dim);margin-bottom:8px}
+label input,label textarea{display:block;width:100%;margin-top:3px;color:var(--fg)}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}.dim{color:var(--dim)}
+pre{background:#0d1117;border:1px solid var(--line);border-radius:6px;padding:10px;overflow:auto;max-height:140px;font-size:11px;color:var(--dim);word-break:break-all;white-space:pre-wrap;margin:0}
+a{color:var(--acc)}
+.note{font-size:11px;color:var(--dim);line-height:1.6}
+.prop{border:1px solid var(--line);border-radius:8px;padding:12px 14px;margin-bottom:10px;background:#0f1318}
+.prop.closed{opacity:.6}
+.phead{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;margin-bottom:6px}
+.pid{font-weight:700;color:var(--acc)}
+.pdesc{font-size:13px;color:var(--fg);margin:2px 0 8px}
+.pill{font-size:11px;padding:1px 7px;border-radius:20px;border:1px solid var(--line)}
+.pill.open{color:var(--acc);border-color:#1f3350}
+.pill.exec{color:var(--ok);border-color:#1f4429}
+.pill.veto{color:var(--bad);border-color:#5c2326}
+.pill.ready{color:var(--warn);border-color:#4a3a11}
+.bars{display:grid;grid-template-columns:70px 1fr 120px;gap:8px;align-items:center;font-size:11px;margin:3px 0}
+.bar{height:7px;border-radius:4px;background:#0a0d11;border:1px solid var(--line);overflow:hidden}
+.bar > i{display:block;height:100%;background:var(--acc)}
+.bar.v > i{background:var(--bad)}
+.scroll{max-height:260px;overflow:auto;border:1px solid var(--line);border-radius:6px}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{text-align:left;color:var(--dim);font-weight:600;padding:5px 8px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--card)}
+td{padding:3px 8px;border-bottom:1px solid #161a20}
+td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
+#log{font-size:12px;white-space:pre-wrap;margin-top:10px;line-height:1.7}
+</style></head><body><div class="wrap">
+<h1>WeiDAO console</h1>
+<div class="sub">Proposals, conviction, vetoes and treasury — read from chain, descriptions recovered from logs.</div>
+
+<div class="card"><h2>DAO</h2><div class="grid" id="dao"><div class="dim">loading…</div></div>
+<div class="note" id="roles"></div></div>
+
+<div class="card"><h2>Wallet</h2><div class="row" id="wbtns">
+<button id="connect">Connect wallet</button><span id="acct" class="dim">not connected</span></div>
+<div class="note" id="wdiag"></div>
+<div class="row" style="margin-top:10px">
+<button class="sec sm" id="rescan">Rescan my names</button><span id="pf" class="dim">connect to scan</span></div>
+<div class="scroll" style="margin-top:8px"><table id="tbl"><thead><tr>
+<th style="width:26px"></th><th>name</th><th class="n">weight (ETH)</th></tr></thead><tbody></tbody></table></div>
+</div>
+
+<div class="card"><h2>Proposals</h2>
+<div class="row" style="margin-bottom:10px">
+<button class="sec sm" id="refresh">Refresh</button>
+<label style="margin:0"><input type="checkbox" id="showClosed" style="display:inline;width:auto"> show closed</label>
+<span id="plist-info" class="dim"></span></div>
+<div id="plist"><div class="dim">loading…</div></div></div>
+
+<div class="card"><h2>New proposal</h2>
+<div class="row" style="align-items:flex-start;gap:14px">
+<div style="flex:1;min-width:260px">
+<label>target (0x… or name.wei)<input id="f-target" placeholder="0x0000000000696760E15f265e828DB644A0c242EB"></label>
+<label>value (ETH)<input id="f-value" placeholder="0" inputmode="decimal"></label>
+</div>
+<div style="flex:1;min-width:260px">
+<label>calldata (hex, empty for a plain transfer)<textarea id="f-data" rows="2" placeholder="0x"></textarea></label>
+<label>description<textarea id="f-desc" rows="2" maxlength="2048" placeholder="what this does, and why"></textarea></label>
+</div></div>
+<div class="row"><button id="propose" disabled>Propose</button><span id="pgas" class="dim"></span></div>
+<div class="note">The fee is read from <code>proposalFee()</code> and sent with the call. Gas is floored well
+above the estimate on purpose: <code>propose</code> mints <code>&lt;id&gt;.dao.wei</code> in a swallowed
+<code>try/catch</code>, so <code>eth_estimateGas</code> happily returns a limit where that naming runs out
+of gas and the description is silently never written on-chain.</div>
+<div id="log"></div></div>
+
+<div class="card"><h2>Raw calldata <span class="dim">→ <span id="toaddr"></span></span></h2>
+<div class="row" style="margin-bottom:8px"><button class="sec sm" id="copy">Copy</button><span id="cdlen" class="dim"></span></div>
+<pre id="cd">(nothing staged)</pre></div>
+<script>
+const DAO="0x00000007988a79d16cf76b5dc4cf54dc3af24936";
+const NFT="0x0000000000696760e15f265e828db644a0c242eb";
+const CV ="0x0000005260725eee99704957218d4045a50c2051";
+const RPCS=["https://gateway.tenderly.co/public/mainnet","https://eth.drpc.org",
+            "https://eth.merkle.io","https://ethereum-rpc.publicnode.com"];
+const DEPLOY=24360470;
+const TRANSFER="0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+const CREATED="0x89a1e7f6c86a8312d520db22d098e313e9013dfe6dc5c4afcdd096e04447c353";
+const ALPHA_FALLBACK=999998853923940000n, SCALE=10n**18n;
+// Naming costs ~470k inside propose(); the estimator omits it because its failure is swallowed.
+const PROPOSE_GAS_FLOOR=700000n;
+const S={proposalCount:"da35c664",proposals:"013cf08b",convictionOf:"cea5b888",threshold:"42cde4e8",
+         alpha:"db1d0fd5",executionDelay:"8b257989",proposalFee:"c27cabb5",weightOf:"0767d178",
+         supportOf:"02cd4a68",support:"9be56c67",unsupport:"84a1faba",execute:"fe0d94c1",
+         propose:"82ff16c1",veto:"1d28dec7",vetoer:"d8bff440",executor:"c34c08e5",
+         vetoable:"6be60ea0",multicall:"ac9650d8",ownerOf:"6352211e",records:"34461067",
+         computeId:"fb021939",primaryName:"eba951aa",resolve:"4f896d4f"};
+let NAMES=[], PROPS=[], ACCT=null, PROV=null, DAOINFO=null;
+const $=id=>document.getElementById(id);
+const h=n=>BigInt(n).toString(16).padStart(64,"0");
+const fmt=(w,d=4)=>(Number(BigInt(w))/1e18).toFixed(d);
+const word=(hex,i)=>BigInt("0x"+hex.slice(2).slice(64*i,64*(i+1)));
+const esc=s=>String(s).replace(/[<>&"]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;",'"':"&quot;"}[c]));
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const eslink=a=>`<a href="https://etherscan.io/address/${a}" target="_blank" rel="noopener">${a.slice(0,10)}…${a.slice(-6)}</a>`;
+
+/* ---- transport: a throttled read must never pass as an on-chain zero ---- */
+let cursor=0; const nextRpc=()=>RPCS[cursor++%RPCS.length];
+async function node(reqs,tries=RPCS.length*2){
+  let last;
+  for(let a=0;a<tries;a++){
+    const url=nextRpc();
+    try{
+      const r=await fetch(url,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(reqs)});
+      if(!r.ok){ last=new Error(url+" HTTP "+r.status); await sleep(250*(a+1)); continue; }
+      const j=await r.json(), arr=Array.isArray(j)?j:[j];
+      if(arr.length===1&&arr[0].error&&arr[0].error.code!==3){ last=new Error(arr[0].error.message); await sleep(300*(a+1)); continue; }
+      return arr;
+    }catch(e){ last=e; await sleep(250*(a+1)); }
+  }
+  throw last||new Error("all RPCs failed");
+}
+async function one(method,params){
+  if(PROV){ try{ return await PROV.request({method,params}); }catch(_){} }
+  const j=await node([{jsonrpc:"2.0",id:1,method,params}]);
+  if(j[0].error) throw new Error(j[0].error.message);
+  return j[0].result;
+}
+const call=(to,data)=>one("eth_call",[{to,data},"latest"]);
+async function callMany(items,onProgress){
+  const out=new Array(items.length).fill(null);
+  let todo=items.map((_,i)=>i), done=0;
+  for(let round=0;round<3&&todo.length;round++){
+    const pending=todo; todo=[];
+    for(let i=0;i<pending.length;i+=25){
+      const idx=pending.slice(i,i+25);
+      try{
+        const j=await node(idx.map(k=>({jsonrpc:"2.0",id:k,method:"eth_call",params:[items[k],"latest"]})));
+        const seen=new Set();
+        for(const r of j) if(!r.error&&r.result!==undefined){ out[r.id]=r.result; seen.add(r.id); }
+        for(const k of idx) if(!seen.has(k)) todo.push(k);
+        done+=seen.size;
+      }catch(_){ for(const k of idx) todo.push(k); }
+      if(onProgress) onProgress(done,items.length);
+      await sleep(60);
+    }
+    if(todo.length) await sleep(500);
+  }
+  return {out,failed:todo.length};
+}
+async function getLogs(filter,from,to,depth=0){
+  try{
+    const j=await node([{jsonrpc:"2.0",id:1,method:"eth_getLogs",
+      params:[{...filter,fromBlock:"0x"+from.toString(16),toBlock:"0x"+to.toString(16)}]}]);
+    if(j[0].error) throw new Error(j[0].error.message);
+    const r=j[0].result||[];
+    if(r.length>=300&&to>from){ const m=Math.floor((from+to)/2);
+      return (await getLogs(filter,from,m,depth+1)).concat(await getLogs(filter,m+1,to,depth+1)); }
+    return r;
+  }catch(e){
+    if(to>from&&depth<24){ const m=Math.floor((from+to)/2);
+      return (await getLogs(filter,from,m,depth+1)).concat(await getLogs(filter,m+1,to,depth+1)); }
+    throw e;
+  }
+}
+function log(m,c){ $("log").innerHTML+=`<div class="${c||''}">${m}</div>`; }
+function utf8(hexBody){ let s=""; for(let i=0;i<hexBody.length;i+=2) s+=String.fromCharCode(parseInt(hexBody.slice(i,i+2),16));
+  try{ return decodeURIComponent(escape(s)); }catch(_){ return s; } }
+function readString(raw,w){
+  const off=Number(BigInt("0x"+raw.slice(w*64,(w+1)*64)))*2;
+  const len=Number(BigInt("0x"+raw.slice(off,off+64)));
+  return utf8(raw.slice(off+64,off+64+len*2));
+}
+function encodeMulticall(calls){
+  let head="",body="",off=32*calls.length;
+  for(const c of calls){head+=h(off);off+=32+Math.ceil(c.length/2/32)*32;}
+  for(const c of calls){const b=c.length/2;body+=h(b)+c.padEnd(Math.ceil(b/32)*64,"0");}
+  return "0x"+S.multicall+h(32)+h(calls.length)+head+body;
+}
+// abi.encode(address,uint256,bytes,string) for propose
+function encodePropose(target,value,data,desc){
+  const bytesHex=data.replace(/^0x/,"");
+  const descHex=Array.from(new TextEncoder().encode(desc)).map(b=>b.toString(16).padStart(2,"0")).join("");
+  const headWords=4;
+  const offData=32*headWords;
+  const dataBlk=h(bytesHex.length/2)+bytesHex.padEnd(Math.ceil(bytesHex.length/64)*64,"0");
+  const offDesc=offData+dataBlk.length/2;
+  const descBlk=h(descHex.length/2)+descHex.padEnd(Math.ceil(descHex.length/64)*64,"0");
+  return "0x"+S.propose+h(BigInt(target))+h(value)+h(offData)+h(offDesc)+dataBlk+descBlk;
+}
+function daysToReach(C,W,T){
+  const A=Number(DAOINFO?DAOINFO.alpha:ALPHA_FALLBACK)/1e18, ss=Number(W)/(1-A);
+  if(ss<=Number(T)) return null;
+  return Math.log((ss-Number(T))/(ss-Number(C)))/Math.log(A)/86400;
+}
+
+/* ---------------- DAO state + proposals ---------------- */
+let DESCS={};   // id -> {desc, who, tx}   recovered from ProposalCreated logs
+async function loadDescriptions(){
+  try{
+    const latest=Number(BigInt(await one("eth_blockNumber",[])));
+    const ls=await getLogs({address:DAO,topics:[CREATED]},DEPLOY,latest);
+    for(const l of ls){
+      const id=Number(BigInt(l.topics[1])), raw=l.data.slice(2);
+      DESCS[id]={desc:readString(raw,3),who:readString(raw,4),tx:l.transactionHash};
+    }
+  }catch(e){ console.warn("description recovery failed",e); }
+}
+async function loadDao(){
+  const [cnt,th,al,dl,fee,vr,ex,bal]=await Promise.all([
+    call(DAO,"0x"+S.proposalCount), call(DAO,"0x"+S.threshold), call(DAO,"0x"+S.alpha),
+    call(DAO,"0x"+S.executionDelay), call(DAO,"0x"+S.proposalFee), call(DAO,"0x"+S.vetoer),
+    call(DAO,"0x"+S.executor), one("eth_getBalance",[DAO,"latest"])]);
+  DAOINFO={count:Number(BigInt(cnt)),T:BigInt(th),alpha:BigInt(al),delay:Number(BigInt(dl)),
+           fee:BigInt(fee),vetoer:"0x"+vr.slice(-40),executor:"0x"+ex.slice(-40),bal:BigInt(bal)};
+  const Wreq=DAOINFO.T*(SCALE-DAOINFO.alpha)/SCALE;
+  $("dao").innerHTML=[
+    ["treasury",fmt(DAOINFO.bal)+" ETH"],
+    ["proposals",DAOINFO.count],
+    ["weight to pass",fmt(Wreq,6)+" ETH"],
+    ["timelock",(DAOINFO.delay/86400).toFixed(0)+" d"],
+    ["proposal fee",fmt(DAOINFO.fee,4)+" ETH"]
+  ].map(([k,v])=>`<div class="stat"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
+  $("roles").innerHTML=`veto role ${eslink(DAOINFO.vetoer)} · exec role ${eslink(DAOINFO.executor)}`
+    +` — either may call <code>veto(id)</code> directly; everyone else goes through ConvictionVeto ${eslink(CV)}.`;
+  $("propose").disabled=!ACCT;
+}
+async function loadProposals(){
+  if(!DAOINFO) return;
+  const n=DAOINFO.count, reqs=[];
+  for(let i=1;i<=n;i++){
+    reqs.push({to:DAO,data:"0x"+S.proposals+h(i)});
+    reqs.push({to:DAO,data:"0x"+S.convictionOf+h(i)});
+    reqs.push({to:CV ,data:"0x"+S.convictionOf+h(i)});
+  }
+  const {out}=await callMany(reqs);
+  PROPS=[];
+  for(let i=1;i<=n;i++){
+    const p=out[(i-1)*3], c=out[(i-1)*3+1], v=out[(i-1)*3+2];
+    if(p===null){ PROPS.push({id:i,unread:true}); continue; }
+    const raw=p.slice(2);
+    const dOff=Number(word(p,8))*2, dLen=Number(BigInt("0x"+raw.slice(dOff,dOff+64)))*2;
+    PROPS.push({id:i,
+      created:Number(word(p,1)), executed:word(p,2)===1n, vetoed:word(p,3)===1n,
+      target:"0x"+raw.slice(64*4+24,64*5), W:word(p,6), value:word(p,7),
+      data:"0x"+raw.slice(dOff+64,dOff+64+dLen),
+      C:c===null?undefined:BigInt(c), V:v===null?undefined:BigInt(v)});
+  }
+  renderProposals();
+}
+function statusOf(p){
+  if(p.executed) return ["exec","executed"];
+  if(p.vetoed)   return ["veto","vetoed"];
+  if(p.C!==undefined&&p.C>=DAOINFO.T) return ["ready","passed — executable"];
+  return ["open","open"];
+}
+function renderProposals(){
+  const showClosed=$("showClosed").checked;
+  const list=PROPS.slice().reverse().filter(p=>showClosed||!(p.executed||p.vetoed));
+  $("plist-info").textContent=`${list.length} shown of ${PROPS.length}`;
+  if(!list.length){ $("plist").innerHTML='<div class="dim">nothing open</div>'; return; }
+  $("plist").innerHTML=list.map(p=>{
+    if(p.unread) return `<div class="prop"><span class="pid">#${p.id}</span> <span class="bad">could not read</span></div>`;
+    const meta=DESCS[p.id]||{};
+    const [cls,label]=statusOf(p);
+    const T=DAOINFO.T;
+    const pct=(x)=>x===undefined?0:Math.min(100,Number(x*10000n/T)/100);
+    const d=p.C===undefined?null:daysToReach(p.C,p.W,T);
+    const tl=p.created+DAOINFO.delay;
+    const eta=d===null?null:Math.max(Date.now()/1000+d*86400,tl);
+    const closed=p.executed||p.vetoed;
+    const vetoReady=p.V!==undefined&&p.V>=T;
+    return `<div class="prop${closed?' closed':''}">
+      <div class="phead"><span class="pid">#${p.id}</span>
+        <span class="pill ${cls}">${label}</span>
+        ${meta.who?`<span class="dim">by ${esc(meta.who)}</span>`:''}
+        ${!DESCS[p.id]?'':''}
+        <span class="dim" style="margin-left:auto">${fmt(p.value)} ETH</span></div>
+      <div class="pdesc">${meta.desc?esc(meta.desc):'<span class="dim">no description in logs</span>'}</div>
+      <div class="note">calls ${eslink(p.target)} with <code>${p.data==="0x"?"empty calldata":esc(p.data.slice(0,42))+(p.data.length>42?"…":"")}</code></div>
+      <div class="bars"><span class="dim">support</span><div class="bar"><i style="width:${pct(p.C)}%"></i></div>
+        <span class="dim">${pct(p.C).toFixed(1)}%${d===null&&!closed?' · never at this weight':''}</span></div>
+      <div class="bars"><span class="dim">veto</span><div class="bar v"><i style="width:${pct(p.V)}%"></i></div>
+        <span class="dim">${pct(p.V).toFixed(1)}%${vetoReady?' · vetoable now':''}</span></div>
+      ${closed?'':`<div class="note">${eta?`executable ${new Date(eta*1000).toISOString().slice(0,16).replace("T"," ")} UTC`:'not on track to pass'}
+        · timelock ${new Date(tl*1000).toISOString().slice(0,16).replace("T"," ")} UTC</div>`}
+      ${closed?'':`<div class="row" style="margin-top:8px">
+        <button class="sec sm" onclick="backAll(${p.id},false)">Support with my names</button>
+        <button class="sec sm" onclick="backAll(${p.id},true)">Back a veto</button>
+        ${p.C!==undefined&&p.C>=T&&Date.now()/1000>=tl?`<button class="sm" onclick="doExecute(${p.id})">Execute</button>`:''}
+        ${vetoReady?`<button class="sm danger" onclick="doCvVeto(${p.id})">Veto now</button>`:''}
+        <button class="sec sm" onclick="stageRoleVeto(${p.id})">Role-veto calldata</button>
+      </div>`}
+    </div>`;
+  }).join("");
+}
+
+/* ---------------- names ---------------- */
+const CKEY=a=>"wns:names:"+a, CACHE_TTL=36e5;
+async function discover(addr){
+  let ids=null;
+  try{ const c=JSON.parse(localStorage.getItem(CKEY(addr))||"null");
+       if(c&&Array.isArray(c.ids)&&Date.now()-c.at<CACHE_TTL) ids=c.ids; }catch(_){}
+  if(!ids){
+    $("pf").textContent="scanning Transfer logs…";
+    const latest=Number(BigInt(await one("eth_blockNumber",[])));
+    const ls=await getLogs({address:NFT,topics:[TRANSFER,null,"0x"+addr.slice(2).padStart(64,"0")]},DEPLOY,latest);
+    ids=[...new Set(ls.map(l=>l.topics[3]))];
+    try{ localStorage.setItem(CKEY(addr),JSON.stringify({at:Date.now(),ids})); }catch(_){}
+  }
+  return ids;
+}
+async function scanNames(force){
+  if(!ACCT){ $("pf").textContent="connect to scan"; return; }
+  if(force){ try{ localStorage.removeItem(CKEY(ACCT)); }catch(_){} }
+  try{
+    const ids=await discover(ACCT);
+    const reqs=[];
+    for(const id of ids){ reqs.push({to:NFT,data:"0x"+S.ownerOf+h(id)});
+                          reqs.push({to:NFT,data:"0x"+S.records+h(id)});
+                          reqs.push({to:DAO,data:"0x"+S.weightOf+h(id)}); }
+    const {out}=await callMany(reqs,(d,t)=>{ $("pf").textContent=`reading names… ${d}/${t}`; });
+    NAMES=[];
+    ids.forEach((id,i)=>{
+      const o=out[i*3], r=out[i*3+1], w=out[i*3+2];
+      if(o===null||r===null||w===null) return;
+      if(("0x"+o.slice(-40)).toLowerCase()!==ACCT) return;
+      const raw=r.slice(2);
+      const off=Number(BigInt("0x"+raw.slice(0,64)))*2, len=Number(BigInt("0x"+raw.slice(off,off+64)));
+      NAMES.push({id,label:utf8(raw.slice(off+64,off+64+len*2)),
+                  sub:BigInt("0x"+raw.slice(64,128))!==0n, w:BigInt(w), sel:true});
+    });
+    NAMES=NAMES.filter(n=>n.w>0n).sort((a,b)=>(b.w>a.w?1:b.w<a.w?-1:0));
+    const tot=NAMES.reduce((a,n)=>a+n.w,0n);
+    const Wreq=DAOINFO?DAOINFO.T*(SCALE-DAOINFO.alpha)/SCALE:0n;
+    $("pf").innerHTML=`<span class="ok">${NAMES.length} weighted names · ${fmt(tot,6)} ETH</span>`+
+      (Wreq&&tot<Wreq?` <span class="warn">— below the ${fmt(Wreq,6)} ETH a proposal needs, so these alone converge short of the bar</span>`:``);
+    renderNames();
+  }catch(e){ $("pf").innerHTML=`<span class="bad">scan failed: ${esc(e.message)}</span>`; }
+}
+function renderNames(){
+  const tb=$("tbl").querySelector("tbody");
+  tb.innerHTML=NAMES.length?NAMES.map(n=>
+    `<tr><td><input type="checkbox" data-id="${n.id}" ${n.sel?"checked":""}></td>`+
+    `<td>${esc(n.label)}${n.sub?'<span class="dim"> (sub)</span>':'.wei'}</td>`+
+    `<td class="n">${fmt(n.w,9)}</td></tr>`).join("")
+    :`<tr><td colspan="3" class="dim">${ACCT?"nothing found":"connect a wallet"}</td></tr>`;
+  tb.querySelectorAll("input").forEach(cb=>{
+    cb.onchange=()=>{ const n=NAMES.find(x=>x.id===cb.dataset.id); if(n) n.sel=cb.checked; };
+  });
+}
+
+/* ---------------- actions ---------------- */
+function stage(to,data,label){
+  $("toaddr").textContent=to; $("cd").textContent=data;
+  $("cdlen").textContent=`${(data.length-2)/2} bytes${label?" · "+label:""}`;
+}
+window.stageRoleVeto=(id)=>{
+  stage(DAO,"0x"+S.veto+h(id),`veto(${id}) — send from the veto or exec role holder`);
+  log(`staged veto(${id}) for the role holder — copy below`,"dim");
+};
+async function send(to,data,value,gasFloor,label){
+  if(!PROV||!ACCT) return log("connect a wallet first","bad");
+  try{
+    let gas;
+    try{ gas=BigInt(await PROV.request({method:"eth_estimateGas",
+      params:[{from:ACCT,to,data,...(value?{value:"0x"+value.toString(16)}:{})}]})); }
+    catch(e){ return log("estimate failed: "+esc(e.data?.message||e.message),"bad"); }
+    const sendGas=gasFloor&&gas<gasFloor?gasFloor:gas*12n/10n;
+    log(`${label}: estimate ${gas.toLocaleString()} → sending with ${sendGas.toLocaleString()}`,"dim");
+    const tx=await PROV.request({method:"eth_sendTransaction",params:[{from:ACCT,to,data,
+      ...(value?{value:"0x"+value.toString(16)}:{}),gas:"0x"+sendGas.toString(16)}]});
+    log(`sent → <a href="https://etherscan.io/tx/${tx}" target="_blank" rel="noopener">${tx.slice(0,18)}…</a>`,"ok");
+    let r=null; while(!r){ await sleep(4000); r=await PROV.request({method:"eth_getTransactionReceipt",params:[tx]}); }
+    if(BigInt(r.status)===1n){ log("confirmed ✓","ok"); await refreshAll(); }
+    else log("reverted","bad");
+  }catch(e){ log("failed: "+esc(e.data?.message||e.message||e),"bad"); }
+}
+// Support (or veto-support) a proposal with every selected name not already backing it.
+window.backAll=async(id,isVeto)=>{
+  if(!ACCT) return log("connect a wallet first","bad");
+  const sel=NAMES.filter(n=>n.sel);
+  if(!sel.length) return log("no names selected","bad");
+  const target=isVeto?CV:DAO;
+  const {out}=await callMany(sel.map(n=>({to:target,data:"0x"+S.supportOf+h(id)+h(n.id)})));
+  const todo=sel.filter((n,i)=>out[i]!==null&&BigInt(out[i])===0n);
+  const unread=out.filter(x=>x===null).length;
+  if(unread) log(`${unread} name(s) could not be read — rescan before relying on this`,"warn");
+  if(!todo.length) return log(`every selected name already backs ${isVeto?"a veto of":""} #${id}`,"dim");
+  const data=encodeMulticall(todo.map(n=>S.support+h(id)+h(n.id)));
+  stage(target,data,`${todo.length} × support(${id}, …)`);
+  await send(target,data,0n,null,`${isVeto?"veto-":""}support #${id} with ${todo.length} names`);
+};
+window.doExecute=(id)=>{ const d="0x"+S.execute+h(id); stage(DAO,d,`execute(${id})`); send(DAO,d,0n,null,`execute #${id}`); };
+window.doCvVeto =(id)=>{ const d="0x"+S.veto+h(id);   stage(CV ,d,`veto(${id}) via ConvictionVeto`); send(CV,d,0n,null,`veto #${id}`); };
+
+$("propose").onclick=async()=>{
+  const t=$("f-target").value.trim(), v=($("f-value").value||"0").trim();
+  const d=($("f-data").value||"0x").trim()||"0x", desc=$("f-desc").value.trim();
+  if(!desc) return log("a description is required","bad");
+  if(!/^0x([0-9a-fA-F]{2})*$/.test(d)) return log("calldata must be 0x-prefixed hex with whole bytes","bad");
+  let target=t;
+  if(!/^0x[0-9a-fA-F]{40}$/.test(t)){
+    try{
+      // abi.encode(string): offset, length, then the bytes padded to whole words —
+      // padEnd(64) would silently truncate any label longer than 32 bytes.
+      const b=new TextEncoder().encode(t);
+      const body=Array.from(b).map(x=>x.toString(16).padStart(2,"0")).join("");
+      const id=await call(NFT,"0x"+S.computeId+h(32)+h(b.length)+body.padEnd(Math.ceil(b.length/32)*64,"0"));
+      // resolve(), not ownerOf(): the addr record is where the name says to send,
+      // and NameNFT falls back to the owner when no record is set.
+      const o=await call(NFT,"0x"+S.resolve+id.slice(2));
+      target="0x"+o.slice(-40);
+      if(/^0x0{40}$/.test(target)) return log(esc(t)+" does not resolve to an address","bad");
+      log(`${esc(t)} resolves to ${target}`,"dim");
+    }catch(_){ return log("could not resolve that name — paste a 0x address","bad"); }
+  }
+  let wei;
+  try{ const [i,f=""]=v.split("."); wei=BigInt(i||"0")*SCALE+BigInt((f+"0".repeat(18)).slice(0,18)); }
+  catch(_){ return log("value must be a decimal number of ETH","bad"); }
+  const data=encodePropose(target,wei,d,desc);
+  stage(DAO,data,"propose(…)");
+  await send(DAO,data,DAOINFO.fee,PROPOSE_GAS_FLOOR,"propose");
+};
+
+/* ---------------- wallet ---------------- */
+const WALLETS=[]; let sawAnnounce=false;
+function addWallet(w){
+  if(WALLETS.some(x=>x.provider===w.provider)) return;
+  if(WALLETS.some(x=>x.info.name===w.info.name)) return;
+  WALLETS.push(w); renderWallets();
+}
+window.addEventListener("eip6963:announceProvider",e=>{
+  sawAnnounce=true;
+  for(let i=WALLETS.length-1;i>=0;i--) if(WALLETS[i].legacy) WALLETS.splice(i,1);
+  addWallet(e.detail);
+});
+function scanLegacy(){
+  if(sawAnnounce) return;
+  const e=window.ethereum; if(!e) return;
+  const list=Array.isArray(e.providers)&&e.providers.length?e.providers:[e];
+  for(const p of list){
+    const name=p.isRabby?"Rabby":p.isMetaMask?"MetaMask":p.isCoinbaseWallet?"Coinbase":"Injected wallet";
+    addWallet({info:{name},provider:p,legacy:true});
+  }
+}
+function renderWallets(){
+  const box=$("wbtns"), base=$("connect");
+  box.querySelectorAll("button[data-w]").forEach(b=>b.remove());
+  WALLETS.forEach((w,i)=>{
+    const b=document.createElement("button");
+    b.dataset.w=i; b.className="sec"; b.textContent="Connect "+w.info.name;
+    b.onclick=()=>connect(w.provider);
+    box.insertBefore(b,base);
+  });
+  base.style.display=WALLETS.length?"none":"";
+  const bits=[];
+  if(!WALLETS.length){
+    bits.push('<span class="bad">No wallet detected.</span>');
+    if(!window.isSecureContext) bits.push('Not a secure context — serve over http://localhost or https.');
+    if(location.protocol==="file:") bits.push('Opened as file://; extensions do not inject there.');
+    bits.push('Served from a remote container? Open the forwarded port in your own browser.');
+  } else bits.push("Found: "+WALLETS.map(w=>"<b>"+esc(w.info.name)+"</b>").join(", ")+".");
+  $("wdiag").innerHTML=bits.join("<br>");
+}
+async function connect(p){
+  PROV=p||WALLETS[0]?.provider||window.ethereum;
+  if(!PROV) return log("no wallet provider","bad");
+  try{
+    const [a]=await PROV.request({method:"eth_requestAccounts"});
+    const cid=await PROV.request({method:"eth_chainId"});
+    ACCT=a.toLowerCase();
+    $("acct").innerHTML=esc(a)+(cid!=="0x1"?' <span class="bad">— not mainnet</span>':"");
+    $("acct").className="";
+    if(PROV.on){
+      PROV.on("accountsChanged",as=>{ ACCT=as[0]?as[0].toLowerCase():null; NAMES=[]; renderNames();
+        $("acct").innerHTML=as[0]?esc(as[0]):'<span class="bad">disconnected</span>';
+        $("propose").disabled=!ACCT; if(ACCT) scanNames(false); });
+      PROV.on("chainChanged",()=>location.reload());
+    }
+    $("propose").disabled=false;
+    scanNames(false);
+  }catch(e){ log("connect failed: "+esc(e.message||e),"bad"); }
+}
+
+async function refreshAll(){ await loadDao(); await loadProposals(); }
+$("connect").onclick=()=>connect(null);
+$("rescan").onclick=()=>scanNames(true);
+$("refresh").onclick=refreshAll;
+$("showClosed").onchange=renderProposals;
+$("copy").onclick=()=>navigator.clipboard.writeText($("cd").textContent).then(()=>log("copied","dim"));
+$("toaddr").textContent=DAO;
+
+renderWallets();
+window.dispatchEvent(new Event("eip6963:requestProvider"));
+scanLegacy();
+window.addEventListener("ethereum#initialized",scanLegacy,{once:true});
+[100,300,800,1500,3000].forEach(ms=>setTimeout(()=>{
+  window.dispatchEvent(new Event("eip6963:requestProvider")); scanLegacy(); },ms));
+
+(async()=>{
+  try{ await loadDao(); }catch(e){ $("dao").innerHTML=`<div class="bad">load failed: ${esc(e.message)}</div>`; }
+  await loadDescriptions();          // descriptions survive a failed <id>.dao.wei mint
+  try{ await loadProposals(); }catch(e){ $("plist").innerHTML=`<div class="bad">${esc(e.message)}</div>`; }
+})();
+</script></div></body></html>
