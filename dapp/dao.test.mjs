@@ -16,7 +16,12 @@ import vm from 'node:vm';
 
 const here = path.dirname(url.fileURLToPath(import.meta.url));
 const SRC = fs.readFileSync(path.join(here, 'dao.html'), 'utf8');
-const JS = SRC.slice(SRC.indexOf('<script>') + 8, SRC.lastIndexOf('</script>'));
+// The page has several <script> blocks (FOUC guard, theme.js). Take the console's
+// by its first declaration rather than by position, so adding another script to the
+// head cannot silently point these tests at the wrong code.
+const START = SRC.indexOf('<script>\nconst DAO=');
+if (START < 0) throw new Error('dao.html no longer opens its console script with `const DAO=`');
+const JS = SRC.slice(START + 8, SRC.indexOf('</script>', START));
 
 let pass = 0, fail = 0;
 const ok = (name, cond, detail) => cond
