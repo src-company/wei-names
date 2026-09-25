@@ -113,5 +113,20 @@ const { ctx, run } = sandbox();
      /estimator omits it because its failure is swallowed/.test(JS));
 }
 
+// ── withdrawable is only the DAO's while it owns the registrar
+{
+  // loadDao() gates the NameNFT balance on owner() == the DAO. Guard the guard:
+  // a fork of WNS ownership must not let the page report someone else's ETH as
+  // money this DAO can spend.
+  ok('withdrawable is gated on registrar ownership', /daoOwnsNft\?BigInt\(nftBal\):0n/.test(JS));
+  ok('the gate compares against the DAO itself', /NFT_OWNER_EXPECT=\(\)=>DAO\.toLowerCase\(\)/.test(JS));
+  ok('treasury and withdrawable are reported separately',
+     /\["in treasury"/.test(JS) && /\["withdrawable"/.test(JS) && /\["combined"/.test(JS));
+  ok('losing ownership is surfaced, not silently zeroed',
+     /does not own WNS/.test(JS));
+  ok('the withdrawal draft targets withdraw\(\) with no value',
+     /f-data"\)\.value="0x3ccfd60b"/.test(JS) && /f-value"\)\.value="0"/.test(JS));
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

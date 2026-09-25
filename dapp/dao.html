@@ -3,8 +3,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="theme-color" id="metaTheme" content="#ffffff">
-<meta name="description" content="WeiDAO console — proposals, conviction voting, vetoes and treasury for the Wei Name Service DAO.">
-<title>WeiDAO console</title>
+<meta name="description" content="Wei DAO — proposals, conviction voting, vetoes and treasury for the Wei Name Service.">
+<title>Wei DAO</title>
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2064%2064%22%3E%3Crect%20width%3D%2264%22%20height%3D%2264%22%20fill%3D%22%230A0A0A%22%2F%3E%3Cpath%20d%3D%22M16%2C16%20V48%20H22%20L32%2C32%20L42%2C48%20H48%20V16%20H42%20V38%20L32%2C22%20L22%2C38%20V16%20Z%22%20fill%3D%22%232D5FE8%22%2F%3E%3C%2Fsvg%3E">
 <link rel="stylesheet" href="theme.css">
 <link rel="preconnect" href="https://gateway.tenderly.co" crossorigin>
@@ -15,89 +15,107 @@ try{var d=localStorage.getItem('dark');if(d==='1'||(d===null&&matchMedia('(prefe
 </script>
 <script src="theme.js" defer></script>
 <style>
-/* theme.css centres a 480px column for the lander; governance needs a wider one. */
-body{max-width:920px;padding:28px 20px 40px;font-family:Helvetica,Arial,sans-serif}
+/* Same ink and lines as the lander: near-black rather than pure #000, structural
+   lines that whisper. theme.css only carries body/a/dark-toggle, so the rest of
+   the WNS palette is restated here. */
+html:not(.dark){--fg:#1a1a1a;--fg-muted:#6b6b6b;--fg-dim:#a3a3a3;--border:#d6d6d6;
+                --border-muted:#e6e6e6;--btn-bg:#1a1a1a;--btn-hover:#000;--input-ph:#ccc;
+                --btn-dis-bg:#ccc;--btn-dis-border:#ccc;--btn-dis-fg:#999}
+html.dark{--input-ph:#555;--btn-dis-bg:#444;--btn-dis-border:#444;--btn-dis-fg:#666}
+
+body{max-width:760px;padding:56px 20px 24px;font-family:Helvetica,Arial,sans-serif;font-size:15px}
 a{color:inherit}
 .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
-code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:0.92em}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:0.9em}
 
-.top{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:4px}
-h1{font-size:19px;letter-spacing:-0.01em}
-.top nav{margin-left:auto;display:flex;gap:14px;font-size:12px}
-.top nav a{opacity:0.55;text-decoration:none;border-bottom:1px solid transparent}
-.top nav a:hover{opacity:1;border-bottom-color:var(--border-muted)}
-.sub{color:var(--fg-muted);font-size:12.5px;line-height:1.5;margin-bottom:22px}
+h1{font-size:14px;font-weight:400;letter-spacing:0.1em;text-transform:uppercase}
+.top{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;margin-bottom:6px}
+.top nav{margin-left:auto;display:flex;gap:16px;font-size:11px;letter-spacing:0.06em;text-transform:uppercase}
+.top nav a{opacity:0.5;text-decoration:none}
+.top nav a:hover{opacity:1}
+.lede{color:var(--fg-muted);font-size:13px;line-height:1.6;margin-bottom:34px;max-width:60ch}
 
-.card{border:1px solid var(--border-muted);border-radius:10px;padding:16px 18px;margin-bottom:16px;background:var(--surface)}
-.card h2{font-size:11px;text-transform:uppercase;letter-spacing:0.09em;color:var(--fg-dim);margin-bottom:12px;font-weight:600}
+section{border-top:1px solid var(--border);padding-top:20px;margin-top:32px}
+section:first-of-type{margin-top:0}
+h2{font-size:11px;font-weight:400;letter-spacing:0.1em;text-transform:uppercase;
+   color:var(--fg-dim);margin-bottom:16px}
 
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px}
-.stat{border:1px solid var(--border-muted);border-radius:8px;padding:10px 12px;background:var(--bg)}
-.stat .k{color:var(--fg-dim);font-size:10.5px;text-transform:uppercase;letter-spacing:0.06em}
-.stat .v{font-size:16px;margin-top:3px;font-variant-numeric:tabular-nums;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(125px,1fr));gap:20px 24px}
+.stat .k{color:var(--fg-dim);font-size:10px;letter-spacing:0.08em;text-transform:uppercase}
+.stat .v{font-size:19px;margin-top:5px;font-variant-numeric:tabular-nums;letter-spacing:-0.01em}
 
-button{font:inherit;font-size:13px;background:var(--btn-bg);color:var(--btn-fg);border:1px solid var(--btn-bg);
-       border-radius:7px;padding:8px 15px;cursor:pointer;font-weight:500;transition:opacity .15s}
-button:hover:not(:disabled){opacity:0.82}
-button.sec{background:transparent;color:var(--fg);border-color:var(--border-muted);font-weight:400}
-button.sec:hover:not(:disabled){background:var(--surface-hover)}
-button.sm{padding:5px 11px;font-size:12px;border-radius:6px}
+button{display:inline-block;padding:11px 22px;font-size:11px;font-family:inherit;text-transform:uppercase;
+       letter-spacing:0.1em;background:var(--btn-bg);color:var(--btn-fg);border:1px solid var(--btn-bg);
+       border-radius:0;cursor:pointer}
+button:hover:not(:disabled){background:var(--btn-hover)}
+button:active:not(:disabled){transform:translateY(1px)}
+button:disabled{background:var(--btn-dis-bg);border-color:var(--btn-dis-border);color:var(--btn-dis-fg);cursor:not-allowed}
+button.sec{background:var(--bg);color:var(--fg);border-color:var(--border)}
+button.sec:hover:not(:disabled){background:var(--bg);border-color:var(--fg)}
+button.sec:disabled{background:var(--bg);color:var(--btn-dis-fg);border-color:var(--btn-dis-border)}
+button.sm{padding:7px 14px;font-size:10px}
 button.danger{background:#b4232b;border-color:#b4232b;color:#fff}
-button:disabled{opacity:0.35;cursor:default}
+button:focus-visible,a:focus-visible{outline:2px solid var(--btn-bg);outline-offset:2px}
 
-input,textarea{font:inherit;font-size:13px;background:var(--bg);color:var(--fg);
-               border:1px solid var(--border-muted);border-radius:7px;padding:9px 11px;width:100%}
-input:focus,textarea:focus{outline:none;border-color:#2D5FE8}
-textarea{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;resize:vertical}
-label{display:block;font-size:11px;color:var(--fg-dim);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:12px}
-label input,label textarea{margin-top:5px;text-transform:none;letter-spacing:normal}
-input[type=checkbox]{width:auto;accent-color:#2D5FE8;cursor:pointer}
+label{display:block;font-size:10px;letter-spacing:0.08em;text-transform:uppercase;
+      color:var(--fg-dim);margin-bottom:18px}
+input,textarea{width:100%;font-family:inherit;font-size:16px;color:var(--fg);background:transparent;
+               border:none;border-bottom:1px solid var(--border);border-radius:0;outline:none;
+               padding:9px 0;margin-top:5px;letter-spacing:normal;text-transform:none}
+input::placeholder,textarea::placeholder{color:var(--input-ph)}
+input:focus,textarea:focus{border-bottom-color:var(--fg);border-bottom-width:2px;margin-bottom:-1px}
+textarea{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px;resize:vertical}
+input[type=checkbox]{width:auto;accent-color:var(--fg);cursor:pointer;margin:0}
 
-.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
-.ok{color:#128a3d}.warn{color:#9a6a00}.bad{color:#b4232b}.dim{color:var(--fg-dim)}
-:root.dark .ok{color:#4ade80}:root.dark .warn{color:#fbbf24}:root.dark .bad{color:#fb7185}
-
-.note{font-size:11.5px;color:var(--fg-muted);line-height:1.6}
-pre{background:var(--bg);border:1px solid var(--border-muted);border-radius:7px;padding:11px;overflow:auto;
-    max-height:150px;font-size:11px;color:var(--fg-muted);word-break:break-all;white-space:pre-wrap;
+.row{display:flex;gap:14px;flex-wrap:wrap;align-items:center}
+.ok{color:#1a8917}.warn{color:#9a6a00}.bad{color:#b4232b}.dim{color:var(--fg-dim)}
+html.dark .ok{color:#2ecc40}html.dark .warn{color:#fbbf24}html.dark .bad{color:#fb7185}
+.note{font-size:11.5px;color:var(--fg-muted);line-height:1.65}
+pre{border:none;border-left:2px solid var(--border);padding:2px 0 2px 12px;overflow:auto;max-height:150px;
+    font-size:11px;color:var(--fg-muted);word-break:break-all;white-space:pre-wrap;
     font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 
-/* proposals */
-.prop{border:1px solid var(--border-muted);border-radius:9px;padding:14px 16px;margin-bottom:11px;background:var(--bg)}
-.prop.closed{opacity:0.62}
-.phead{display:flex;gap:9px;align-items:baseline;flex-wrap:wrap;margin-bottom:5px}
-.pid{font-weight:700;font-size:14px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
-.pdesc{font-size:14px;line-height:1.5;margin:4px 0 10px}
-.pill{font-size:10px;text-transform:uppercase;letter-spacing:0.07em;padding:2px 8px;border-radius:20px;
-      border:1px solid var(--border-muted);font-weight:600}
-.pill.open{color:#2D5FE8;border-color:rgba(45,95,232,0.4)}
-.pill.exec{color:#128a3d;border-color:rgba(18,138,61,0.4)}
-.pill.veto{color:#b4232b;border-color:rgba(180,35,43,0.4)}
-.pill.ready{color:#9a6a00;border-color:rgba(154,106,0,0.45)}
-:root.dark .pill.open{color:#818cf8}:root.dark .pill.exec{color:#4ade80}
-:root.dark .pill.veto{color:#fb7185}:root.dark .pill.ready{color:#fbbf24}
-.bars{display:grid;grid-template-columns:58px 1fr auto;gap:9px;align-items:center;font-size:11px;margin:4px 0}
-.bar{height:6px;border-radius:3px;background:var(--surface-hover);overflow:hidden}
-:root.dark .bar{background:#1c1c1c}
-.bar > i{display:block;height:100%;background:#2D5FE8;border-radius:3px}
+/* proposals — hairline rows, not boxes */
+.prop{border-bottom:1px solid var(--border-muted);padding:18px 0}
+.prop:first-child{padding-top:0}
+.prop:last-child{border-bottom:none}
+.prop.closed{opacity:0.5}
+.phead{display:flex;gap:12px;align-items:baseline;flex-wrap:wrap}
+.pid{font-size:11px;letter-spacing:0.08em;color:var(--fg-dim);font-variant-numeric:tabular-nums}
+.pdesc{font-size:16px;line-height:1.45;margin:6px 0 12px;letter-spacing:-0.01em}
+.pill{font-size:10px;letter-spacing:0.1em;text-transform:uppercase}
+.pill.open{color:var(--fg-dim)}
+.pill.exec{color:#1a8917}
+.pill.veto{color:#b4232b}
+.pill.ready{color:#9a6a00}
+html.dark .pill.exec{color:#2ecc40}html.dark .pill.veto{color:#fb7185}html.dark .pill.ready{color:#fbbf24}
+.bars{display:grid;grid-template-columns:52px 1fr auto;gap:10px;align-items:center;
+      font-size:10px;letter-spacing:0.06em;text-transform:uppercase;margin:5px 0;color:var(--fg-dim)}
+.bar{height:2px;background:var(--border-muted)}
+.bar > i{display:block;height:100%;background:var(--fg)}
 .bar.v > i{background:#b4232b}
-:root.dark .bar > i{background:#818cf8}:root.dark .bar.v > i{background:#fb7185}
+html.dark .bar.v > i{background:#fb7185}
 
-.scroll{max-height:260px;overflow:auto;border:1px solid var(--border-muted);border-radius:8px;background:var(--bg)}
-table{width:100%;border-collapse:collapse;font-size:12px}
-th{text-align:left;color:var(--fg-dim);font-weight:600;font-size:10.5px;text-transform:uppercase;
-   letter-spacing:0.05em;padding:7px 10px;border-bottom:1px solid var(--border-muted);
+.scroll{max-height:250px;overflow:auto}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;color:var(--fg-dim);font-weight:400;font-size:10px;text-transform:uppercase;
+   letter-spacing:0.08em;padding:0 10px 8px 0;border-bottom:1px solid var(--border);
    position:sticky;top:0;background:var(--bg)}
-td{padding:5px 10px;border-bottom:1px solid var(--border-muted)}
+td{padding:7px 10px 7px 0;border-bottom:1px solid var(--border-muted)}
 tr:last-child td{border-bottom:none}
-td.n,th.n{text-align:right;font-variant-numeric:tabular-nums;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
-#log{font-size:12px;white-space:pre-wrap;margin-top:12px;line-height:1.7}
+td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
+#log{font-size:12px;white-space:pre-wrap;margin-top:16px;line-height:1.8}
+
+footer{margin-top:44px;padding-top:18px;text-align:center;font-size:11px;
+       letter-spacing:0.06em;opacity:0.45;border-top:1px solid var(--border)}
+footer a{text-decoration:none}
 
 @media (max-width:560px){
-  body{padding:20px 14px 36px}
-  .bars{grid-template-columns:48px 1fr;row-gap:2px}
+  body{padding:44px 16px 20px}
+  .bars{grid-template-columns:44px 1fr;row-gap:1px}
   .bars > span:last-child{grid-column:2}
-  .top nav{width:100%;margin-left:0}
+  .top nav{width:100%;margin-left:0;gap:14px}
+  .grid{gap:16px}
 }
 </style>
 </head>
@@ -105,58 +123,55 @@ td.n,th.n{text-align:right;font-variant-numeric:tabular-nums;font-family:ui-mono
 <div id="z-nav"></div>
 
 <div class="top">
-  <h1>WeiDAO console</h1>
+  <h1>Wei DAO</h1>
   <nav>
     <a href="/">← WNS</a>
-    <a href="https://dao.wei.limo" target="_blank" rel="noopener" title="The DAO's own page, rendered on-chain by the contract">on-chain page ↗</a>
+    <a href="https://dao.wei.limo" target="_blank" rel="noopener" title="The DAO's own page, rendered on-chain by the contract">on-chain ↗</a>
   </nav>
 </div>
-<div class="sub">Proposals, conviction, vetoes and treasury — read live from Ethereum.
-Descriptions come from <code>ProposalCreated</code> logs, so they survive even when a proposal's
+<div class="lede">Proposals, conviction, vetoes and treasury, read live from Ethereum.
+Descriptions come from <code>ProposalCreated</code> logs, so they survive even where a proposal's
 <code>&lt;id&gt;.dao.wei</code> record was never written.</div>
 
-<div class="card"><h2>DAO</h2><div class="grid" id="dao"><div class="dim">loading…</div></div>
-<div class="note" id="roles" style="margin-top:12px"></div></div>
+<section><h2>Treasury</h2>
+<div class="grid" id="dao"><div class="dim">loading…</div></div>
+<div class="row" style="margin-top:18px"><button class="sec sm" id="sweep" style="display:none"></button></div>
+<div class="note" id="roles" style="margin-top:16px"></div></section>
 
-<div class="card"><h2>Wallet</h2><div class="row" id="wbtns">
-<button id="connect">Connect wallet</button><span id="acct" class="dim">not connected</span></div>
-<div class="note" id="wdiag" style="margin-top:10px"></div>
-<div class="row" style="margin-top:14px">
-<button class="sec sm" id="rescan">Rescan my names</button><span id="pf" class="dim">connect to scan</span></div>
-<div class="scroll" style="margin-top:10px"><table id="tbl"><thead><tr>
-<th style="width:34px"></th><th>name</th><th class="n">weight (ETH)</th></tr></thead><tbody></tbody></table></div>
-</div>
+<section><h2>Your names</h2>
+<div class="row" id="wbtns"><button id="connect">Connect wallet</button><span id="acct" class="dim">not connected</span></div>
+<div class="note" id="wdiag" style="margin-top:12px"></div>
+<div class="row" style="margin-top:18px">
+<button class="sec sm" id="rescan">Rescan</button><span id="pf" class="dim" style="font-size:12px">connect to scan</span></div>
+<div class="scroll" style="margin-top:14px"><table id="tbl"><thead><tr>
+<th style="width:30px"></th><th>name</th><th class="n">weight (ETH)</th></tr></thead><tbody></tbody></table></div>
+</section>
 
-<div class="card"><h2>Proposals</h2>
-<div class="row" style="margin-bottom:12px">
+<section><h2>Proposals</h2>
+<div class="row" style="margin-bottom:6px">
 <button class="sec sm" id="refresh">Refresh</button>
-<label style="margin:0;display:flex;align-items:center;gap:6px;text-transform:none;letter-spacing:normal;font-size:12px;color:var(--fg-muted)">
+<label style="margin:0;display:flex;align-items:center;gap:7px;text-transform:none;letter-spacing:normal;font-size:12px;color:var(--fg-muted)">
 <input type="checkbox" id="showClosed"> show closed</label>
-<span id="plist-info" class="dim" style="margin-left:auto;font-size:11.5px"></span></div>
-<div id="plist"><div class="dim">loading…</div></div></div>
+<span id="plist-info" class="dim" style="margin-left:auto;font-size:11px"></span></div>
+<div id="plist"><div class="dim">loading…</div></div></section>
 
-<div class="card"><h2>New proposal</h2>
-<div class="row" style="align-items:flex-start;gap:18px">
-<div style="flex:1;min-width:250px">
+<section><h2>New proposal</h2>
 <label>target — address or .wei name<input id="f-target" placeholder="roll.wei"></label>
 <label>value in ETH<input id="f-value" placeholder="0" inputmode="decimal"></label>
-</div>
-<div style="flex:1;min-width:250px">
 <label>calldata — leave empty for a plain transfer<textarea id="f-data" rows="2" placeholder="0x"></textarea></label>
 <label>description<textarea id="f-desc" rows="2" maxlength="2048" placeholder="what this does, and why"></textarea></label>
-</div></div>
 <div class="row"><button id="propose" disabled>Propose</button></div>
-<div class="note" style="margin-top:10px">The fee is read from <code>proposalFee()</code> and sent with the call.
+<div class="note" style="margin-top:14px">The fee is read from <code>proposalFee()</code> and sent with the call.
 Gas is floored well above the estimate on purpose: <code>propose</code> mints <code>&lt;id&gt;.dao.wei</code>
 in a swallowed <code>try/catch</code>, so <code>eth_estimateGas</code> returns a limit where that naming runs
 out of gas and the description is silently never written on-chain.</div>
-<div id="log"></div></div>
+<div id="log"></div></section>
 
-<div class="card"><h2>Raw calldata <span class="dim" style="text-transform:none;letter-spacing:normal">→ <span id="toaddr" class="mono"></span></span></h2>
-<div class="row" style="margin-bottom:10px"><button class="sec sm" id="copy">Copy</button><span id="cdlen" class="dim" style="font-size:11.5px"></span></div>
-<pre id="cd">(nothing staged)</pre></div>
+<section><h2>Raw calldata <span class="dim" style="letter-spacing:normal;text-transform:none">→ <span id="toaddr" class="mono"></span></span></h2>
+<div class="row" style="margin-bottom:12px"><button class="sec sm" id="copy">Copy</button><span id="cdlen" class="dim" style="font-size:11px"></span></div>
+<pre id="cd">(nothing staged)</pre></section>
 
-<footer style="margin-top:36px;padding-top:18px;text-align:center;font-size:11px;opacity:0.5;border-top:1px solid var(--border-muted)">
+<footer>
   <a href="/">WNS</a> · <a href="https://dao.wei.limo" target="_blank" rel="noopener">dao.wei.limo</a> ·
   <a href="https://github.com/src-company/wei-names" target="_blank" rel="noopener">source</a>
 </footer>
@@ -177,8 +192,9 @@ const S={proposalCount:"da35c664",proposals:"013cf08b",convictionOf:"cea5b888",t
          supportOf:"02cd4a68",support:"9be56c67",unsupport:"84a1faba",execute:"fe0d94c1",
          propose:"82ff16c1",veto:"1d28dec7",vetoer:"d8bff440",executor:"c34c08e5",
          vetoable:"6be60ea0",multicall:"ac9650d8",ownerOf:"6352211e",records:"34461067",
-         computeId:"fb021939",primaryName:"eba951aa",resolve:"4f896d4f"};
+         computeId:"fb021939",primaryName:"eba951aa",resolve:"4f896d4f",owner:"8da5cb5b"};
 let NAMES=[], PROPS=[], ACCT=null, PROV=null, DAOINFO=null;
+const NFT_OWNER_EXPECT=()=>DAO.toLowerCase();
 const $=id=>document.getElementById(id);
 const h=n=>BigInt(n).toString(16).padStart(64,"0");
 const fmt=(w,d=4)=>(Number(BigInt(w))/1e18).toFixed(d);
@@ -290,22 +306,39 @@ async function loadDescriptions(){
   }catch(e){ console.warn("description recovery failed",e); }
 }
 async function loadDao(){
-  const [cnt,th,al,dl,fee,vr,ex,bal]=await Promise.all([
+  const [cnt,th,al,dl,fee,vr,ex,bal,nftBal,nftOwner]=await Promise.all([
     call(DAO,"0x"+S.proposalCount), call(DAO,"0x"+S.threshold), call(DAO,"0x"+S.alpha),
     call(DAO,"0x"+S.executionDelay), call(DAO,"0x"+S.proposalFee), call(DAO,"0x"+S.vetoer),
-    call(DAO,"0x"+S.executor), one("eth_getBalance",[DAO,"latest"])]);
+    call(DAO,"0x"+S.executor), one("eth_getBalance",[DAO,"latest"]),
+    one("eth_getBalance",[NFT,"latest"]), call(NFT,"0x"+S.owner)]);
+  // Registration fees accrue inside NameNFT, not the DAO. They are the DAO's only
+  // while it owns the registrar, and they move only when withdraw() is executed —
+  // so hold them apart from the balance the DAO can actually spend today.
+  const daoOwnsNft=("0x"+nftOwner.slice(-40)).toLowerCase()===NFT_OWNER_EXPECT();
   DAOINFO={count:Number(BigInt(cnt)),T:BigInt(th),alpha:BigInt(al),delay:Number(BigInt(dl)),
-           fee:BigInt(fee),vetoer:"0x"+vr.slice(-40),executor:"0x"+ex.slice(-40),bal:BigInt(bal)};
+           fee:BigInt(fee),vetoer:"0x"+vr.slice(-40),executor:"0x"+ex.slice(-40),
+           bal:BigInt(bal),withdrawable:daoOwnsNft?BigInt(nftBal):0n,
+           nftOwner:"0x"+nftOwner.slice(-40),daoOwnsNft};
   const Wreq=DAOINFO.T*(SCALE-DAOINFO.alpha)/SCALE;
   $("dao").innerHTML=[
-    ["treasury",fmt(DAOINFO.bal)+" ETH"],
-    ["proposals",DAOINFO.count],
+    ["in treasury",fmt(DAOINFO.bal)+" ETH"],
+    ["withdrawable",(DAOINFO.withdrawable>0n?'<span class="ok">':"<span>")+fmt(DAOINFO.withdrawable)+" ETH</span>"],
+    ["combined",fmt(DAOINFO.bal+DAOINFO.withdrawable)+" ETH"],
     ["weight to pass",fmt(Wreq,6)+" ETH"],
-    ["timelock",(DAOINFO.delay/86400).toFixed(0)+" d"],
-    ["proposal fee",fmt(DAOINFO.fee,4)+" ETH"]
+    ["proposal fee",fmt(DAOINFO.fee,4)+" ETH"],
+    ["timelock",(DAOINFO.delay/86400).toFixed(0)+" d"]
   ].map(([k,v])=>`<div class="stat"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
-  $("roles").innerHTML=`veto role ${eslink(DAOINFO.vetoer)} · exec role ${eslink(DAOINFO.executor)}`
+  $("roles").innerHTML=
+    (DAOINFO.daoOwnsNft
+      ? `<b>Withdrawable</b> is registration fees sitting in WNS ${eslink(NFT)}, which the DAO owns. `+
+        `They are not spendable until a proposal calls <code>withdraw()</code> on it — only then do they `+
+        `become treasury. <b>In treasury</b> is what proposals can spend right now.`
+      : `<span class="bad">The DAO does not own WNS ${eslink(NFT)}</span> (owner ${eslink(DAOINFO.nftOwner)}), `+
+        `so its balance is not withdrawable to the DAO and is shown as zero.`)
+    +`<br>veto role ${eslink(DAOINFO.vetoer)} · exec role ${eslink(DAOINFO.executor)}`
     +` — either may call <code>veto(id)</code> directly; everyone else goes through ConvictionVeto ${eslink(CV)}.`;
+  $("sweep").style.display=DAOINFO.withdrawable>0n?"":"none";
+  $("sweep").textContent=`Draft withdrawal of ${fmt(DAOINFO.withdrawable)} ETH`;
   $("propose").disabled=!ACCT;
 }
 async function loadProposals(){
@@ -567,6 +600,12 @@ async function connect(p){
 }
 
 async function refreshAll(){ await loadDao(); await loadProposals(); }
+$("sweep").onclick=()=>{
+  $("f-target").value=NFT; $("f-value").value="0"; $("f-data").value="0x3ccfd60b";
+  $("f-desc").value="Withdraw accrued WNS registration fees into DAO";
+  $("f-desc").scrollIntoView({behavior:"smooth",block:"center"});
+  log("drafted a withdraw() proposal — review it, then Propose","dim");
+};
 $("connect").onclick=()=>connect(null);
 $("rescan").onclick=()=>scanNames(true);
 $("refresh").onclick=refreshAll;
