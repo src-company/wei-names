@@ -31,11 +31,17 @@ const eq = (name, got, want) => ok(name, got === want, `got  ${got}\n        wan
 
 function sandbox() {
   const els = new Map();
-  const mk = () => ({
-    innerHTML: '', textContent: '', className: '', style: {}, dataset: {}, checked: false, value: '',
-    querySelector: mk, querySelectorAll: () => [], insertAdjacentHTML() {}, insertBefore() {},
-    remove() {}, appendChild() {}, addEventListener() {}
-  });
+  const mk = () => {
+    const cls = new Set();
+    return {
+      innerHTML: '', textContent: '', className: '', style: {}, dataset: {}, checked: false, value: '',
+      classList: { add: c => cls.add(c), remove: c => cls.delete(c),
+                   toggle: c => cls.has(c) ? (cls.delete(c), false) : (cls.add(c), true),
+                   contains: c => cls.has(c) },
+      querySelector: mk, querySelectorAll: () => [], insertAdjacentHTML() {}, insertBefore() {},
+      remove() {}, appendChild() {}, addEventListener() {}, scrollIntoView() {}
+    };
+  };
   const listeners = {};
   const ctx = {
     console, setTimeout, clearTimeout, TextEncoder, BigInt, Number, String, Math, JSON, Date,
@@ -126,6 +132,32 @@ const { ctx, run } = sandbox();
      /does not own WNS/.test(JS));
   ok('the withdrawal draft targets withdraw\(\) with no value',
      /f-data"\)\.value="0x3ccfd60b"/.test(JS) && /f-value"\)\.value="0"/.test(JS));
+}
+
+// ── layout decisions taken from a real screenshot
+{
+  // Four stacked CONNECT buttons dominated the page and none was the answer.
+  ok('one connect button, picker only when there is a choice',
+     /if\(WALLETS\.length>1\)\{ \$\("wpick"\)\.classList\.toggle/.test(JS));
+  ok('the wallet list is not printed once a wallet is present',
+     !/Found: "\+WALLETS\.map/.test(JS));
+  // Every row read "0.0000 ETH" even though most proposals move nothing.
+  ok('a zero value renders as a dash, not 0.0000 ETH',
+     /p\.value===0n\?"&mdash;":fmt\(p\.value\)/.test(JS));
+  // Three identical buttons per row, times nine rows.
+  ok('secondary proposal actions are text, not buttons',
+     /class="tbtn" onclick="backAll\(\$\{p\.id\},false\)/.test(JS)
+  && /class="tbtn warn" onclick="backAll\(\$\{p\.id\},true\)/.test(JS)
+  && /class="tbtn" onclick="stageRoleVeto/.test(JS));
+  ok('execute and veto stay solid so the real action is findable',
+     /class="sm" onclick="doExecute/.test(JS) && /class="sm danger" onclick="doCvVeto/.test(JS));
+  // "not on track to pass" was easy to read as "not yet".
+  ok('a proposal that cannot reach the threshold says so',
+     /will never reach the threshold at this weight/.test(JS));
+  ok('governance knobs are demoted out of the headline figures',
+     /\$\("knobs"\)\.innerHTML/.test(JS) && !/\["weight to pass",/.test(JS));
+  ok('raw calldata stays hidden until something is staged',
+     /\$\("cdsec"\)\.style\.display=""/.test(JS));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

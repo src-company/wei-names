@@ -23,7 +23,7 @@ html:not(.dark){--fg:#1a1a1a;--fg-muted:#6b6b6b;--fg-dim:#a3a3a3;--border:#d6d6d
                 --btn-dis-bg:#ccc;--btn-dis-border:#ccc;--btn-dis-fg:#999}
 html.dark{--input-ph:#555;--btn-dis-bg:#444;--btn-dis-border:#444;--btn-dis-fg:#666}
 
-body{max-width:760px;padding:56px 20px 24px;font-family:Helvetica,Arial,sans-serif;font-size:15px}
+body{max-width:720px;padding:64px 24px 24px;font-family:Helvetica,Arial,sans-serif;font-size:15px}
 a{color:inherit}
 .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:0.9em}
@@ -33,16 +33,19 @@ h1{font-size:14px;font-weight:400;letter-spacing:0.1em;text-transform:uppercase}
 .top nav{margin-left:auto;display:flex;gap:16px;font-size:11px;letter-spacing:0.06em;text-transform:uppercase}
 .top nav a{opacity:0.5;text-decoration:none}
 .top nav a:hover{opacity:1}
-.lede{color:var(--fg-muted);font-size:13px;line-height:1.6;margin-bottom:34px;max-width:60ch}
+.lede{color:var(--fg-muted);font-size:13px;line-height:1.65;margin-bottom:56px;max-width:52ch}
 
-section{border-top:1px solid var(--border);padding-top:20px;margin-top:32px}
+section{border-top:1px solid var(--border);padding-top:22px;margin-top:52px}
 section:first-of-type{margin-top:0}
-h2{font-size:11px;font-weight:400;letter-spacing:0.1em;text-transform:uppercase;
-   color:var(--fg-dim);margin-bottom:16px}
+h2{font-size:10px;font-weight:400;letter-spacing:0.14em;text-transform:uppercase;
+   color:var(--fg-dim);margin-bottom:26px}
 
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(125px,1fr));gap:20px 24px}
-.stat .k{color:var(--fg-dim);font-size:10px;letter-spacing:0.08em;text-transform:uppercase}
-.stat .v{font-size:19px;margin-top:5px;font-variant-numeric:tabular-nums;letter-spacing:-0.01em}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:28px 32px}
+.stat .k{color:var(--fg-dim);font-size:9.5px;letter-spacing:0.12em;text-transform:uppercase}
+.stat .v{font-size:23px;margin-top:8px;font-variant-numeric:tabular-nums;letter-spacing:-0.02em;line-height:1.1}
+.meta{display:flex;gap:28px;flex-wrap:wrap;margin-top:26px;font-size:11px;color:var(--fg-dim);
+      letter-spacing:0.04em}
+.meta b{font-weight:400;color:var(--fg);font-variant-numeric:tabular-nums}
 
 button{display:inline-block;padding:11px 22px;font-size:11px;font-family:inherit;text-transform:uppercase;
        letter-spacing:0.1em;background:var(--btn-bg);color:var(--btn-fg);border:1px solid var(--btn-bg);
@@ -68,6 +71,8 @@ textarea{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-s
 input[type=checkbox]{width:auto;accent-color:var(--fg);cursor:pointer;margin:0}
 
 .row{display:flex;gap:14px;flex-wrap:wrap;align-items:center}
+#wpick{display:none;gap:18px;flex-wrap:wrap;margin-top:14px}
+#wpick.show{display:flex}
 .ok{color:#1a8917}.warn{color:#9a6a00}.bad{color:#b4232b}.dim{color:var(--fg-dim)}
 html.dark .ok{color:#2ecc40}html.dark .warn{color:#fbbf24}html.dark .bad{color:#fb7185}
 .note{font-size:11.5px;color:var(--fg-muted);line-height:1.65}
@@ -76,25 +81,40 @@ pre{border:none;border-left:2px solid var(--border);padding:2px 0 2px 12px;overf
     font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 
 /* proposals — hairline rows, not boxes */
-.prop{border-bottom:1px solid var(--border-muted);padding:18px 0}
+.prop{border-bottom:1px solid var(--border-muted);padding:26px 0}
 .prop:first-child{padding-top:0}
 .prop:last-child{border-bottom:none}
-.prop.closed{opacity:0.5}
-.phead{display:flex;gap:12px;align-items:baseline;flex-wrap:wrap}
-.pid{font-size:11px;letter-spacing:0.08em;color:var(--fg-dim);font-variant-numeric:tabular-nums}
-.pdesc{font-size:16px;line-height:1.45;margin:6px 0 12px;letter-spacing:-0.01em}
-.pill{font-size:10px;letter-spacing:0.1em;text-transform:uppercase}
+.prop.closed{opacity:0.45}
+.phead{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;
+       font-size:10px;letter-spacing:0.12em;text-transform:uppercase;color:var(--fg-dim)}
+.pid{font-variant-numeric:tabular-nums}
+.pval{margin-left:auto;font-variant-numeric:tabular-nums;color:var(--fg)}
+.pdesc{font-size:17px;line-height:1.4;margin:10px 0 4px;letter-spacing:-0.015em;
+       text-transform:none;color:var(--fg)}
+.pill{letter-spacing:0.12em}
 .pill.open{color:var(--fg-dim)}
 .pill.exec{color:#1a8917}
 .pill.veto{color:#b4232b}
 .pill.ready{color:#9a6a00}
 html.dark .pill.exec{color:#2ecc40}html.dark .pill.veto{color:#fb7185}html.dark .pill.ready{color:#fbbf24}
-.bars{display:grid;grid-template-columns:52px 1fr auto;gap:10px;align-items:center;
-      font-size:10px;letter-spacing:0.06em;text-transform:uppercase;margin:5px 0;color:var(--fg-dim)}
-.bar{height:2px;background:var(--border-muted)}
-.bar > i{display:block;height:100%;background:var(--fg)}
+.bars{display:grid;grid-template-columns:54px 1fr 92px;gap:12px;align-items:center;
+      font-size:9.5px;letter-spacing:0.1em;text-transform:uppercase;margin:7px 0;color:var(--fg-dim)}
+.bars > span:last-child{text-align:right;font-variant-numeric:tabular-nums;letter-spacing:0.04em}
+.bar{height:3px;background:var(--border-muted);position:relative}
+.bar > i{display:block;height:100%;background:var(--fg);min-width:1px}
 .bar.v > i{background:#b4232b}
 html.dark .bar.v > i{background:#fb7185}
+/* the bar for a proposal that cannot reach the bar at its weight */
+.bar.dead > i{background:var(--fg-dim)}
+.pnote{font-size:10.5px;color:var(--fg-dim);letter-spacing:0.04em;margin-top:12px}
+.pacts{display:flex;gap:18px;align-items:center;margin-top:16px;flex-wrap:wrap}
+/* secondary actions read as text, so the one real action can be a button */
+.tbtn{background:none;border:none;padding:0;font:inherit;font-size:10px;letter-spacing:0.12em;
+      text-transform:uppercase;color:var(--fg-muted);cursor:pointer;border-bottom:1px solid var(--border);
+      border-radius:0}
+.tbtn:hover:not(:disabled){background:none;color:var(--fg);border-bottom-color:var(--fg)}
+.tbtn.warn{color:#b4232b;border-bottom-color:rgba(180,35,43,0.4)}
+html.dark .tbtn.warn{color:#fb7185}
 
 .scroll{max-height:250px;overflow:auto}
 table{width:100%;border-collapse:collapse;font-size:13px}
@@ -112,8 +132,10 @@ footer a{text-decoration:none}
 
 @media (max-width:560px){
   body{padding:44px 16px 20px}
-  .bars{grid-template-columns:44px 1fr;row-gap:1px}
-  .bars > span:last-child{grid-column:2}
+  .grid{grid-template-columns:1fr 1fr;gap:20px}
+  .stat .v{font-size:19px}
+  .bars{grid-template-columns:44px 1fr;row-gap:2px}
+  .bars > span:last-child{grid-column:2;text-align:left}
   .top nav{width:100%;margin-left:0;gap:14px}
   .grid{gap:16px}
 }
@@ -129,17 +151,17 @@ footer a{text-decoration:none}
     <a href="https://dao.wei.limo" target="_blank" rel="noopener" title="The DAO's own page, rendered on-chain by the contract">on-chain ↗</a>
   </nav>
 </div>
-<div class="lede">Proposals, conviction, vetoes and treasury, read live from Ethereum.
-Descriptions come from <code>ProposalCreated</code> logs, so they survive even where a proposal's
-<code>&lt;id&gt;.dao.wei</code> record was never written.</div>
+<div class="lede">Proposals, conviction, vetoes and treasury, read live from Ethereum.</div>
 
 <section><h2>Treasury</h2>
 <div class="grid" id="dao"><div class="dim">loading…</div></div>
-<div class="row" style="margin-top:18px"><button class="sec sm" id="sweep" style="display:none"></button></div>
+<div class="meta" id="knobs"></div>
+<div class="row" style="margin-top:26px"><button class="sec sm" id="sweep" style="display:none"></button></div>
 <div class="note" id="roles" style="margin-top:16px"></div></section>
 
 <section><h2>Your names</h2>
 <div class="row" id="wbtns"><button id="connect">Connect wallet</button><span id="acct" class="dim">not connected</span></div>
+<div id="wpick"></div>
 <div class="note" id="wdiag" style="margin-top:12px"></div>
 <div class="row" style="margin-top:18px">
 <button class="sec sm" id="rescan">Rescan</button><span id="pf" class="dim" style="font-size:12px">connect to scan</span></div>
@@ -148,6 +170,9 @@ Descriptions come from <code>ProposalCreated</code> logs, so they survive even w
 </section>
 
 <section><h2>Proposals</h2>
+<div class="note" style="margin-bottom:20px">Descriptions are read from <code>ProposalCreated</code> logs,
+so they survive even where a proposal's <code>&lt;id&gt;.dao.wei</code> record was never written &mdash;
+three of these have none on-chain.</div>
 <div class="row" style="margin-bottom:6px">
 <button class="sec sm" id="refresh">Refresh</button>
 <label style="margin:0;display:flex;align-items:center;gap:7px;text-transform:none;letter-spacing:normal;font-size:12px;color:var(--fg-muted)">
@@ -167,7 +192,7 @@ in a swallowed <code>try/catch</code>, so <code>eth_estimateGas</code> returns a
 out of gas and the description is silently never written on-chain.</div>
 <div id="log"></div></section>
 
-<section><h2>Raw calldata <span class="dim" style="letter-spacing:normal;text-transform:none">→ <span id="toaddr" class="mono"></span></span></h2>
+<section id="cdsec" style="display:none"><h2>Raw calldata <span class="dim" style="letter-spacing:normal;text-transform:none">→ <span id="toaddr" class="mono"></span></span></h2>
 <div class="row" style="margin-bottom:12px"><button class="sec sm" id="copy">Copy</button><span id="cdlen" class="dim" style="font-size:11px"></span></div>
 <pre id="cd">(nothing staged)</pre></section>
 
@@ -320,14 +345,16 @@ async function loadDao(){
            bal:BigInt(bal),withdrawable:daoOwnsNft?BigInt(nftBal):0n,
            nftOwner:"0x"+nftOwner.slice(-40),daoOwnsNft};
   const Wreq=DAOINFO.T*(SCALE-DAOINFO.alpha)/SCALE;
+  // Three figures carry the section; the governance knobs are reference, not headline.
   $("dao").innerHTML=[
     ["in treasury",fmt(DAOINFO.bal)+" ETH"],
     ["withdrawable",(DAOINFO.withdrawable>0n?'<span class="ok">':"<span>")+fmt(DAOINFO.withdrawable)+" ETH</span>"],
-    ["combined",fmt(DAOINFO.bal+DAOINFO.withdrawable)+" ETH"],
-    ["weight to pass",fmt(Wreq,6)+" ETH"],
-    ["proposal fee",fmt(DAOINFO.fee,4)+" ETH"],
-    ["timelock",(DAOINFO.delay/86400).toFixed(0)+" d"]
+    ["combined",fmt(DAOINFO.bal+DAOINFO.withdrawable)+" ETH"]
   ].map(([k,v])=>`<div class="stat"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
+  $("knobs").innerHTML=`<span>weight to pass <b>${fmt(Wreq,6)} ETH</b></span>`
+    +`<span>proposal fee <b>${fmt(DAOINFO.fee,4)} ETH</b></span>`
+    +`<span>timelock <b>${(DAOINFO.delay/86400).toFixed(0)} d</b></span>`
+    +`<span>proposals <b>${DAOINFO.count}</b></span>`;
   $("roles").innerHTML=
     (DAOINFO.daoOwnsNft
       ? `<b>Withdrawable</b> is registration fees sitting in WNS ${eslink(NFT)}, which the DAO owns. `+
@@ -386,26 +413,30 @@ function renderProposals(){
     const eta=d===null?null:Math.max(Date.now()/1000+d*86400,tl);
     const closed=p.executed||p.vetoed;
     const vetoReady=p.V!==undefined&&p.V>=T;
+    const stalled=d===null&&!closed;
+    const ready=p.C!==undefined&&p.C>=T&&Date.now()/1000>=tl;
     return `<div class="prop${closed?' closed':''}">
-      <div class="phead"><span class="pid">#${p.id}</span>
+      <div class="phead"><span class="pid">${p.id}</span>
         <span class="pill ${cls}">${label}</span>
-        ${meta.who?`<span class="dim">by ${esc(meta.who)}</span>`:''}
-        ${!DESCS[p.id]?'':''}
-        <span class="dim" style="margin-left:auto">${fmt(p.value)} ETH</span></div>
+        ${meta.who?`<span>${esc(meta.who)}</span>`:''}
+        <span class="pval">${p.value===0n?"&mdash;":fmt(p.value)+" ETH"}</span></div>
       <div class="pdesc">${meta.desc?esc(meta.desc):'<span class="dim">no description in logs</span>'}</div>
-      <div class="note">calls ${eslink(p.target)} with <code>${p.data==="0x"?"empty calldata":esc(p.data.slice(0,42))+(p.data.length>42?"…":"")}</code></div>
-      <div class="bars"><span class="dim">support</span><div class="bar"><i style="width:${pct(p.C)}%"></i></div>
-        <span class="dim">${pct(p.C).toFixed(1)}%${d===null&&!closed?' · never at this weight':''}</span></div>
-      <div class="bars"><span class="dim">veto</span><div class="bar v"><i style="width:${pct(p.V)}%"></i></div>
-        <span class="dim">${pct(p.V).toFixed(1)}%${vetoReady?' · vetoable now':''}</span></div>
-      ${closed?'':`<div class="note">${eta?`executable ${new Date(eta*1000).toISOString().slice(0,16).replace("T"," ")} UTC`:'not on track to pass'}
-        · timelock ${new Date(tl*1000).toISOString().slice(0,16).replace("T"," ")} UTC</div>`}
-      ${closed?'':`<div class="row" style="margin-top:8px">
-        <button class="sec sm" onclick="backAll(${p.id},false)">Support with my names</button>
-        <button class="sec sm" onclick="backAll(${p.id},true)">Back a veto</button>
-        ${p.C!==undefined&&p.C>=T&&Date.now()/1000>=tl?`<button class="sm" onclick="doExecute(${p.id})">Execute</button>`:''}
+      <div class="pnote">calls ${eslink(p.target)} with <code>${p.data==="0x"?"empty calldata":esc(p.data.slice(0,42))+(p.data.length>42?"…":"")}</code></div>
+      <div class="bars" style="margin-top:14px"><span>support</span>
+        <div class="bar${stalled?' dead':''}"><i style="width:${pct(p.C)}%"></i></div>
+        <span>${pct(p.C).toFixed(1)}%</span></div>
+      <div class="bars"><span>veto</span><div class="bar v"><i style="width:${pct(p.V)}%"></i></div>
+        <span>${pct(p.V).toFixed(1)}%</span></div>
+      ${closed?'':`<div class="pnote">${
+        stalled?'<span class="warn">will never reach the threshold at this weight</span>'
+        :eta?`executable ${new Date(eta*1000).toISOString().slice(0,16).replace("T"," ")} UTC`:''
+      }${vetoReady?' · <span class="bad">vetoable now</span>':''}</div>`}
+      ${closed?'':`<div class="pacts">
+        ${ready?`<button class="sm" onclick="doExecute(${p.id})">Execute</button>`:''}
         ${vetoReady?`<button class="sm danger" onclick="doCvVeto(${p.id})">Veto now</button>`:''}
-        <button class="sec sm" onclick="stageRoleVeto(${p.id})">Role-veto calldata</button>
+        <button class="tbtn" onclick="backAll(${p.id},false)">Support</button>
+        <button class="tbtn warn" onclick="backAll(${p.id},true)">Back a veto</button>
+        <button class="tbtn" onclick="stageRoleVeto(${p.id})">Role-veto calldata</button>
       </div>`}
     </div>`;
   }).join("");
@@ -468,6 +499,7 @@ function renderNames(){
 
 /* ---------------- actions ---------------- */
 function stage(to,data,label){
+  $("cdsec").style.display="";
   $("toaddr").textContent=to; $("cd").textContent=data;
   $("cdlen").textContent=`${(data.length-2)/2} bytes${label?" · "+label:""}`;
 }
@@ -560,23 +592,27 @@ function scanLegacy(){
     addWallet({info:{name},provider:p,legacy:true});
   }
 }
+// One button, not one per extension. Four stacked CONNECT buttons is the loudest
+// thing on the page and none of them is the answer — the picker only appears if
+// there is actually a choice to make, and only once it is asked for.
 function renderWallets(){
-  const box=$("wbtns"), base=$("connect");
-  box.querySelectorAll("button[data-w]").forEach(b=>b.remove());
-  WALLETS.forEach((w,i)=>{
+  const pick=$("wpick");
+  pick.innerHTML="";
+  WALLETS.forEach(w=>{
     const b=document.createElement("button");
-    b.dataset.w=i; b.className="sec"; b.textContent="Connect "+w.info.name;
-    b.onclick=()=>connect(w.provider);
-    box.insertBefore(b,base);
+    b.className="tbtn"; b.textContent=w.info.name;
+    b.onclick=()=>{ pick.classList.remove("show"); connect(w.provider); };
+    pick.appendChild(b);
   });
-  base.style.display=WALLETS.length?"none":"";
+  if(!WALLETS.length) pick.classList.remove("show");
   const bits=[];
   if(!WALLETS.length){
     bits.push('<span class="bad">No wallet detected.</span>');
     if(!window.isSecureContext) bits.push('Not a secure context — serve over http://localhost or https.');
     if(location.protocol==="file:") bits.push('Opened as file://; extensions do not inject there.');
     bits.push('Served from a remote container? Open the forwarded port in your own browser.');
-  } else bits.push("Found: "+WALLETS.map(w=>"<b>"+esc(w.info.name)+"</b>").join(", ")+".");
+  }
+  // With a wallet present the list is noise; the picker names them when it matters.
   $("wdiag").innerHTML=bits.join("<br>");
 }
 async function connect(p){
@@ -606,7 +642,10 @@ $("sweep").onclick=()=>{
   $("f-desc").scrollIntoView({behavior:"smooth",block:"center"});
   log("drafted a withdraw() proposal — review it, then Propose","dim");
 };
-$("connect").onclick=()=>connect(null);
+$("connect").onclick=()=>{
+  if(WALLETS.length>1){ $("wpick").classList.toggle("show"); return; }
+  connect(null);
+};
 $("rescan").onclick=()=>scanNames(true);
 $("refresh").onclick=refreshAll;
 $("showClosed").onchange=renderProposals;
