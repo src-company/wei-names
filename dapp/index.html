@@ -1279,6 +1279,9 @@ const WEIDAO_ABI = [
 ];
 
 const MIN_COMMIT_AGE = 60;
+// Seconds added to a chain timestamp before counting down from it, so a local
+// clock a little ahead of the chain can't send the reveal a block too early
+const CLOCK_MARGIN = 3;
 const MAX_COMMIT_AGE = 86400;
 const STORAGE_KEY = 'wei_pending_commits';
 
@@ -1589,15 +1592,16 @@ async function waitForTx(tx, timeoutMs = 90000) {
   const txHash = tx.hash;
 
   // Helper to poll receipt directly via public RPC (more reliable than wallet provider)
-  async function pollReceipt(maxAttempts = 45) {
-    for (let i = 0; i < maxAttempts; i++) {
+  let stopPolling = false;
+  async function pollReceipt(maxAttempts = 60, every = 1500) {
+    for (let i = 0; i < maxAttempts && !stopPolling; i++) {
       let receipt;
       try {
         receipt = await withRpc(p => p.getTransactionReceipt(txHash));
       } catch (rpcErr) {
         // Retry transient RPC errors; only give up on the last attempt.
         if (i === maxAttempts - 1) throw rpcErr;
-        await new Promise(r => setTimeout(r, 2000));
+        await new Promise(r => setTimeout(r, every));
         continue;
       }
       if (receipt) {
@@ -1605,7 +1609,7 @@ async function waitForTx(tx, timeoutMs = 90000) {
         if (receipt.status === 0) throw new Error('Transaction reverted');
         return receipt;
       }
-      await new Promise(r => setTimeout(r, 2000));
+      await new Promise(r => setTimeout(r, every));
     }
     return null;
   }
@@ -1622,11 +1626,18 @@ async function waitForTx(tx, timeoutMs = 90000) {
   let waitError = null;
 
   try {
+    // The wallet provider polls every 4s; the public RPC is asked every 1.5s
+    // alongside it, and whichever sees the receipt first wins
+    const fast = pollReceipt().then(r => r || new Promise(() => {}));
+    fast.catch(() => {});
     receipt = await Promise.race([
       tx.wait(),
+      fast,
       new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), timeoutMs))
     ]);
+    stopPolling = true;
   } catch (e) {
+    stopPolling = true;
     waitError = e;
     const msg = (e.message || '').toLowerCase();
     const shouldPoll = msg.includes('timeout') ||
@@ -1637,6 +1648,7 @@ async function waitForTx(tx, timeoutMs = 90000) {
                        msg.includes('missing response');
 
     if (shouldPoll && txHash) {
+      stopPolling = false;
       receipt = await pollReceipt();
     }
   }
@@ -2669,11 +2681,12 @@ async function doCommit() {
 
     // Wait for confirmation with timeout fallback
     let confirmed = false;
+    let commitReceipt = null;
     try {
       // Keep a handle on the wait so a post-timeout rejection is swallowed here:
       // once the timeout wins the race, nothing is listening to it and it would
       // surface as an unhandled rejection. The pending-poller takes over regardless.
-      const waiting = waitForTx(tx, 55000).then(() => { confirmed = true; });
+      const waiting = waitForTx(tx, 55000).then(r => { commitReceipt = r; confirmed = true; });
       waiting.catch(() => {});
       await Promise.race([
         waiting,
@@ -2690,11 +2703,18 @@ async function doCommit() {
     if (confirmed) {
       const currentPending = loadPending();
       if (currentPending && currentPending.name === name) {
+        // Count down from the block the commit landed in, not from when this page
+        // noticed it — that lag is otherwise added to the minute
+        let ts = Math.floor(Date.now() / 1000);
+        try {
+          const blk = await withRpc(p => p.getBlock(commitReceipt.blockNumber));
+          if (blk && blk.timestamp) ts = Math.min(ts, Number(blk.timestamp) + CLOCK_MARGIN);
+        } catch (_) {}
         currentPending.confirmed = true;
-        currentPending.timestamp = Math.floor(Date.now() / 1000);
+        currentPending.timestamp = ts;
         savePending(currentPending);
       }
-      showStatus('Commitment confirmed! Wait 60 seconds then reveal.', 'success', tx.hash);
+      showStatus('Commitment confirmed. Registration opens in about a minute.', 'success', tx.hash);
     }
   } catch (e) {
     const p = loadPending();
@@ -2831,7 +2851,23 @@ function selectPayMethod(el) {
   selectedPayMethod = el.dataset.method;
 }
 
+// Register pressed before the minute is up queues it; the timer fires it at zero.
+// Pressing again cancels.
+let _revealArmed = false;
+
+function revealWaitLeft() {
+  const p = loadPending();
+  if (!p) return 0;
+  if (p.confirmed === false) return Infinity;
+  return MIN_COMMIT_AGE - (Math.floor(Date.now() / 1000) - p.timestamp);
+}
+
 async function doRevealSelected() {
+  if (!isRevealing && revealWaitLeft() > 0) {
+    _revealArmed = !_revealArmed;
+    updateTimer(pendingTimerId);
+    return;
+  }
   // The reveal is single-use on-chain: the commitment is deleted and (for the
   // token paths) the permit nonce is consumed, so a second submission is
   // guaranteed to revert and waste gas. updateTimer() re-enables revealBtn every
@@ -2882,7 +2918,7 @@ async function revealPreflight(pending) {
   if (!r[0] || !r[1]) throw new Error('Failed to fetch fee data');
 
   const chainTs = r[2] && r[2][0] ? Number(r[2][0]) : 0;
-  const elapsed = Math.floor(Date.now() / 1000) - (chainTs || pending.timestamp);
+  const elapsed = Math.floor(Date.now() / 1000) - (chainTs ? chainTs + CLOCK_MARGIN : pending.timestamp);
   if (elapsed < MIN_COMMIT_AGE) {
     showStatus('Wait ' + (MIN_COMMIT_AGE - elapsed) + ' more seconds', 'error');
     return null;
@@ -3165,6 +3201,7 @@ function loadPending() {
 // Hide the pending panel + stop its timer WITHOUT deleting storage (used when the
 // current account has no pending of its own, e.g. after switching wallets).
 function hidePendingPanel() {
+  _revealArmed = false;
   $('pending').classList.remove('show');
   const oldBtn = $('manualCheckBtn'); if (oldBtn) oldBtn.remove();
   pendingTimerId++;
@@ -3326,10 +3363,14 @@ async function updateTimer(timerId) {
     }
   }
 
+  // The button queues the reveal while waiting; say so on it
+  revealBtn.textContent = _revealArmed ? 'Queued · cancel' : 'Register';
+  revealBtn.classList.toggle('secondary', _revealArmed);
+
   if (pending.confirmed === false) {
     // Explicitly false means commit tx is still pending
-    timerEl.textContent = 'Waiting for confirmation...';
-    revealBtn.disabled = true;
+    timerEl.textContent = _revealArmed ? 'Waiting for confirmation… registers automatically' : 'Waiting for confirmation...';
+    revealBtn.disabled = !_signer;
 
     // Track poll attempts
     if (!pending._pollAttempts) pending._pollAttempts = 0;
@@ -3364,7 +3405,7 @@ async function updateTimer(timerId) {
       // ts: the on-chain commit time when known; the reveal window runs from it
       const markCommitConfirmed = (ts) => {
         pending.confirmed = true;
-        pending.timestamp = ts ? Number(ts) : Math.floor(Date.now() / 1000);
+        pending.timestamp = ts ? Math.min(Number(ts) + CLOCK_MARGIN, Math.floor(Date.now() / 1000)) : Math.floor(Date.now() / 1000);
         delete pending._pollAttempts;
         delete pending._pollErrors;
         savePending(pending);
@@ -3438,9 +3479,15 @@ async function updateTimer(timerId) {
       }
     }
   } else if (remaining > 0) {
-    timerEl.textContent = 'Ready in ' + remaining + 's';
-    revealBtn.disabled = true;
+    timerEl.textContent = _revealArmed ? 'Registers automatically in ' + remaining + 's' : 'Ready in ' + remaining + 's';
+    revealBtn.disabled = !_signer || isRevealing;
   } else if (elapsed < MAX_COMMIT_AGE) {
+    if (_revealArmed && !isRevealing && _signer) {
+      _revealArmed = false;
+      revealBtn.textContent = 'Register';
+      revealBtn.classList.remove('secondary');
+      doRevealSelected();
+    }
     const expires = MAX_COMMIT_AGE - elapsed;
     const hrs = Math.floor(expires / 3600);
     const mins = Math.floor((expires % 3600) / 60);
