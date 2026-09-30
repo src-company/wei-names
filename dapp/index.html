@@ -597,14 +597,31 @@ body.modal-open { overflow: hidden; }
   border: 1px solid var(--frame);
 }
 .send-form.show { display: block; }
+.send-form label { margin-bottom: 2px; }
 .send-form input {
   font-size: 16px;
-  margin-bottom: 12px;
+  margin-bottom: 16px;
 }
-.net-btn {
+.send-form input:not([type=checkbox]):focus { margin-bottom: 15px; }
+.send-amount input:not([type=checkbox]):focus { margin-bottom: -1px; }
+.send-preview { font-size: 12px; margin: -8px 0 16px; }
+.send-amount input { font-size: 20px; margin-bottom: 0; padding-right: 48px; font-variant-numeric: tabular-nums; }
+.send-amount .suffix { font-size: 14px; bottom: 14px; letter-spacing: 0.05em; }
+.send-meta { font-size: 12px; color: var(--fg-muted); min-height: 18px; margin: 8px 0 18px; font-variant-numeric: tabular-nums; }
+.send-actions { display: flex; gap: 8px; }
+.send-actions button { margin: 0; }
+.net-switch { display: flex; margin-bottom: 20px; }
+.send-form .net-btn {
   flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: auto;
+  margin: 0;
   padding: 10px;
   font-size: 12px;
+  letter-spacing: 0.06em;
   background: transparent;
   color: var(--fg);
   border: 1px solid var(--frame);
@@ -612,6 +629,8 @@ body.modal-open { overflow: hidden; }
   transition: background 0.15s, border-color 0.15s, color 0.15s;
 }
 .net-btn + .net-btn { border-left: none; }
+.net-btn svg { width: 16px; height: 16px; display: block; flex: 0 0 auto; }
+.net-btn:hover:not(.active) { background: var(--surface-hover); }
 .net-btn.active {
   background: var(--btn-bg);
   color: var(--btn-fg);
@@ -1024,18 +1043,23 @@ try{if(localStorage.getItem('wns_dao_banner')==='1'){var _db=document.getElement
 <div id="sendSection" class="send-section">
   <a href="#" onclick="toggleSend(event)" class="send-toggle" id="sendToggle">send eth →</a>
   <div id="sendForm" class="send-form">
-    <label for="sendTo">Recipient</label>
-    <input type="text" id="sendTo" placeholder="0x... or name.wei (empty = self)" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" oninput="previewSendRecipient()">
-    <div id="sendPreview" style="font-size:12px;margin-bottom:12px;display:none;"></div>
-    <label for="sendAmount">Amount (ETH)</label>
-    <input type="text" id="sendAmount" placeholder="0.01" inputmode="decimal" autocomplete="off">
-    <label>Destination</label>
-    <div style="display:flex;gap:8px;margin-bottom:12px;">
-      <button type="button" id="netMainnet" class="net-btn active" onclick="setNetwork('mainnet')">Mainnet</button>
-      <button type="button" id="netBase" class="net-btn" onclick="setNetwork('base')">→ Base</button>
+    <div class="net-switch" role="group" aria-label="Network">
+      <button type="button" id="netMainnet" class="net-btn active" aria-pressed="true" onclick="setNetwork('mainnet')"><svg viewBox="0 0 32 32" aria-hidden="true"><circle fill="#627EEA" cx="16" cy="16" r="16"/><g fill="#FFF"><path fill-opacity=".6" d="M16.498 4v8.87l7.497 3.35z"/><path d="M16.498 4L9 16.22l7.498-3.35z"/><path fill-opacity=".6" d="M16.498 21.968v6.027L24 17.616z"/><path d="M16.498 27.995v-6.028L9 17.616z"/><path fill-opacity=".2" d="M16.498 20.573l7.497-4.353-7.497-3.348z"/><path fill-opacity=".6" d="M9 16.22l7.498 4.353v-7.701z"/></g></svg>Ethereum</button>
+      <button type="button" id="netBase" class="net-btn" aria-pressed="false" onclick="setNetwork('base')"><svg viewBox="0 0 111 111" aria-hidden="true"><path fill="#0052FF" d="M54.921 110.034C85.359 110.034 110.034 85.402 110.034 55.017C110.034 24.6319 85.359 0 54.921 0C26.0432 0 2.35281 22.1714 0 50.3923H72.8467V59.6416H0C2.35281 87.8625 26.0432 110.034 54.921 110.034Z"/></svg>Base</button>
     </div>
-    <button onclick="doSendEth()">Send</button>
-    <button class="secondary" onclick="toggleSend(event)">Cancel</button>
+    <label for="sendTo">To</label>
+    <input type="text" id="sendTo" placeholder="0x… or name.wei" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" oninput="previewSendRecipient()">
+    <div id="sendPreview" class="send-preview" style="display:none;"></div>
+    <label for="sendAmount">Amount</label>
+    <div class="input-wrap send-amount">
+      <input type="text" id="sendAmount" placeholder="0.00" inputmode="decimal" autocomplete="off" oninput="sendAmountChanged()">
+      <span class="suffix">ETH</span>
+    </div>
+    <div id="sendMeta" class="send-meta"></div>
+    <div class="send-actions">
+      <button id="sendBtn" onclick="doSendEth()">Send</button>
+      <button class="secondary" onclick="toggleSend(event)">Cancel</button>
+    </div>
   </div>
 </div>
 
@@ -5382,6 +5406,12 @@ function toggleSend(event) {
   } else {
     form.classList.add('show');
     toggle.textContent = '← hide';
+    _sendBal = null;
+    sendAmountChanged();
+    if (_connectedAddress) {
+      withRpc(p => p.getBalance(_connectedAddress)).then(b => { _sendBal = b; sendAmountChanged(); }).catch(() => {});
+    }
+    if (!globalThis.__ethUsd) rollEthUsd().then(sendAmountChanged).catch(() => {});
   }
 }
 
@@ -5392,8 +5422,29 @@ let sendNetwork = 'mainnet';
 
 function setNetwork(net) {
   sendNetwork = net;
-  $('netMainnet').classList.toggle('active', net === 'mainnet');
-  $('netBase').classList.toggle('active', net === 'base');
+  for (const [id, n] of [['netMainnet', 'mainnet'], ['netBase', 'base']]) {
+    $(id).classList.toggle('active', net === n);
+    $(id).setAttribute('aria-pressed', String(net === n));
+  }
+  // Only the bridge can default to yourself
+  $('sendTo').placeholder = net === 'base' ? '0x… or name.wei (empty = you)' : '0x… or name.wei';
+  sendAmountChanged();
+}
+
+// One quiet line under the amount: dollar value, balance, and what Base means
+let _sendBal = null;
+function sendAmountChanged() {
+  const raw = $('sendAmount').value.trim();
+  let wei = null;
+  try { if (raw) wei = ethers.parseEther(raw); } catch (_) {}
+  const ok = wei != null && wei > 0n;
+  $('sendBtn').textContent = ok ? 'Send ' + raw + ' ETH' : 'Send';
+  const bits = [];
+  const usd = globalThis.__ethUsd;
+  if (ok && usd) bits.push('≈ $' + (Number(wei) / 1e18 * usd).toLocaleString('en-US', { maximumFractionDigits: 2 }));
+  if (_sendBal != null) bits.push('balance ' + fmtEth(_sendBal, 4) + ' ETH');
+  if (sendNetwork === 'base') bits.push('arrives on Base in ~2 min');
+  $('sendMeta').textContent = bits.join(' · ');
 }
 
 // Base OptimismPortal for L1 -> L2 bridging
@@ -5471,6 +5522,7 @@ async function doSendEth() {
     // Clear form
     $('sendTo').value = '';
     $('sendAmount').value = '';
+    sendAmountChanged();
     $('sendPreview').style.display = 'none';
   } catch (e) {
     handleError(e);
