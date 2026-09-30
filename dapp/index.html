@@ -747,10 +747,7 @@ body.modal-open { overflow: hidden; }
     display: flex; align-items: center; gap: 11px; flex: 1; min-width: 0;
     padding: 11px 14px; text-decoration: none; color: var(--fg);
   }
-  .dao-banner-dot {
-    flex-shrink: 0; width: 7px; height: 7px;
-    background: var(--ok);
-  }
+  .dao-banner-icon { flex-shrink: 0; width: 18px; height: 18px; display: block; }
   .dao-banner-text { font-size: 12.5px; line-height: 1.4; }
   .dao-banner-em { color: var(--fg); font-weight: 600; text-decoration: underline; text-underline-offset: 3px; }
   .dao-banner-arrow { flex-shrink: 0; margin-left: auto; opacity: 0.4; transition: transform 0.15s, opacity 0.15s; }
@@ -767,7 +764,7 @@ body.modal-open { overflow: hidden; }
        sit on the first line instead of floating in the vertical middle. */
     .dao-banner { margin-bottom: 24px; align-items: flex-start; }
     .dao-banner-link { padding: 12px; gap: 10px; align-items: flex-start; }
-    .dao-banner-dot { margin-top: 5px; }
+    .dao-banner-icon { margin-top: 1px; }
     .dao-banner-text { font-size: 12px; line-height: 1.45; }
     .dao-banner-arrow { display: none; }
     .dao-banner-close { padding: 11px 13px; font-size: 22px; align-self: flex-start; }
@@ -956,7 +953,7 @@ body.modal-open { overflow: hidden; }
 
 <div id="daoBanner" class="dao-banner">
   <a class="dao-banner-link" href="dao.html">
-    <span class="dao-banner-dot" aria-hidden="true"></span>
+    <svg class="dao-banner-icon" viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" fill="#0A0A0A"/><path d="M16,16 V48 H22 L32,32 L42,48 H48 V16 H42 V38 L32,22 L22,38 V16 Z" fill="#2D5FE8"/></svg>
     <span class="dao-banner-text">WNS is 100% owned by .wei domain holders — name-weighted conviction voting <span class="dao-banner-em">now live</span></span>
     <span class="dao-banner-arrow" aria-hidden="true">→</span>
   </a>
