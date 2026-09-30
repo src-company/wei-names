@@ -132,12 +132,11 @@ footer a{text-decoration:none}
 
 @media (max-width:560px){
   body{padding:44px 16px 20px}
-  .grid{grid-template-columns:1fr 1fr;gap:20px}
+  .grid{grid-template-columns:1fr 1fr;gap:16px}
   .stat .v{font-size:19px}
   .bars{grid-template-columns:44px 1fr;row-gap:2px}
   .bars > span:last-child{grid-column:2;text-align:left}
   .top nav{width:100%;margin-left:0;gap:14px}
-  .grid{gap:16px}
 }
 </style>
 </head>
@@ -166,7 +165,7 @@ footer a{text-decoration:none}
 <div class="row" style="margin-top:18px">
 <button class="sec sm" id="rescan">Rescan</button><span id="pf" class="dim" style="font-size:12px">connect to scan</span></div>
 <div class="scroll" style="margin-top:14px"><table id="tbl"><thead><tr>
-<th style="width:30px"></th><th>name</th><th class="n">weight (ETH)</th></tr></thead><tbody></tbody></table></div>
+<th style="width:30px" aria-label="select"></th><th>name</th><th class="n">weight (ETH)</th></tr></thead><tbody></tbody></table></div>
 </section>
 
 <section><h2>Proposals</h2>
@@ -190,7 +189,7 @@ three of these have none on-chain.</div>
 Gas is floored well above the estimate on purpose: <code>propose</code> mints <code>&lt;id&gt;.dao.wei</code>
 in a swallowed <code>try/catch</code>, so <code>eth_estimateGas</code> returns a limit where that naming runs
 out of gas and the description is silently never written on-chain.</div>
-<div id="log"></div></section>
+<div id="log" role="log" aria-live="polite"></div></section>
 
 <section id="cdsec" style="display:none"><h2>Raw calldata <span class="dim" style="letter-spacing:normal;text-transform:none">→ <span id="toaddr" class="mono"></span></span></h2>
 <div class="row" style="margin-bottom:12px"><button class="sec sm" id="copy">Copy</button><span id="cdlen" class="dim" style="font-size:11px"></span></div>
@@ -226,7 +225,7 @@ const fmt=(w,d=4)=>(Number(BigInt(w))/1e18).toFixed(d);
 const word=(hex,i)=>BigInt("0x"+hex.slice(2).slice(64*i,64*(i+1)));
 const esc=s=>String(s).replace(/[<>&"]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;",'"':"&quot;"}[c]));
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
-const eslink=a=>`<a href="https://etherscan.io/address/${a}" target="_blank" rel="noopener">${a.slice(0,10)}…${a.slice(-6)}</a>`;
+const eslink=a=>/^0x[0-9a-fA-F]{40}$/.test(a)?`<a href="https://etherscan.io/address/${a}" target="_blank" rel="noopener">${a.slice(0,10)}…${a.slice(-6)}</a>`:esc(a);
 
 /* ---- transport: a throttled read must never pass as an on-chain zero ---- */
 let cursor=0; const nextRpc=()=>RPCS[cursor++%RPCS.length];
@@ -288,8 +287,8 @@ async function getLogs(filter,from,to,depth=0){
   }
 }
 function log(m,c){ $("log").innerHTML+=`<div class="${c||''}">${m}</div>`; }
-function utf8(hexBody){ let s=""; for(let i=0;i<hexBody.length;i+=2) s+=String.fromCharCode(parseInt(hexBody.slice(i,i+2),16));
-  try{ return decodeURIComponent(escape(s)); }catch(_){ return s; } }
+function utf8(hexBody){
+  return new TextDecoder().decode(Uint8Array.from(hexBody.match(/../g)||[],x=>parseInt(x,16))); }
 function readString(raw,w){
   const off=Number(BigInt("0x"+raw.slice(w*64,(w+1)*64)))*2;
   const len=Number(BigInt("0x"+raw.slice(off,off+64)));
@@ -394,7 +393,8 @@ async function loadProposals(){
 function statusOf(p){
   if(p.executed) return ["exec","executed"];
   if(p.vetoed)   return ["veto","vetoed"];
-  if(p.C!==undefined&&p.C>=DAOINFO.T) return ["ready","passed — executable"];
+  if(p.C!==undefined&&p.C>=DAOINFO.T)
+    return ["ready",Date.now()/1000<p.created+DAOINFO.delay?"passed — timelocked":"passed — executable"];
   return ["open","open"];
 }
 function renderProposals(){
@@ -408,13 +408,15 @@ function renderProposals(){
     const [cls,label]=statusOf(p);
     const T=DAOINFO.T;
     const pct=(x)=>x===undefined?0:Math.min(100,Number(x*10000n/T)/100);
-    const d=p.C===undefined?null:daysToReach(p.C,p.W,T);
+    const passedNow=p.C!==undefined&&p.C>=T;
+    const d=p.C===undefined||passedNow?null:daysToReach(p.C,p.W,T);
     const tl=p.created+DAOINFO.delay;
-    const eta=d===null?null:Math.max(Date.now()/1000+d*86400,tl);
+    const eta=passedNow?tl:d===null?null:Math.max(Date.now()/1000+d*86400,tl);
     const closed=p.executed||p.vetoed;
-    const vetoReady=p.V!==undefined&&p.V>=T;
-    const stalled=d===null&&!closed;
-    const ready=p.C!==undefined&&p.C>=T&&Date.now()/1000>=tl;
+    // ConvictionVeto can only veto while it holds the veto role
+    const vetoReady=p.V!==undefined&&p.V>=T&&DAOINFO.vetoer.toLowerCase()===CV.toLowerCase();
+    const stalled=d===null&&!passedNow&&p.C!==undefined&&!closed;
+    const ready=passedNow&&Date.now()/1000>=tl;
     return `<div class="prop${closed?' closed':''}">
       <div class="phead"><span class="pid">${p.id}</span>
         <span class="pill ${cls}">${label}</span>
@@ -488,7 +490,7 @@ async function scanNames(force){
 function renderNames(){
   const tb=$("tbl").querySelector("tbody");
   tb.innerHTML=NAMES.length?NAMES.map(n=>
-    `<tr><td><input type="checkbox" data-id="${n.id}" ${n.sel?"checked":""}></td>`+
+    `<tr><td><input type="checkbox" data-id="${esc(n.id)}" aria-label="${esc(n.label)}" ${n.sel?"checked":""}></td>`+
     `<td>${esc(n.label)}${n.sub?'<span class="dim"> (sub)</span>':'.wei'}</td>`+
     `<td class="n">${fmt(n.w,9)}</td></tr>`).join("")
     :`<tr><td colspan="3" class="dim">${ACCT?"nothing found":"connect a wallet"}</td></tr>`;
@@ -510,6 +512,7 @@ window.stageRoleVeto=(id)=>{
 async function send(to,data,value,gasFloor,label){
   if(!PROV||!ACCT) return log("connect a wallet first","bad");
   try{
+    if(BigInt(await PROV.request({method:"eth_chainId"}))!==1n) return log("wallet is not on Ethereum mainnet","bad");
     let gas;
     try{ gas=BigInt(await PROV.request({method:"eth_estimateGas",
       params:[{from:ACCT,to,data,...(value?{value:"0x"+value.toString(16)}:{})}]})); }
@@ -518,8 +521,14 @@ async function send(to,data,value,gasFloor,label){
     log(`${label}: estimate ${gas.toLocaleString()} → sending with ${sendGas.toLocaleString()}`,"dim");
     const tx=await PROV.request({method:"eth_sendTransaction",params:[{from:ACCT,to,data,
       ...(value?{value:"0x"+value.toString(16)}:{}),gas:"0x"+sendGas.toString(16)}]});
+    if(!/^0x[0-9a-fA-F]{64}$/.test(tx)) return log("wallet returned an invalid tx hash","bad");
     log(`sent → <a href="https://etherscan.io/tx/${tx}" target="_blank" rel="noopener">${tx.slice(0,18)}…</a>`,"ok");
-    let r=null; while(!r){ await sleep(4000); r=await PROV.request({method:"eth_getTransactionReceipt",params:[tx]}); }
+    let r=null;
+    for(let i=0;i<150&&!r;i++){
+      await sleep(4000);
+      try{ r=await PROV.request({method:"eth_getTransactionReceipt",params:[tx]}); }catch(_){}
+    }
+    if(!r) return log("no receipt after 10 min — check etherscan","warn");
     if(BigInt(r.status)===1n){ log("confirmed ✓","ok"); await refreshAll(); }
     else log("reverted","bad");
   }catch(e){ log("failed: "+esc(e.data?.message||e.message||e),"bad"); }
@@ -546,6 +555,8 @@ $("propose").onclick=async()=>{
   const t=$("f-target").value.trim(), v=($("f-value").value||"0").trim();
   const d=($("f-data").value||"0x").trim()||"0x", desc=$("f-desc").value.trim();
   if(!desc) return log("a description is required","bad");
+  if(new TextEncoder().encode(desc).length>2048) return log("description is over 2048 bytes","bad");
+  if(!DAOINFO) return log("DAO state not loaded — Refresh","bad");
   if(!/^0x([0-9a-fA-F]{2})*$/.test(d)) return log("calldata must be 0x-prefixed hex with whole bytes","bad");
   let target=t;
   if(!/^0x[0-9a-fA-F]{40}$/.test(t)){
@@ -563,9 +574,9 @@ $("propose").onclick=async()=>{
       log(`${esc(t)} resolves to ${target}`,"dim");
     }catch(_){ return log("could not resolve that name — paste a 0x address","bad"); }
   }
-  let wei;
-  try{ const [i,f=""]=v.split("."); wei=BigInt(i||"0")*SCALE+BigInt((f+"0".repeat(18)).slice(0,18)); }
-  catch(_){ return log("value must be a decimal number of ETH","bad"); }
+  if(!/^\d*(\.\d{1,18})?$/.test(v)||v===""||v===".") return log("value must be a decimal number of ETH (up to 18 decimals)","bad");
+  const [i,f=""]=v.split(".");
+  const wei=BigInt(i||"0")*SCALE+BigInt(f.padEnd(18,"0"));
   const data=encodePropose(target,wei,d,desc);
   stage(DAO,data,"propose(…)");
   await send(DAO,data,DAOINFO.fee,PROPOSE_GAS_FLOOR,"propose");
@@ -615,27 +626,33 @@ function renderWallets(){
   // With a wallet present the list is noise; the picker names them when it matters.
   $("wdiag").innerHTML=bits.join("<br>");
 }
+// Listeners live on exactly one provider at a time, and PROV only changes once
+// a connect has succeeded on mainnet.
+let LISTENING=null;
+const onAccts=as=>{ ACCT=as[0]?String(as[0]).toLowerCase():null; NAMES=[]; renderNames();
+  $("acct").innerHTML=as[0]?esc(as[0]):'<span class="bad">disconnected</span>';
+  $("propose").disabled=!ACCT||!DAOINFO; if(ACCT) scanNames(false); };
+const onChain=()=>location.reload();
 async function connect(p){
-  PROV=p||WALLETS[0]?.provider||window.ethereum;
-  if(!PROV) return log("no wallet provider","bad");
+  const next=p||WALLETS[0]?.provider||window.ethereum;
+  if(!next) return log("no wallet provider","bad");
   try{
-    const [a]=await PROV.request({method:"eth_requestAccounts"});
-    const cid=await PROV.request({method:"eth_chainId"});
-    ACCT=a.toLowerCase();
-    $("acct").innerHTML=esc(a)+(cid!=="0x1"?' <span class="bad">— not mainnet</span>':"");
-    $("acct").className="";
-    if(PROV.on){
-      PROV.on("accountsChanged",as=>{ ACCT=as[0]?as[0].toLowerCase():null; NAMES=[]; renderNames();
-        $("acct").innerHTML=as[0]?esc(as[0]):'<span class="bad">disconnected</span>';
-        $("propose").disabled=!ACCT; if(ACCT) scanNames(false); });
-      PROV.on("chainChanged",()=>location.reload());
+    const [a]=await next.request({method:"eth_requestAccounts"});
+    if(BigInt(await next.request({method:"eth_chainId"}))!==1n){
+      await next.request({method:"wallet_switchEthereumChain",params:[{chainId:"0x1"}]});
+      if(BigInt(await next.request({method:"eth_chainId"}))!==1n) throw new Error("switch the wallet to Ethereum mainnet");
     }
-    $("propose").disabled=false;
+    if(LISTENING?.removeListener){ LISTENING.removeListener("accountsChanged",onAccts); LISTENING.removeListener("chainChanged",onChain); }
+    LISTENING=null;
+    PROV=next; ACCT=String(a).toLowerCase();
+    $("acct").innerHTML=esc(a); $("acct").className="";
+    if(PROV.on){ PROV.on("accountsChanged",onAccts); PROV.on("chainChanged",onChain); LISTENING=PROV; }
+    $("propose").disabled=!DAOINFO;
     scanNames(false);
   }catch(e){ log("connect failed: "+esc(e.message||e),"bad"); }
 }
 
-async function refreshAll(){ await loadDao(); await loadProposals(); }
+async function refreshAll(){ await loadDao(); await loadDescriptions(); await loadProposals(); }
 $("sweep").onclick=()=>{
   $("f-target").value=NFT; $("f-value").value="0"; $("f-data").value="0x3ccfd60b";
   $("f-desc").value="Withdraw accrued WNS registration fees into DAO";
@@ -649,7 +666,7 @@ $("connect").onclick=()=>{
 $("rescan").onclick=()=>scanNames(true);
 $("refresh").onclick=refreshAll;
 $("showClosed").onchange=renderProposals;
-$("copy").onclick=()=>navigator.clipboard.writeText($("cd").textContent).then(()=>log("copied","dim"));
+$("copy").onclick=()=>navigator.clipboard.writeText($("cd").textContent).then(()=>log("copied","dim"),()=>log("copy failed","bad"));
 $("toaddr").textContent=DAO;
 
 renderWallets();
@@ -664,4 +681,4 @@ window.addEventListener("ethereum#initialized",scanLegacy,{once:true});
   await loadDescriptions();          // descriptions survive a failed <id>.dao.wei mint
   try{ await loadProposals(); }catch(e){ $("plist").innerHTML=`<div class="bad">${esc(e.message)}</div>`; }
 })();
-</script></div></body></html>
+</script></body></html>

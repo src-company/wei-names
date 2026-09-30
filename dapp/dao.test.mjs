@@ -44,7 +44,7 @@ function sandbox() {
   };
   const listeners = {};
   const ctx = {
-    console, setTimeout, clearTimeout, TextEncoder, BigInt, Number, String, Math, JSON, Date,
+    console, setTimeout, clearTimeout, TextEncoder, TextDecoder, BigInt, Number, String, Math, JSON, Date,
     Promise, Object, Array, fetch: async () => { throw new Error('no network in tests'); },
     document: { getElementById: id => els.get(id) || (els.set(id, mk()), els.get(id)), createElement: mk },
     window: { isSecureContext: true, addEventListener: (k, f) => (listeners[k] ??= []).push(f), dispatchEvent: () => {} },
