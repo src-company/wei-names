@@ -339,5 +339,28 @@ const clash = await deriveSave(OTHER_UNIFIED, UNIFIED);
 eq('derive & save: a different current address is not replaced', clash.some(x => x.startsWith('write:')), false);
 eq('derive & save: and says why', clash.some(x => /differs/.test(x)), true);
 
+// ── saving what's already there sends nothing ──────────────────────────────
+async function save(fnName, { existing, input, key = 'finance.tacit' }) {
+  const seen = [];
+  const c = vm.createContext({
+    ethers, Uint8Array, Array, String, Error, BigInt,
+    isProcessing: false, contract: { setText: async () => { seen.push('setText'); return { hash: '0x' }; } },
+    currentTokenId: 1n, currentTokenName: 'alice', currentTacitRecord: existing,
+    $: id => ({ tacitAddr: { value: input }, textKey: { value: key }, textValue: { value: input } })[id],
+    showStatus: (m, t) => seen.push(t + ':' + m), handleError: e => seen.push('error:' + e.message),
+    writeTacitRecord: async () => seen.push('setText'), wcTransaction: p => p, waitForTx: async () => ({}),
+    refreshAfterTx: () => {}, panelRepainted: null,
+  });
+  vm.runInContext([liftConst('TACIT_RECORD_KEY'), liftConst('TACIT_BECH32'), ...['tacitPolymod', 'tacitHrpExpand', 'tacitConvertBits',
+    'tacitIsPoint', 'decodeTacitAddress', fnName].map(lift)].join('\n'), c);
+  await vm.runInContext(fnName + '()', c);
+  return seen.includes('setText');
+}
+eq('Save pasted: unchanged address sends nothing', await save('doSetTacit', { existing: UNIFIED, input: UNIFIED.toUpperCase() }), false);
+eq('Save pasted: a new address is written', await save('doSetTacit', { existing: REAL_RECORD, input: UNIFIED }), true);
+eq('Set Text: unchanged tacit value sends nothing', await save('doSetText', { existing: UNIFIED, input: UNIFIED }), false);
+eq('Set Text: clearing an empty tacit record sends nothing', await save('doSetText', { existing: null, input: '' }), false);
+eq('Set Text: clearing a set tacit record is written', await save('doSetText', { existing: UNIFIED, input: '' }), true);
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

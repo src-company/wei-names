@@ -4098,6 +4098,9 @@ async function doSetText() {
     try { value = decodeTacitAddress(value); }
     catch (e) { showStatus('Invalid Tacit address: ' + e.message, 'error'); return; }
   }
+  if (key === TACIT_RECORD_KEY && value === (currentTacitRecord || '')) {
+    showStatus(currentTokenName + '.wei already has this Tacit address', 'success'); return;
+  }
 
   isProcessing = true;
   const btn = (typeof event !== 'undefined' && event?.target) || null; if (btn) btn.disabled = true;
@@ -4296,6 +4299,7 @@ async function doSetTacit() {
   let value;
   try { value = decodeTacitAddress($('tacitAddr').value); }
   catch (e) { showStatus('Invalid Tacit address: ' + e.message, 'error'); return; }
+  if (value === currentTacitRecord) { showStatus(currentTokenName + '.wei already has this Tacit address', 'success'); return; }
 
   isProcessing = true;
   const btn = (typeof event !== 'undefined' && event?.target) || null; if (btn) btn.disabled = true;
