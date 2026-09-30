@@ -13,7 +13,7 @@
 <!-- Warm the TCP+TLS handshake to the top read endpoints while the page is still
      parsing. Every load kicks off chain reads (initPending, and doCheckName when
      the URL carries a #name), so the first eth_call otherwise pays DNS + connect
-     before it can send a byte. Only the first two: FallbackProvider's happy path
+     before it can send a byte. Only the first two: the failover provider's happy path
      (quorum 1, priority order) touches the head of the list, and opening six idle
      TLS connections costs mobile users more than it saves. -->
 <link rel="preconnect" href="https://ethereum-rpc.publicnode.com" crossorigin>
@@ -56,43 +56,35 @@ try{var d=localStorage.getItem('dark');if(d==='1'||(d===null&&matchMedia('(prefe
 <style>
 :root {
   --input-ph:#ccc;
-  --btn-dis-bg:#ccc;--btn-dis-border:#ccc;--btn-dis-fg:#999;
-  --sec-bg:#fff;--sec-border:#000;
-  --free-accent:#1a8917;--free-bg:#f6fff6;--free-border:#c3e6cb;--free-status-bg:#eaffea;
-  --pending-bg:#f5f5f5;--pending-border:#000;
-  --send-bg:#fafafa;--send-border:#eee;
-  --manage-border:#ddd;--manage-bg:#f5f5f5;
-  --link-dim:0.5;
+  --free-accent:#137a2a;
 }
 .dark {
   --input-ph:#555;
-  --btn-dis-bg:#444;--btn-dis-border:#444;--btn-dis-fg:#666;
-  --sec-bg:#0a0a0a;--sec-border:#333;
-  --free-accent:#2ecc40;--free-bg:#0a1a0a;--free-border:#1a3a1a;--free-status-bg:#0a1a0a;
-  --pending-bg:#111;--pending-border:#333;
-  --send-bg:#111;--send-border:#222;
-  --manage-border:#333;--manage-bg:#151515;
-  --link-dim:0.5;
+  --free-accent:#3ccb5a;
 }
 
 /* Refined ink & lines: soften pure #000 to near-black and let structural lines
    whisper rather than shout — crisper and easier on the eyes while keeping the
    pure-white canvas. Scoped per theme so dark mode keeps its own values. */
 html:not(.dark) {
-  --fg:#1a1a1a;
-  --fg-muted:#6b6b6b;
-  --fg-dim:#a3a3a3;
-  --border:#d6d6d6;
-  --border-muted:#e6e6e6;
-  --btn-bg:#1a1a1a;
+  --fg:#111;
+  --fg-muted:#666;
+  --fg-dim:#9e9e9e;
+  --border:#dedede;
+  --border-muted:#ececec;
+  --frame:#111;
+  --btn-bg:#111;
   --btn-hover:#000;
-  --pending-border:#d0d0d0;
-  --sec-border:#dcdcdc;
+  --ok:#137a2a;
+  --bad:#c01c1c;
 }
 html.dark {
-  --border:#282828;
-  --border-muted:#242424;
+  --border:#2a2a2a;
+  --border-muted:#1f1f1f;
   --fg-dim:#6b6b6b;
+  --frame:#5a5a56;
+  --ok:#3ccb5a;
+  --bad:#ff5a52;
 }
 
 /* Base polish: crisper text on retina, stop mobile Safari inflating font sizes
@@ -124,6 +116,8 @@ h1 {
 }
 .name-section { margin-bottom: 24px; }
 .commit-section { margin-bottom: 32px; }
+/* While a commitment is pending, its panel is the action; the idle Commit adds nothing */
+.pending.show + .commit-section #commitBtn { display: none; }
 #commitBtn { margin-top: 0; }
 label {
   display: block;
@@ -166,29 +160,38 @@ button {
   transition: background 0.2s, border-color 0.2s, color 0.2s;
 }
 button:hover { background: var(--btn-hover); }
-button:disabled { background: var(--btn-dis-bg); border-color: var(--btn-dis-border); color: var(--btn-dis-fg); cursor: not-allowed; }
-button.secondary {
-  background: var(--bg);
-  color: var(--fg);
+button:disabled, button.secondary:disabled {
+  background: transparent; border: 1px dashed var(--border); color: var(--fg-dim); cursor: not-allowed;
 }
-button.secondary:hover { background: var(--surface-hover); }
+button.secondary {
+  background: transparent;
+  color: var(--fg);
+  border-color: var(--frame);
+}
+button.secondary:hover:not(:disabled) { background: var(--fg); color: var(--bg); border-color: var(--fg); }
 .status {
   font-size: 13px;
+  line-height: 1.5;
   margin-top: 16px;
-  padding: 12px;
-  background: var(--surface);
+  padding: 12px 14px;
+  border: 1px solid var(--frame);
   display: none;
+  overflow-wrap: anywhere;
 }
 .status.show { display: block; }
-.status.error { background: var(--status-error); }
-.status.success { background: var(--status-success); }
+.status.error { border-color: var(--bad); color: var(--bad); }
+.status.success { border-color: var(--ok); }
+.status a { color: inherit; }
 .availability {
   font-size: 18px;
   margin-top: 20px;
   display: none;
 }
 .availability.show { display: block; }
+.ok-box { border: 1px solid var(--ok); border-left-width: 4px; padding: 10px 12px; margin-bottom: 12px; font-size: 12px; }
+.warn-box { border: 1px solid #c98a00; border-left-width: 4px; padding: 10px 12px; margin-bottom: 12px; font-size: 12px; line-height: 1.5; color: var(--fg); }
 .availability .available { color: var(--fg); }
+.availability .available::before { content: ''; display: inline-block; width: 8px; height: 8px; background: var(--ok); margin-right: 10px; vertical-align: 2px; }
 .availability .taken { color: var(--fg-muted); }
 .fee {
   font-size: 12px;
@@ -196,6 +199,7 @@ button.secondary:hover { background: var(--surface-hover); }
   margin-top: 8px;
 }
 .fee:empty { display: none; }
+.stale { opacity: 0.35; transition: opacity 0.1s; }
 .free-cta {
   display: block; width: auto; background: none; border: 0; padding: 0;
   font-family: inherit; text-transform: none; text-align: left;
@@ -210,8 +214,7 @@ button.secondary:hover { background: var(--surface-hover); }
   display: none;
   margin-top: 16px;
   padding: 16px;
-  border: 1px solid var(--free-border);
-  background: var(--free-bg);
+  border: 1px solid var(--free-accent);
 }
 .free-panel.show { display: block; }
 .free-panel label {
@@ -235,27 +238,25 @@ button.secondary:hover { background: var(--surface-hover); }
   color: var(--fg-dim);
   white-space: nowrap;
 }
-.free-panel button {
+#freeMintBtn {
   background: var(--free-accent);
   border-color: var(--free-accent);
+  color: #fff;
+  margin: 0;
 }
-.free-panel button:hover { background: var(--free-accent); opacity: 0.85; }
-.free-panel button:disabled { background: var(--btn-dis-bg); border-color: var(--btn-dis-border); }
+#freeMintBtn:hover { opacity: 0.85; }
+#freeMintBtn:disabled { background: transparent; border: 1px dashed var(--border); color: var(--fg-dim); opacity: 1; }
 .free-panel .free-status {
   font-size: 13px;
   margin-top: 12px;
-  padding: 10px;
-  background: var(--free-status-bg);
   display: none;
 }
 .free-panel .free-status.show { display: block; }
-.free-panel .free-status.error { background: var(--status-error); }
-.free-panel .free-status.success { background: var(--free-status-bg); }
+.free-panel .free-status.error { color: var(--bad); }
 .pending {
-  margin-top: 24px;
+  margin: 8px 0 24px;
   padding: 20px;
-  border: 2px solid var(--pending-border);
-  background: var(--pending-bg);
+  border: 1px solid var(--frame);
   display: none;
 }
 .pending.show { display: block; }
@@ -274,7 +275,7 @@ button.secondary:hover { background: var(--surface-hover); }
 .pending .timer {
   font-size: 14px;
   color: var(--fg);
-  font-family: monospace;
+  font-variant-numeric: tabular-nums;
   margin-bottom: 16px;
 }
 .pending .actions {
@@ -302,23 +303,20 @@ button.secondary:hover { background: var(--surface-hover); }
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  padding: 6px 12px;
+  padding: 7px 12px;
   font-size: 12px;
   font-family: inherit;
-  font-weight: 600;
-  border: 1.5px solid var(--border);
-  background: var(--bg);
+  font-weight: 500;
+  border: 1px solid var(--frame);
+  background: transparent;
   color: var(--fg);
   cursor: pointer;
   transition: background 0.15s, border-color 0.15s, color 0.15s;
   letter-spacing: 0.02em;
 }
-.pay-option:first-of-type { border-radius: 0; }
-.pay-option:last-of-type { border-radius: 0; }
 .pay-option + .pay-option { border-left: none; }
 .pay-option:hover { background: var(--surface-hover); }
 .pay-option.active { border-color: var(--btn-bg); background: var(--btn-bg); color: var(--btn-fg); z-index: 1; position: relative; }
-.pay-option.active + .pay-option { border-left: none; }
 .pay-option svg { display: block; }
 .term-row {
   display: flex;
@@ -418,7 +416,7 @@ body.modal-open { overflow: hidden; }
 .manage {
   margin-top: 24px;
   padding: 20px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--frame);
   display: none;
 }
 .manage.show { display: block; }
@@ -432,19 +430,23 @@ body.modal-open { overflow: hidden; }
 .manage-info {
   font-size: 13px;
   margin-bottom: 16px;
-  padding: 12px;
-  background: var(--manage-bg);
+  font-variant-numeric: tabular-nums;
 }
-.manage-info div {
-  margin-bottom: 6px;
+.manage-info > div {
+  display: flex;
+  gap: 12px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--border-muted);
+  overflow-wrap: anywhere;
 }
 .manage-info span {
+  flex: 0 0 104px;
   font-size: 11px;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
-  opacity: 0.5;
-  margin-right: 8px;
+  letter-spacing: 0.08em;
+  color: var(--fg-muted);
 }
+.manage-info a { color: inherit; }
 .manage-actions {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -452,10 +454,10 @@ body.modal-open { overflow: hidden; }
   margin-bottom: 16px;
 }
 .manage-actions button {
-  background: var(--bg);
+  background: transparent;
   color: var(--fg);
-  border: 1.5px solid var(--border);
-  padding: 10px 16px;
+  border: 1px solid var(--frame);
+  padding: 11px 12px;
   font-size: 11px;
   width: 100%;
   margin: 0;
@@ -529,12 +531,13 @@ body.modal-open { overflow: hidden; }
 @media (max-width: 700px) {
   .scroll-names { display: none; }
   body { padding: 80px 16px 100px; }
-  h1 { margin-bottom: 40px; font-size: 13px; }
+  h1 { margin-bottom: 32px; font-size: 13px; }
   input { font-size: 20px; padding: 14px 0; }
   .suffix { font-size: 20px; bottom: 14px; }
   button { padding: 14px 20px; font-size: 11px; width: 100%; margin-right: 0; }
   button.secondary { width: auto; margin-left: 8px; }
-  .manage-actions { grid-template-columns: 1fr; }
+  .manage-actions { grid-template-columns: 1fr 1fr; }
+  .manage-actions button { padding: 12px 8px; letter-spacing: 0.06em; }
   /* Keep the segmented pill controls (ETH/USDC/DAI, Free/ETH/ERC20) on one row
      instead of the blanket button{width:100%} stacking them vertically. */
   .pay-option { width: auto; flex: 1 1 0; }
@@ -554,7 +557,7 @@ body.modal-open { overflow: hidden; }
   .manage-form button { width: auto; display: inline-block; }
   .free-panel .free-input-wrap input { font-size: 18px; }
   .free-panel .free-suffix { font-size: 18px; }
-  .free-panel button { width: 100%; }
+  #freeMintBtn { width: 100%; }
 }
 
 @media (max-width: 380px) {
@@ -580,19 +583,18 @@ body.modal-open { overflow: hidden; }
   border-top: 1px solid var(--border);
 }
 .send-toggle {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--fg);
-  opacity: 0.65;
+  opacity: 0.7;
   text-decoration: none;
   letter-spacing: 0.05em;
 }
-.send-toggle:hover { opacity: 0.7; }
+.send-toggle:hover { opacity: 1; }
 .send-form {
   display: none;
   margin-top: 16px;
   padding: 16px;
-  border: 1px solid var(--border);
-  background: var(--send-bg);
+  border: 1px solid var(--frame);
 }
 .send-form.show { display: block; }
 .send-form input {
@@ -603,13 +605,13 @@ body.modal-open { overflow: hidden; }
   flex: 1;
   padding: 10px;
   font-size: 12px;
-  background: var(--bg);
+  background: transparent;
   color: var(--fg);
-  border: 1px solid var(--border);
+  border: 1px solid var(--frame);
   cursor: pointer;
   transition: background 0.15s, border-color 0.15s, color 0.15s;
 }
-.net-btn:hover { border-color: var(--border); }
+.net-btn + .net-btn { border-left: none; }
 .net-btn.active {
   background: var(--btn-bg);
   color: var(--btn-fg);
@@ -620,9 +622,9 @@ body.modal-open { overflow: hidden; }
      a matched pair of quiet frosted circles so they read as intentional buttons
      and stay legible over footer content instead of colliding with it. */
   .rpc-gear, .dark-toggle {
-    width: 38px; height: 38px;
-    border-radius: 50%;
-    border: 1px solid var(--border);
+    width: 36px; height: 36px;
+    border-radius: 0;
+    border: 1px solid var(--frame);
     /* Was 80% + backdrop-filter: blur(8px). Both controls are position:fixed and
        always on screen, so the blur was re-sampling their backdrop every scrolled
        frame for an effect 20% transparency barely showed. A touch more opacity
@@ -654,22 +656,21 @@ body.modal-open { overflow: hidden; }
     display: flex; align-items: center; justify-content: center;
   }
   .dark-toggle::before {
-    content: ''; width: 13px; height: 13px; border-radius: 50%;
-    background: var(--fg);
+    content: ''; width: 12px; height: 12px;
+    background: linear-gradient(135deg, var(--fg) 50%, transparent 50%);
+    border: 1px solid var(--fg);
   }
   .dark-toggle:hover, .dark-toggle:focus-visible { opacity: 1; }
   .rpc-label { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; opacity: 0.7; margin-bottom: 8px; }
   .rpc-input {
     font-size: 16px; padding: 10px 12px; width: 100%; /* 16px: avoids iOS Safari auto-zoom on focus */
-    border: 1px solid var(--border); background: var(--bg); color: var(--fg);
+    border: 1px solid var(--frame); background: var(--bg); color: var(--fg);
   }
   .rpc-input:focus { border-color: var(--fg); border-bottom-width: 1px; margin-bottom: 0; }
   .rpc-hint { font-size: 12px; opacity: 0.6; margin: 8px 0 0; line-height: 1.5; }
   .rpc-test { font-size: 12.5px; margin-top: 10px; min-height: 1.2em; }
-  .rpc-test.success { color: #1a7f37; }
-  .rpc-test.error { color: #cf222e; }
-  :root.dark .rpc-test.success { color: #3fb950; }
-  :root.dark .rpc-test.error { color: #f85149; }
+  .rpc-test.success { color: var(--ok); }
+  .rpc-test.error { color: var(--bad); }
   .rpc-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
   .rpc-actions button { margin: 0; }
 
@@ -682,14 +683,14 @@ body.modal-open { overflow: hidden; }
   }
   .featured-card {
     display: flex; align-items: stretch; text-align: left;
-    border: 1px solid var(--border-muted); text-decoration: none;
+    border: 1px solid var(--border); text-decoration: none;
     color: var(--fg); overflow: hidden;
     transition: border-color 0.15s, background 0.15s;
   }
-  .featured-card:hover { border-color: var(--border); background: var(--surface); }
+  .featured-card:hover { border-color: var(--frame); }
   /* height:auto defeats the img's height="63" attribute so align-self:stretch can
      fill the full card height; object-fit:cover then crops instead of leaving a gap. */
-  .featured-thumb { width: 124px; height: auto; align-self: stretch; object-fit: cover; object-position: center; flex-shrink: 0; display: block; }
+  .featured-thumb { width: 124px; height: auto; align-self: stretch; object-fit: cover; object-position: left center; flex-shrink: 0; display: block; }
   .featured-text { display: flex; flex-direction: column; justify-content: center; gap: 4px; padding: 12px 16px; min-width: 0; }
   .featured-site { font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; opacity: 0.5; }
   .featured-title { font-size: 13px; font-weight: 600; line-height: 1.3; }
@@ -713,29 +714,26 @@ body.modal-open { overflow: hidden; }
     opacity: 0.6; transition: opacity 0.15s;
   }
   .integration:hover { opacity: 1; }
-  .integration img { width: 22px; height: 22px; border-radius: 5px; object-fit: contain; display: block; }
+  .integration img { width: 22px; height: 22px; border-radius: 0; object-fit: contain; display: block; }
   .integrations-more { font-size: 12px; font-style: italic; opacity: 0.4; color: var(--fg); text-decoration: none; transition: opacity 0.15s; align-self: center; }
   .integrations-more:hover { opacity: 0.7; }
 
   /* DAO launch announcement banner */
   .dao-banner {
     display: flex; align-items: stretch;
-    margin: 0 0 32px; border-radius: 5px;
-    background: rgba(45,95,232,0.055);
-    border: 1px solid rgba(45,95,232,0.22);
+    margin: 0 0 32px;
+    border: 1px solid var(--frame);
   }
-  :root.dark .dao-banner { background: rgba(45,95,232,0.13); border-color: rgba(45,95,232,0.32); }
   .dao-banner-link {
     display: flex; align-items: center; gap: 11px; flex: 1; min-width: 0;
     padding: 11px 14px; text-decoration: none; color: var(--fg);
   }
   .dao-banner-dot {
-    flex-shrink: 0; width: 7px; height: 7px; border-radius: 50%;
-    background: #2D5FE8; box-shadow: 0 0 0 3px rgba(45,95,232,0.15);
+    flex-shrink: 0; width: 7px; height: 7px;
+    background: var(--ok);
   }
   .dao-banner-text { font-size: 12.5px; line-height: 1.4; }
-  .dao-banner-em { color: #2D5FE8; font-weight: 600; }
-  :root.dark .dao-banner-em { color: #6b8ff2; }
+  .dao-banner-em { color: var(--fg); font-weight: 600; text-decoration: underline; text-underline-offset: 3px; }
   .dao-banner-arrow { flex-shrink: 0; margin-left: auto; opacity: 0.4; transition: transform 0.15s, opacity 0.15s; }
   .dao-banner-link:hover .dao-banner-arrow { transform: translateX(3px); opacity: 0.9; }
   .dao-banner-close {
@@ -759,27 +757,27 @@ body.modal-open { overflow: hidden; }
 /* ── roll.wei lottery ──────────────────────────────────────────────── */
 .roll-panel { display:none; margin-top:16px; }
 .roll-panel.show { display:block; }
-.roll-pot { border:1px solid var(--border); padding:24px 20px; text-align:center; margin-bottom:16px; }
+.roll-pot { border:1px solid var(--frame); padding:24px 20px; text-align:center; margin-bottom:16px; }
 .roll-pot-label { font-size:11px; text-transform:uppercase; letter-spacing:0.08em; opacity:0.5; }
 .roll-pot-amount { font-size:38px; line-height:1.1; margin:8px 0 4px; font-variant-numeric:tabular-nums; }
 .roll-steth { width:30px; height:30px; vertical-align:-5px; margin-right:10px; }
 @media (max-width: 380px) { .roll-steth { width:24px; height:24px; vertical-align:-4px; margin-right:7px; } }
 .roll-pot-sub { font-size:11px; opacity:0.5; }
 .roll-meta { display:flex; gap:10px; margin-bottom:16px; }
-.roll-meta > div { flex:1; border:1px solid var(--border-muted); padding:12px; text-align:center; }
+.roll-meta > div { flex:1; border:1px solid var(--border); padding:12px; text-align:center; }
 .roll-meta-k { font-size:10px; text-transform:uppercase; letter-spacing:0.06em; opacity:0.45; }
 .roll-meta-v { font-size:16px; margin-top:4px; font-variant-numeric:tabular-nums; }
 .roll-phase { display:inline-block; font-size:10px; text-transform:uppercase; letter-spacing:0.08em; padding:3px 8px; border:1px solid var(--border); margin-bottom:14px; }
-.roll-your { border:1px solid var(--free-border,var(--border)); background:var(--free-bg,transparent); padding:12px; margin-bottom:16px; font-size:13px; }
+.roll-your { border:1px solid var(--free-accent); padding:12px; margin-bottom:16px; font-size:13px; }
 .roll-winners, .roll-field { margin-top:20px; }
-.roll-field-rows { max-height:420px; overflow-y:auto; overflow-x:hidden; margin:0 -8px; padding:0 8px; }
+.roll-field-rows { max-height:420px; overflow-y:auto; overflow-x:hidden; }
 .roll-field h4 { font-size:11px; text-transform:uppercase; letter-spacing:0.06em; opacity:0.5; margin:0 0 8px; font-weight:normal; }
 .roll-mine { font-weight:600; }
 .roll-boosted { color:var(--fg); font-weight:600; }
 .roll-boost { color:var(--fg); font-weight:600; }
 .roll-you { font-size:9px; text-transform:uppercase; letter-spacing:0.06em; opacity:0.55; border:1px solid var(--border-muted); padding:1px 5px; margin-left:6px; vertical-align:1px; }
 .roll-name-link { color:inherit; text-decoration:none; border-bottom:1px solid var(--border-muted); }
-.roll-odds { padding:7px 8px; margin:0 -8px; border-bottom:1px solid var(--border-muted); }
+.roll-odds { padding:7px 0; border-bottom:1px solid var(--border-muted); }
 .roll-donate { margin-top:24px; }
 .roll-donate .input-wrap input { font-size:18px; }
 .roll-add { background:none; border:none; color:var(--fg); font-family:inherit; font-size:12px; letter-spacing:0.04em; opacity:0.55; padding:6px 0; width:auto; cursor:pointer; border-bottom:1px solid var(--border-muted); }
@@ -796,12 +794,12 @@ body.modal-open { overflow: hidden; }
 .names-panel { display:none; margin-top:16px; }
 .names-panel.show { display:block; }
 .names-sum { font-size:11px; text-transform:uppercase; letter-spacing:0.06em; opacity:0.5; margin-bottom:12px; }
-.names-alert { border:1px solid var(--border); padding:12px; margin-bottom:16px; font-size:12px; line-height:1.6; }
+.names-alert { border:1px solid var(--frame); padding:12px; margin-bottom:16px; font-size:12px; line-height:1.6; }
 .names-rows { max-height:420px; overflow-y:auto; overflow-x:hidden; margin:0 -8px; padding:0 8px; }
 .names-row { display:flex; justify-content:space-between; align-items:baseline; gap:12px; font-size:13px;
              padding:8px; margin:0 -8px; border-bottom:1px solid var(--border-muted);
              color:inherit; text-decoration:none; }
-.names-row:hover { background:var(--manage-bg); }
+.names-row:hover { background:var(--surface-hover); }
 .names-row .n { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .names-row .p { font-variant-numeric:tabular-nums; opacity:0.5; flex:0 0 auto; font-size:11px; }
 .names-row.dim .n, .names-row.dim .p { opacity:0.4; }
@@ -817,14 +815,26 @@ body.modal-open { overflow: hidden; }
 /* A row that cannot be bulk-renewed keeps the checkbox's width so the names stay in one
    column, but shows nothing and takes no clicks. */
 .names-check.gap { visibility:hidden; pointer-events:none; }
-.names-bulk { border:1px solid var(--border); padding:12px; margin-bottom:16px; font-size:12px;
-  display:flex; flex-wrap:wrap; align-items:center; gap:10px; }
-.names-bulk select { font-family:inherit; font-size:12px; padding:4px 6px;
-  background:var(--bg); color:var(--fg); border:1px solid var(--border); }
-.names-bulk .grow { flex:1 1 auto; min-width:0; }
-.names-bulk button.act { font-family:inherit; font-size:12px; padding:6px 14px; cursor:pointer;
+.names-bulk { border:1px solid var(--frame); padding:14px; margin-bottom:16px; font-size:12px;
+  display:flex; flex-wrap:wrap; align-items:center; gap:10px 14px; }
+.names-bulk select { -webkit-appearance:none; appearance:none; font-family:inherit; font-size:12px;
+  padding:2px 18px 3px 0; border:0; border-bottom:1px solid var(--border); border-radius:0; color:var(--fg);
+  background:transparent url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23888' stroke-width='1.3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat right 2px center / 10px 6px; cursor:pointer; }
+.names-bulk select option { background:var(--bg); color:var(--fg); }
+.names-bulk .grow { order:-1; flex:1 0 100%; min-width:0; line-height:1.5; }
+.names-bulk .act { margin-left:auto !important; }
+.names-bulk .names-more { margin-top:0; }
+/* Two checkbox columns (renew, roll): fixed-width cells so the header lines up */
+.names-line { gap:0; }
+.names-line .names-check { margin:0 12px; }
+.names-line .names-check:first-child { margin-left:2px; }
+.names-head { display:flex; font-size:9px; text-transform:uppercase; letter-spacing:0.08em; color:var(--fg-muted);
+  padding:0 0 6px; border-bottom:1px solid var(--border); }
+.names-head span { width:37px; text-align:center; }
+.names-head span:first-child { width:27px; text-align:left; }
+.names-bulk button.act { font-family:inherit; font-size:11px; padding:8px 14px; cursor:pointer; margin:0;
   background:var(--fg); color:var(--bg); border:1px solid var(--fg); }
-.names-bulk button.act:disabled { cursor:default; opacity:0.35; }
+.names-bulk button.act:disabled { cursor:default; background:transparent; color:var(--fg-dim); border:1px dashed var(--border); }
 .names-note { font-size:10px; opacity:0.45; line-height:1.5; margin-top:14px; }
 .names-more { background:none; border:none; color:var(--fg); font-family:inherit; font-size:11px;
               letter-spacing:0.04em; opacity:0.55; padding:6px 0; width:auto; cursor:pointer;
@@ -961,7 +971,7 @@ try{if(localStorage.getItem('wns_dao_banner')==='1'){var _db=document.getElement
   <div id="freePanel" class="free-panel">
     <div style="display:flex;justify-content:space-between;align-items:center;">
       <label for="freeLabelInput" style="margin-bottom:0;">Claim your free name</label>
-      <button type="button" class="dao-banner-close" aria-label="Close" onclick="toggleFreePanel()">&times;</button>
+      <button type="button" class="dao-banner-close free-close" aria-label="Close" onclick="toggleFreePanel()">&times;</button>
     </div>
     <div class="free-input-wrap">
       <input type="text" id="freeLabelInput" placeholder="yourname" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" oninput="checkFreeLabel()">
@@ -1098,7 +1108,7 @@ try{if(localStorage.getItem('wns_dao_banner')==='1'){var _db=document.getElement
   </div>
 </div>
 
-<footer style="margin-top:60px;padding:24px 0 12px;text-align:center;font-size:11px;opacity:0.5;border-top:1px solid var(--manage-border);">
+<footer style="margin-top:60px;padding:24px 0 12px;text-align:center;font-size:11px;opacity:0.65;border-top:1px solid var(--border);">
   <a href="https://opensea.io/collection/wei-name-service" target="_blank" rel="noopener"><svg fill="currentColor" width="13" height="13" viewBox="0 0 360 360" xmlns="http://www.w3.org/2000/svg" style="vertical-align:middle;margin-right:4px"><path d="M181.566 1.00604e-05C80.91 -0.82799 -0.82799 80.91 1.00604e-05 181.566C0.84601 279.306 80.694 359.172 178.416 359.982C279.072 360.846 360.846 279.072 359.982 178.416C359.172 80.712 279.306 0.84601 181.566 1.00604e-05ZM127.746 89.586C139.266 104.22 146.16 122.742 146.16 142.83C146.16 160.236 140.994 176.436 132.12 189.954H69.714L127.728 89.568L127.746 89.586ZM318.006 199.242V212.202C318.006 213.048 317.556 213.768 316.782 214.092C312.552 215.892 298.602 222.372 292.788 230.436C277.812 251.28 266.382 284.04 240.822 284.04H134.172C96.408 284.04 64.818 254.07 64.836 214.146C64.836 213.156 65.682 212.346 66.672 212.346H117.216C118.962 212.346 120.33 213.75 120.33 215.46V225.216C120.33 230.4 124.524 234.612 129.726 234.612H168.066V212.292H141.876C156.942 193.212 165.906 169.128 165.906 142.902C165.906 113.652 154.692 86.976 136.332 67.032C147.438 68.328 158.058 70.542 168.066 73.476V67.266C168.066 60.822 173.286 55.602 179.73 55.602C186.174 55.602 191.394 60.822 191.394 67.266V82.242C227.178 98.946 250.614 126.666 250.614 158.022C250.614 176.418 242.568 193.536 228.69 207.936C226.026 210.69 222.336 212.256 218.466 212.256H191.412V234.54H225.378C232.704 234.54 245.844 220.644 252.072 212.274C252.072 212.274 252.342 211.86 253.062 211.644C253.782 211.428 315.432 197.28 315.432 197.28C316.728 196.92 318.006 197.91 318.006 199.224V199.242Z"/></svg>WNS on OpenSea</a>
   ·
   <a href="https://www.npmjs.com/package/wns-utils" target="_blank" rel="noopener"><svg fill="currentColor" width="14" height="14" viewBox="-2 -8 24 24" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMinYMin" style="vertical-align:middle;margin-right:4px"><path d="M0 0h20v6.857H10V8H5.556V6.857H0V0zm1.111 5.714h2.222V2.286h1.111v3.428h1.112V1.143H1.11v4.571zm5.556-4.571v5.714h2.222V5.714h2.222V1.143H6.667zm5.555 0v4.571h2.222V2.286h1.112v3.428h1.11V2.286h1.112v3.428h1.11V1.143h-6.666z"/><path d="M10 4.7H9V2.2h1z"/></svg>wns-utils</a>
@@ -1275,7 +1285,7 @@ const RPC_ENDPOINTS = [
   'https://eth-mainnet.public.blastapi.io'
 ];
 const MAINNET = ethers.Network.from(1);
-let rpcProvider = null;   // ethers FallbackProvider spanning every endpoint below
+let rpcProvider = null;   // FailoverProvider spanning every endpoint below
 let readContract = null;
 let _rpcInit = null; // in-flight getRpc() promise — de-dupes concurrent cold-start callers
 let _rpcGeneration = 0; // bumped by invalidateRpc(); a build from an older generation must not cache
@@ -1321,34 +1331,85 @@ function customRpcs() {
   return out.map(s => s.trim()).filter(rpcUrlAllowed);
 }
 
+// Ordered failover across JSON-RPC endpoints. A request goes to the first endpoint
+// that isn't benched; an error moves it to the next, and a slow answer gets the next
+// one asked as well after a short head start — the first good answer wins. Unlike
+// ethers' FallbackProvider there is no start-up sync that waits on every endpoint,
+// so the first read costs one round trip to the fastest healthy node.
+const RPC_HEDGE_MS = 1500;
+const RPC_BENCH_MS = 30000;
+class FailoverProvider extends ethers.JsonRpcApiProvider {
+  constructor(urls) {
+    super(MAINNET, { staticNetwork: MAINNET, batchMaxCount: 1 });
+    this.urls = urls;
+    this.benched = new Map();
+  }
+  async _post(url, body) {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), RPC_REQUEST_TIMEOUT);
+    try {
+      const res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body, signal: ctl.signal });
+      if (!res.ok) throw new Error('rpc http ' + res.status);
+      const json = await res.json();
+      const out = Array.isArray(json) ? json : [json];
+      for (const r of out) {
+        // A revert is the contract's answer; anything else (rate limit, missing
+        // method, overloaded node) is this endpoint's problem
+        if (r && r.error && !(r.error.code === 3 || /revert|execution/i.test(r.error.message || ''))) {
+          throw new Error(r.error.message || 'rpc error');
+        }
+      }
+      return out;
+    } finally { clearTimeout(timer); }
+  }
+  _send(payload) {
+    const body = JSON.stringify(payload);
+    const now = Date.now();
+    let order = this.urls.filter(u => !((this.benched.get(u) || 0) > now));
+    if (!order.length) order = this.urls.slice();
+    return new Promise((resolve, reject) => {
+      let next = 0, pending = 0, done = false, lastErr = null, hedge = null;
+      const launch = () => {
+        if (done) return;
+        if (next >= order.length) {
+          if (!pending) { done = true; reject(lastErr || new Error('All RPC endpoints failed')); }
+          return;
+        }
+        const url = order[next++];
+        pending++;
+        clearTimeout(hedge);
+        hedge = setTimeout(launch, RPC_HEDGE_MS);
+        this._post(url, body).then(out => {
+          pending--;
+          if (done) return;
+          done = true; clearTimeout(hedge); this.benched.delete(url); resolve(out);
+        }, err => {
+          pending--;
+          this.benched.set(url, Date.now() + RPC_BENCH_MS);
+          lastErr = err;
+          launch();
+        });
+      };
+      launch();
+    });
+  }
+}
+
 // Build the read provider. With one endpoint (an explicitly saved wns_rpc override)
-// use it directly; with several, wrap them in a FallbackProvider that fails over on
-// EVERY call — if the top endpoint errors or stalls, ethers advances to the next
-// within the same request (see providerFor for why the FetchRequest tweak is what
-// makes this actually work under rate limiting). quorum:1 means one good response
-// suffices, so the happy path only touches the highest-priority endpoint.
-//
-// The connected wallet's node is deliberately NOT a member here: FallbackProvider's
-// initial sync awaits getBlockNumber on ALL members, so a slow/asleep wallet
-// (common with WalletConnect on mobile) would stall every read on cold start. It is
-// instead consulted on demand as a bounded last resort — see withRpc().
+// use it directly; with several, a FailoverProvider that fails over on every call.
+// The connected wallet's node is deliberately not a member: it is consulted on
+// demand as a bounded last resort — see withRpc().
 function buildRpcProvider() {
   const overrides = customRpcs();
   const endpoints = overrides.length ? overrides : RPC_ENDPOINTS;
   if (endpoints.length === 1) return providerFor(endpoints[0]);
-  const configs = endpoints.map((url, i) => ({
-    provider: providerFor(url),
-    priority: i + 1,      // lower = tried first; preserves list order
-    stallTimeout: 2000,   // ms to wait before also trying the next endpoint
-    weight: 1
-  }));
-  return new ethers.FallbackProvider(configs, MAINNET, { quorum: 1 });
+  return new FailoverProvider(endpoints);
 }
 
 // Run a read with resilience beyond the public endpoints. fn(provider) performs the
 // call. The public provider already fails over across endpoints internally; withRpc
 // adds (a) a short retry to ride out a lone flaky response (e.g. an endpoint that
-// returns empty 0x data, which counts as "success" so FallbackProvider won't rotate
+// returns empty 0x data, which counts as "success" so the failover won't rotate
 // off it), and (b) a final fallback to the connected wallet's own node. The wallet
 // leg is skipped for WalletConnect (its relay can hang) and hard-bounded by a
 // timeout so a sluggish wallet can't wedge the call.
@@ -1390,12 +1451,16 @@ async function getRpc() {
   const gen = _rpcGeneration;
   const init = (async () => {
     const provider = buildRpcProvider();
-    // Verify at least one endpoint answers before caching, so a total outage still
-    // rejects (callers/timers retry) rather than caching a dead provider.
-    await Promise.race([
-      provider.getBlockNumber(),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 8000))
-    ]);
+    // A single saved endpoint is checked before it is cached, so a dead custom node
+    // rejects here rather than on every read. The failover provider needs no gate:
+    // each call already walks the list, and a warm-up round trip would only delay
+    // the first real read.
+    if (!(provider instanceof FailoverProvider)) {
+      await Promise.race([
+        provider.getBlockNumber(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 8000))
+      ]);
+    }
     if (gen !== _rpcGeneration) return provider; // superseded — serve this caller, don't cache
     rpcProvider = provider;
     readContract = new ethers.Contract(CONTRACT, ABI, provider);
@@ -1663,10 +1728,10 @@ async function wcTransaction(txPromise, message = 'Confirm in your wallet app') 
   const notif = document.createElement('div');
   notif.id = 'wcNotif';
   notif.innerHTML = `
-    <div style="position:fixed;top:0;left:0;right:0;background:#1a1a2e;color:#fff;padding:16px;text-align:center;z-index:10000;font-size:14px;">
+    <div style="position:fixed;top:0;left:0;right:0;background:var(--fg);color:var(--bg);padding:16px;text-align:center;z-index:10000;font-size:14px;">
       <div style="margin-bottom:8px;">📱 ${escapeHtml(message)}</div>
       <div style="font-size:12px;opacity:0.7;">Open your wallet app to approve the transaction</div>
-      ${_wcDeepLink ? `<a href="${escapeHtml(_wcDeepLink)}" style="display:inline-block;margin-top:8px;padding:8px 16px;background:#fff;color:#000;border-radius:0;text-decoration:none;">Open Wallet</a>` : ''}
+      ${_wcDeepLink ? `<a href="${escapeHtml(_wcDeepLink)}" style="display:inline-block;margin-top:8px;padding:8px 16px;border:1px solid currentColor;color:inherit;text-decoration:none;">Open Wallet</a>` : ''}
     </div>
   `;
   document.body.appendChild(notif);
@@ -1786,7 +1851,7 @@ function topLevelLabel(raw) {
 function nonStandardWarning(raw) {
   const why = topLevelLabel(raw).split('.').map(getNormalizationError).find(Boolean);
   return why
-    ? '<div style="padding:10px;background:var(--status-warning,#fff3cd);color:#7a4f00;margin-bottom:10px;font-size:12px;border-radius:4px;">⚠ Non-standard name — ENSIP-15 rejects it ('
+    ? '<div class="warn-box">⚠ Non-standard name — ENSIP-15 rejects it ('
       + escapeHtml(why) + '). It can still be registered, but apps following ENSIP-15 won\'t resolve it, '
       + 'and it is a different name from any it resembles.</div>'
     : '';
@@ -1844,7 +1909,11 @@ let checkVersion = 0;
 function checkName() {
   clearTimeout(checkDebounce);
   $('commitBtn').disabled = true;   // re-enabled once this input has been checked
-  checkDebounce = setTimeout(() => doCheckName(), 350);
+  // Dim the previous answer at once, so it never reads as the answer for what is typed now
+  $('availability').classList.add('stale');
+  $('feeDisplay').classList.add('stale');
+  $('termRow').classList.add('stale');
+  checkDebounce = setTimeout(() => doCheckName(), 200);
 }
 
 // Enter flushes the debounce for an immediate lookup and drops the mobile keyboard.
@@ -2098,6 +2167,7 @@ async function doCheckName() {
   // repaint the box after the user has cleared it or typed an invalid name (the
   // early-return branches below don't otherwise bump the version).
   checkVersion++;
+  for (const el of [availEl, feeEl, $('termRow')]) el && el.classList.remove('stale');
 
   if (!raw.trim()) {
     availEl.classList.remove('show');
@@ -2370,6 +2440,8 @@ async function doCheckName() {
       }
       feeEl.textContent = feeText;
       showTermRow(fee, premium);
+      // Dollar hint on the total, once the price is known (cached for a minute)
+      if (!globalThis.__ethUsd) rollEthUsd().then(() => { if (thisVersion === checkVersion) onTermChange(); }).catch(() => {});
     } else {
       const osLink = `https://opensea.io/assets/ethereum/${CONTRACT}/${tokenId}`;
       availEl.innerHTML = warnHtml + '<span class="taken">' + escaped + '.wei is taken</span>' +
@@ -2722,7 +2794,9 @@ function onTermChange() {
   const n = selectedTerms();
   const total = termsTotal(_termFee, _termPremium, n);
   const until = new Date(Date.now() + n * TERM_SECS * 1000).toLocaleDateString();
-  note.innerHTML = '<b>' + fmtEth(total, 6) + ' ETH</b> · until ' + escapeHtml(until) +
+  const usd = globalThis.__ethUsd;
+  const usdText = usd ? ' ≈ $' + (Number(total) / 1e18 * usd).toLocaleString('en-US', { maximumFractionDigits: 2 }) : '';
+  note.innerHTML = '<b>' + fmtEth(total, 6) + ' ETH</b>' + usdText + ' · until ' + escapeHtml(until) +
     (n > 1 ? ' · ETH only' : '');
 }
 
@@ -3553,10 +3627,10 @@ async function showManage(tokenId, name) {
       const reason = isStaleSubdomain
         ? 'its parent has been re-registered since'
         : 'its parent has expired';
-      infoHtml += `<div style="padding:10px;background:var(--status-warning,#fff3cd);color:#7a4f00;margin-bottom:12px;font-size:12px;border-radius:4px;">This subdomain is inactive — ${reason}. On-chain updates (website, records, transfer) will revert.</div>`;
+      infoHtml += `<div class="warn-box">This subdomain is inactive — ${reason}. On-chain updates (website, records, transfer) will revert.</div>`;
     }
     if (isExpiredInGrace) {
-      infoHtml += `<div style="padding:10px;background:var(--status-warning,#fff3cd);color:#7a4f00;margin-bottom:12px;font-size:12px;border-radius:4px;">This name has expired and is in its grace period. Renew to reactivate — at the normal fee, with no premium, and the extension still runs from the original expiry. All other on-chain actions (transfer, records, website) will revert until you do.</div>`;
+      infoHtml += `<div class="warn-box">This name has expired and is in its grace period. Renew to reactivate — at the normal fee, with no premium, and the extension still runs from the original expiry. All other on-chain actions (transfer, records, website) will revert until you do.</div>`;
     }
     infoHtml += `<div><span>Owner:</span>${addrLink(owner)}</div>`;
     if (resolved && resolved !== ethers.ZeroAddress) {
@@ -3765,6 +3839,7 @@ async function initRenewTerms() {
     _renewFee = null;
   }
   renderRenewQuote();
+  if (!globalThis.__ethUsd) rollEthUsd().then(renderRenewQuote).catch(() => {});
 }
 
 function renewTermCount() {
@@ -3779,6 +3854,8 @@ function renderRenewQuote() {
   const n = renewTermCount();
   const total = _renewFee * BigInt(n);
   let text = '<b>' + fmtEth(total, 6) + ' ETH</b>';
+  const usd = globalThis.__ethUsd;
+  if (usd) text += ' ≈ $' + (Number(total) / 1e18 * usd).toLocaleString('en-US', { maximumFractionDigits: 2 });
   if (currentExpiresAt) {
     const until = new Date((Number(currentExpiresAt) + n * TERM_SECS) * 1000).toLocaleDateString();
     text += ' · until ' + escapeHtml(until);
@@ -4745,13 +4822,13 @@ async function showSubSalesForm() {
       } else {
         priceDesc = (currentPriceStr || '0') + ' ' + (subSalesTokenSymbol || cfgFeeToken.slice(0, 8) + '...');
       }
-      statusHtml = '<div style="padding:10px;background:var(--status-success);margin-bottom:12px;font-size:12px;">Currently enabled — ' + escapeHtml(priceDesc) + ' per subdomain</div>';
+      statusHtml = '<div class="ok-box">Currently enabled — ' + escapeHtml(priceDesc) + ' per subdomain</div>';
     } else if (isConfigured) {
       statusHtml = '<div style="padding:10px;background:var(--surface);margin-bottom:12px;font-size:12px;">Currently disabled</div>';
     }
 
     if (!isApproved) {
-      statusHtml += '<div style="padding:10px;background:var(--status-warning);margin-bottom:12px;font-size:11px;">Approval required — the registrar needs permission to use your name for minting. Your name stays in your wallet.</div>';
+      statusHtml += '<div class="warn-box">Approval required — the registrar needs permission to use your name for minting. Your name stays in your wallet.</div>';
     }
 
     // The gate isn't editable here, but it IS carried through on save — say so, so an
@@ -5599,7 +5676,9 @@ function initFromHash() {
   }
   if (name) {
     $('nameInput').value = name;
-    checkName();
+    // A link is not typing: look it up now rather than after the debounce
+    clearTimeout(checkDebounce);
+    doCheckName();
   }
 }
 
@@ -5979,7 +6058,7 @@ async function rollEthUsd() {
   const answer = await withRpc(p =>
     new ethers.Contract(CHAINLINK_ETHUSD, ['function latestAnswer() view returns (int256)'], p).latestAnswer());
   const usd = Number(answer) / 1e8;
-  if (usd > 0) _rollEthUsd = { v: usd, at: Date.now() };
+  if (usd > 0) { _rollEthUsd = { v: usd, at: Date.now() }; globalThis.__ethUsd = usd; }
   return usd > 0 ? usd : null;
 }
 
@@ -7300,6 +7379,7 @@ function namesRender() {
   h += namesBulkHtml(rows);
   h += namesRollBulkHtml(rows);
 
+  if (namesBulkOn() && namesRollOn()) h += '<div class="names-head"><span>renew</span><span>roll</span></div>';
   h += '<div class="names-rows">';
   for (const r of rows) h += namesRow(r, st, now);
   h += '</div>';

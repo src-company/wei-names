@@ -9,19 +9,19 @@
 .wallet button {
   /* Plain text — no pill. The address / reverse-resolved .wei name reads as a
      quiet label in the corner rather than a chip that can crowd the edge. */
-  margin:0; padding:6px 2px; text-transform:lowercase;
-  color:var(--fg); opacity:0.6;
+  margin:0; padding:6px 8px; text-transform:lowercase;
+  color:var(--fg-muted);
   font-size:12px; font-weight:400; letter-spacing:0.05em;
   text-decoration:none;
-  background:none; border:none; border-radius:0;
+  background:var(--bg); border:none; border-radius:0;
   transition:opacity 0.15s, color 0.15s;
 }
-.wallet button:hover { opacity:1; background:none; }
+.wallet button:hover { color:var(--fg); background:var(--bg); }
 .wallet button.connected,
 /* Auto-connect paints the last account's cached .wei name before the wallet
    has actually answered. It needs the same text treatment, but must NOT wear
    .connected — that class means "there is a signer" and nothing else. */
-.wallet button.reconnecting { opacity:0.85; font-weight:600; text-transform:none; }
+.wallet button.reconnecting { color:var(--fg); font-weight:600; text-transform:none; }
 
 /* Wallet modal */
 .wallet-modal-overlay {
@@ -34,7 +34,7 @@
 .wallet-modal-overlay.active { display:flex; }
 body.modal-open { overflow:hidden; }
 .wallet-modal {
-  background:var(--modal-bg); border:1px solid var(--modal-border);
+  background:var(--bg); border:1px solid var(--frame, var(--modal-border));
   padding:20px; width:100%; max-width:380px;
   max-height:calc(100vh - 80px); max-height:calc(100dvh - 80px);
   display:flex; flex-direction:column; overflow:hidden;
@@ -52,21 +52,21 @@ body.modal-open { overflow:hidden; }
 .wallet-option {
   width:100%; margin:0 0 8px; font:inherit; text-align:left; text-transform:none; letter-spacing:normal;
   display:flex; align-items:center; gap:12px; padding:14px 16px;
-  background:var(--modal-bg); border:1px solid var(--border); color:var(--fg);
+  background:transparent; border:1px solid var(--frame, var(--border)); color:var(--fg);
   cursor:pointer; margin-bottom:8px; transition:background 0.15s, color 0.15s;
 }
 .wallet-option:hover { background:var(--btn-bg); color:var(--btn-fg); }
 .wallet-option:active { opacity:0.7; }
 .wallet-option:focus-visible { outline:2px solid var(--btn-bg); outline-offset:2px; }
 .wallet-option-icon { font-size:1.5rem; }
-.wallet-option-name { font-weight:600; font-size:14px; }
-.wallet-option.disconnect { border-color:#f00; color:#f00; justify-content:center; margin-top:4px; }
-.wallet-option.disconnect:hover { background:#f00; color:#fff; }
+.wallet-option-name { font-weight:500; font-size:14px; }
+.wallet-option.disconnect { border-color:var(--bad, #c01c1c); color:var(--bad, #c01c1c); justify-content:center; margin-top:4px; }
+.wallet-option.disconnect:hover { background:var(--bad, #c01c1c); color:#fff; }
 
 /* Mobile */
 @media (max-width: 600px) {
   .wallet { top:max(12px, env(safe-area-inset-top, 0px)); right:16px; }
-  .wallet button { font-size:12px; padding:8px 2px; }
+  .wallet button { font-size:12px; padding:8px 8px; }
   .wallet-modal-overlay { padding:0; padding-top:0; align-items:flex-end; }
   .wallet-modal { max-width:100%; margin:0; border-left:none; border-right:none; border-bottom:none; max-height:85vh; max-height:85dvh; padding:16px; padding-bottom:max(16px, env(safe-area-inset-bottom)); }
   .wallet-option { padding:14px 16px; }
