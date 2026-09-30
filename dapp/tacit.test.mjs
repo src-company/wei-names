@@ -9,6 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import url from 'node:url';
 import vm from 'node:vm';
+import crypto from 'node:crypto';
 
 const here = path.dirname(url.fileURLToPath(import.meta.url));
 const ethers = (await import(path.join(here, 'vendor/ethers.min.js'))).default
@@ -36,13 +37,25 @@ function liftConst(name) {
   return line;
 }
 
-const ctx = vm.createContext({ ethers, BigInt, Error, Uint8Array, Array, String, console });
+// Tacit's kit, vendored unmodified. The pin is the SHA-256 Tacit publishes for it.
+const KIT_PATH = path.join(here, 'vendor/tacit-address-kit.js');
+const KIT_SHA256 = '9fa0fd22dade0bf266c604740c42579ba6536dbf5bdc3f09451f3194de169dc1';
+const kit = await import(KIT_PATH);
+
+const ctx = vm.createContext({ ethers, BigInt, Error, Uint8Array, Array, String, RegExp, console });
 vm.runInContext([
-  liftConst('TACIT_BECH32'), liftConst('SECP_N'),
-  ...['tacitPolymod', 'tacitHrpExpand', 'tacitConvertBits', 'tacitBech32mEncode', 'tacitIsPoint',
-      'decodeTacitAddress', 'tacitIdentityMessage', 'tacitAddressFromPriv'].map(lift),
+  liftConst('TACIT_BECH32'),
+  ...['tacitPolymod', 'tacitHrpExpand', 'tacitConvertBits', 'tacitIsPoint', 'decodeTacitAddress', 'tacitIsCurrent'].map(lift),
 ].join('\n'), ctx, { filename: 'index.html:tacit' });
 const fn = (n) => vm.runInContext(n, ctx);
+
+// bech32m under the tacit HRP, for building payloads the validator must judge.
+function bech32m(bytes) {
+  const d5 = fn('tacitConvertBits')(Array.from(bytes), 8, 5, true);
+  const pm = fn('tacitPolymod')(fn('tacitHrpExpand')('tacit').concat(d5, [0, 0, 0, 0, 0, 0])) ^ 0x2bc830a3;
+  const cs = [0, 1, 2, 3, 4, 5].map(i => (pm >>> (5 * (5 - i))) & 31);
+  return 'tacit1' + d5.concat(cs).map(v => fn('TACIT_BECH32')[v]).join('');
+}
 
 let pass = 0, fail = 0;
 function eq(label, got, want) {
@@ -56,20 +69,14 @@ function throws(label, f) {
 
 const VECTOR = 'tacit1qqps9xyupdmvk43ew87un0hnrmqxcdtq7vjf6mhfuhvrc4mz2ktwqhm0qdk5lnmv6yyy73yd0mccau2em5n66y5a0pyh3xfuhzwmf8g39kctxq5cns9hdj6k89clmjd77v0vqmp4vrejf8twa8jas0zhvf2edczlduk6e0c7';
 
-// ── derivation ──────────────────────────────────────────────────────────────
+// ── the vendored kit ────────────────────────────────────────────────────────
+eq('vendored kit matches its pinned SHA-256',
+   crypto.createHash('sha256').update(fs.readFileSync(KIT_PATH)).digest('hex'), KIT_SHA256);
 const priv = new Uint8Array(32).fill(7);
-eq('priv 0x07…07 derives the spec vector', fn('tacitAddressFromPriv')(priv), VECTOR);
+eq('kit: key 0x07…07 without the pool lane is the older vector', kit.addressesFromKey(priv, { pool: false }).address, VECTOR);
 eq('vector is 174 characters', VECTOR.length, 174);
-eq('priv is zeroed after derivation', priv.every(b => b === 0), true);
-
-// priv ≥ n takes the documented rehash branch rather than throwing.
-const big = new Uint8Array(32).fill(0xff);
-eq('priv ≥ n still derives a valid address',
-   fn('decodeTacitAddress')(fn('tacitAddressFromPriv')(big)).startsWith('tacit1'), true);
-
-// ── identity message ────────────────────────────────────────────────────────
-const msg = fn('tacitIdentityMessage')();
-eq('identity message is byte-exact', msg,
+const msg = kit.identityMessage();
+eq('kit identity message is byte-exact', msg,
   'Tacit identity\n\nSigning this creates your Tacit private key. Anyone who has this signature controls all of your Tacit funds.\n\nSign it only in a Tacit app you trust. Every Tacit app asks for exactly this message.\n\nnetwork: mainnet\nversion: 1');
 
 // ── validation ──────────────────────────────────────────────────────────────
@@ -83,7 +90,7 @@ throws('wrong prefix', () => decode(VECTOR.replace(/^tacit1/, 'tactt1')));
 throws('empty', () => decode(''));
 
 // Build variants with the shipping encoder to exercise the payload rules.
-const enc = (bytes) => fn('tacitBech32mEncode')('tacit', Uint8Array.from(bytes));
+const enc = (bytes) => bech32m(bytes);
 const spend = ethers.getBytes('0x02989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f');
 const scan = ethers.getBytes('0x036d4fcf6cd1084f448d7ef18ef159dd27ad129d784978993cb89db49d112db0b3');
 const pay = (v, f, ...rest) => [v, f, ...spend, ...scan, ...rest.flatMap(r => [...r])];
@@ -119,6 +126,54 @@ const v0 = [...spend, ...scan];
 const short81 = enc([0, 0x81, ...v0]);
 eq('marked, no pool lane (0x81, 121 characters) validates', decode(short81) === short81 && short81.length, 121);
 eq('re-encoding the unified keys round-trips', enc([0, 0x85, ...v0, ...[...fn('tacitConvertBits')(Array.from(UNIFIED.slice(6, -6), c => fn('TACIT_BECH32').indexOf(c)), 5, 8, false)].slice(68)]), UNIFIED);
+eq('kit: key 0x07…07 derives the unified vector', kit.addressesFromKey(priv).address, UNIFIED);
+eq('current form: unified 0x85', fn('tacitIsCurrent')(UNIFIED), true);
+eq('older form: written-out 0x07', fn('tacitIsCurrent')(EXPLICIT), false);
+eq('older form: 0x03 (a real .wei record)', fn('tacitIsCurrent')(REAL_RECORD), false);
+eq('older form: 0x81 (marked, no pool)', fn('tacitIsCurrent')(short81), false);
+eq('current form with an unknown lane beside it', fn('tacitIsCurrent')(markedUnknown), true);
+eq('invalid: not current', fn('tacitIsCurrent')('tacit1nope'), false);
+
+// ── derive from wallet: the shipping deriveTacitAddress, with the kit ─────────
+async function derive({ wallet, connected = wallet.address, code = '0x', v01 = false }) {
+  const signer = {
+    signMessage: async (m) => {
+      const sig = ethers.getBytes(await wallet.signMessage(m));
+      if (v01) sig[64] -= 27;
+      return ethers.hexlify(sig);
+    },
+  };
+  const c = vm.createContext({
+    ethers, Error, Uint8Array, String, RegExp, _signer: signer, _connectedAddress: connected,
+    withRpc: async f => f({ getCode: async () => code }), wcTransaction: p => p,
+  });
+  vm.runInContext(lift('deriveTacitAddress'), c);
+  c.loadTacitKit = async () => kit;
+  return vm.runInContext('deriveTacitAddress()', c);
+}
+const expectFor = async (wallet) => {
+  const k = kit.keyFromSignature(ethers.getBytes(await wallet.signMessage(msg)), { address: wallet.address });
+  return kit.addressesFromKey(k).address;
+};
+for (let i = 0; i < 6; i++) {
+  const w = ethers.Wallet.createRandom();
+  const a = await derive({ wallet: w, v01: i % 2 === 1 });
+  eq(`derive: wallet ${i + 1}${i % 2 ? ' (v as 0/1)' : ''} gives its unified address`, a, await expectFor(w));
+  if (i === 0) {
+    eq('derive: 276 characters, starts tacit1qzz', a.length === 276 && a.startsWith('tacit1qzz'), true);
+    eq('derive: result validates and is the current form', fn('tacitIsCurrent')(fn('decodeTacitAddress')(a)), true);
+  }
+}
+const w0 = ethers.Wallet.createRandom();
+let refused = null;
+try { await derive({ wallet: w0, code: '0x6080604052' }); } catch (e) { refused = e.message; }
+eq('derive: a contract wallet is refused', /Contract wallets/.test(refused || ''), true);
+refused = null;
+try { await derive({ wallet: w0, code: '0xef0100' + 'ab'.repeat(20) }); } catch (e) { refused = e.message; }
+eq('derive: an EIP-7702 delegated account is allowed', refused, null);
+refused = null;
+try { await derive({ wallet: w0, connected: ethers.Wallet.createRandom().address }); } catch (e) { refused = e.message; }
+eq('derive: a signature from another account is refused', !!refused, true);
 
 // ── registration: the pending panel's box and what follows the reveal ─────────
 // A DOM of just the elements these functions touch, and stubs for the chain.
@@ -140,9 +195,9 @@ const reg = vm.createContext({
   localComputeId: n => 'id:' + n,
 });
 vm.runInContext([
-  liftConst('TACIT_RECORD_KEY'), liftConst('TACIT_BECH32'), liftConst('SECP_N'), liftConst('TACIT_PREF_PREFIX'),
+  liftConst('TACIT_RECORD_KEY'), liftConst('TACIT_BECH32'), liftConst('TACIT_PREF_PREFIX'),
   ...['tacitPolymod', 'tacitHrpExpand', 'tacitConvertBits', 'tacitIsPoint', 'decodeTacitAddress',
-      'sanePending', 'tacitPref', 'lockTacitOpt', 'onTacitToggle', 'tacitChoice', 'writeTacitRecord', 'afterRegister'].map(lift),
+      'sanePending', 'tacitIsCurrent', 'tacitPref', 'lockTacitOpt', 'onTacitToggle', 'tacitChoice', 'writeTacitRecord', 'afterRegister'].map(lift),
   SRC.find(l => l.startsWith('let _tacitOptFor')), lift('paintTacitOpt'),
 ].join('\n'), reg, { filename: 'index.html:tacit-register' });
 const r = (n) => vm.runInContext(n, reg);
@@ -171,17 +226,24 @@ eq('sanePending drops an invalid tacit', 'tacit' in r('sanePending')({ name: 'a'
 
 // After registering with the box ticked: refresh, then one setText on the new name.
 calls.length = 0;
-await r('afterRegister')({ name: 'alice', owner, tacit: VECTOR }, {});
+await r('afterRegister')({ name: 'alice', owner, tacit: UNIFIED }, {});
 const set = calls.find(c => c[0] === 'setText');
 eq('afterRegister refreshes the name', calls[0][0] + ':' + calls[0][1], 'refresh:alice');
-eq('afterRegister writes finance.tacit on the new id', set && set.slice(1).join('|'), `id:alice|finance.tacit|${VECTOR}`);
-eq('the address is remembered for this account', store.get('wei-tacit:' + owner.toLowerCase()), VECTOR);
+eq('afterRegister writes finance.tacit on the new id', set && set.slice(1).join('|'), `id:alice|finance.tacit|${UNIFIED}`);
+eq('the address is remembered for this account', store.get('wei-tacit:' + owner.toLowerCase()), UNIFIED);
 
 // The next commitment from the same account comes pre-ticked and pre-filled.
 r('paintTacitOpt')({ name: 'bob', owner, commitment: '0x02' });
 eq('next commitment: box pre-ticked', dom.tacitOn.checked, true);
-eq('next commitment: address pre-filled', dom.regTacitAddr.value, VECTOR);
+eq('next commitment: address pre-filled', dom.regTacitAddr.value, UNIFIED);
 eq('fields shown when ticked', dom.tacitOpt.classList.on, true);
+// An older-form (0x03) remembered address does not pre-fill a new name.
+store.set('wei-tacit:' + owner.toLowerCase(), VECTOR);
+r('paintTacitOpt')({ name: 'bob2', owner, commitment: '0x03' });
+eq('older remembered address: box left unticked', dom.tacitOn.checked, false);
+store.set('wei-tacit:' + owner.toLowerCase(), EXPLICIT);
+r('paintTacitOpt')({ name: 'bob3', owner, commitment: '0x04' });
+eq('written-out 0x07 remembered: box left unticked', dom.tacitOn.checked, false);
 
 // Unticked: nothing beyond the refresh.
 calls.length = 0;
