@@ -32,10 +32,12 @@ services:
         name: Referrer-Policy
         value: strict-origin-when-cross-origin
     routes:
-      # SPA-style fallback for stray deep links (WNS uses #hash routing).
-      - type: rewrite
+      # Stray deep links go to the app (WNS uses #hash routing). A redirect, not
+      # a rewrite: the page loads its scripts by relative path, so serving it at
+      # /a/b would fetch /a/wallet.js and get HTML back.
+      - type: redirect
         source: /*
-        destination: /index.html
+        destination: /
 
   # 2) WNS wildcard gateway — serves every `<name>.wei.limo` from the IPFS
   #    contenthash of `<name>.wei`, read live from the WNS contract on each
