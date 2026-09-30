@@ -56,7 +56,8 @@ for (const target of targets) {
   const leaked = [...res.headers.keys()].filter(
     (k) =>
       !['content-type', 'cache-control', 'content-length', 'x-content-type-options', 'x-wns-name',
-        'x-wns-contract', 'x-ipfs-cid', 'x-ipns-name', 'location', 'etag', 'last-modified'].includes(k),
+        'x-wns-contract', 'x-ipfs-cid', 'x-ipns-name', 'location', 'etag', 'last-modified',
+        'age', 'vary', 'x-wns-mode', 'x-wns-upstream'].includes(k),
   )
   if (leaked.length) {
     console.log(`  !! unexpected headers: ${leaked.join(', ')}`)

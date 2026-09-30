@@ -80,9 +80,14 @@ function base36Encode(bytes) {
 // namespace this gateway can serve.
 //   ns 'ipfs' -> id is a base32 CIDv1 (`bafy…`) for `<id>.ipfs.<gw>`
 //   ns 'ipns' -> id is a base36 IPNS name (`k51…`) for `<id>.ipns.<gw>`
+const MAX_CID_BYTES = 128
+
 export function decodeContenthash(contenthash) {
   if (!contenthash) return null
   const hex = contenthash.replace(/^0x/, '').toLowerCase()
+  // Real CIDs and IPNS keys are ~40 bytes; anything malformed or huge is not
+  // content (and base36 encoding is quadratic in its length).
+  if (!/^(?:[0-9a-f]{2})+$/.test(hex) || hex.length > 4 + 2 * MAX_CID_BYTES) return null
 
   // ipfs-ns (0xe3) encoded as the varint `e301`.
   if (hex.startsWith('e301')) {

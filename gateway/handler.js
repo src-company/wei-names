@@ -9,6 +9,7 @@
 // Used by both worker.js (Cloudflare) and server.js (Node/Railway).
 
 import { computeId, contenthashOf, resolveAddress, resolveMode, WEB3_MODES } from './wns.js'
+import { namesFromPunycode } from './punycode.js'
 import { decodeContenthash } from './contenthash.js'
 import { fetchErc5219, fetchErc8244 } from './onchain.js'
 import { TtlCache, singleFlight, parseCacheControl } from './cache.js'
@@ -494,6 +495,8 @@ async function redirectRulesFor(root, resolved, { timeoutMs, now }) {
   return rules
 }
 
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308])
+
 function parseRedirects(text) {
   const rules = new Map()
   for (const line of text.split('\n')) {
@@ -504,10 +507,15 @@ function parseRedirects(text) {
     // Same-site absolute targets only. A rule pointing off-site, or climbing
     // out of the CID with `..`, is one this gateway will not carry out: it is
     // untrusted content asking to be handed somebody else's traffic.
-    if (!to.startsWith('/') || to.includes('..')) continue
+    // Exactly one leading slash (`//x` and `/\x` are protocol-relative to a
+    // browser), printable ASCII only (Location is a ByteString), and no dot
+    // segment in any spelling.
+    if (!/^\/(?![/\\])[\x21-\x7e]*$/.test(to) || /\.\.|%2e/i.test(to)) continue
     // Wildcards and placeholders are skipped rather than approximated.
     if (from.includes('*') || from.includes(':')) continue
-    if (!rules.has(from)) rules.set(from, { to, status: Number(status) || 200 })
+    const code = Number(status) || 200
+    if (!REDIRECT_STATUSES.has(code) && code !== 200 && code !== 404 && code !== 410) continue
+    if (!rules.has(from)) rules.set(from, { to, status: code })
   }
   return rules
 }
@@ -517,7 +525,7 @@ function parseRedirects(text) {
 // Returns null for a zone apex, or a host in none of the served zones.
 function labelFromHost(host, zones) {
   if (!host) return null
-  const h = host.toLowerCase().split(':')[0] // strip port
+  const h = host.toLowerCase().split(':')[0].replace(/\.$/, '') // strip port and a trailing dot
   for (const zone of zones) {
     const suffix = '.' + zone
     if (!h.endsWith(suffix)) continue
@@ -594,7 +602,7 @@ async function resolveTarget(sub, opts) {
   const direct = contentLabel(sub)
   if (direct) return { resolved: direct }
 
-  const tokenId = await computeId(sub, opts)
+  const tokenId = await computeId(namesFromPunycode(sub), opts)
   if (tokenId === 0n) return { resolved: null }
 
   // Address record and contenthash in parallel (one round-trip); the contract
@@ -639,8 +647,9 @@ export async function handleRequest(request, env, { clientIp = 'unknown' } = {})
     })
   }
 
-  const host =
-    request.headers.get('x-forwarded-host') || request.headers.get('host') || url.hostname
+  // The host the request was routed on. On the Worker x-forwarded-host is
+  // client-controlled; server.js already folds its proxy's header into the URL.
+  const host = url.hostname
   const match = labelFromHost(host, zones)
   if (!match) {
     // Apex or unexpected host — send people to the WNS site.
@@ -661,7 +670,8 @@ export async function handleRequest(request, env, { clientIp = 'unknown' } = {})
   // Depth guard, before any RPC — see MAX_SUB_LABELS. Depth 2 always resolves
   // (the chain decides whether `02.zswap.wei` exists); depth 3+ never can, so
   // it is refused for free rather than costing three `eth_call`s per probe.
-  if (sub.split('.').length > MAX_SUB_LABELS) {
+  const labels = sub.split('.')
+  if (labels.length > MAX_SUB_LABELS) {
     return new Response(
       `No such host: ${sub}.${zone}\n` +
         `A wildcard certificate covers one label, so this name cannot be reached over TLS.\n`,
@@ -671,6 +681,15 @@ export async function handleRequest(request, env, { clientIp = 'unknown' } = {})
       // outlived its own cause. An error a client can pin is a liability.
       { status: 404, headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' } },
     )
+  }
+
+  // Only what a browser can put in Host. An empty label reverts computeId, and a
+  // forged host must not cost an eth_call.
+  if (labels.some((l) => !/^[a-z0-9_-]{1,63}$/.test(l))) {
+    return new Response('Not Found\n', {
+      status: 404,
+      headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' },
+    })
   }
 
   const rpc = String(readEnv(env, 'RPC_URLS', '')).split(',').map((s) => s.trim()).filter(Boolean)
@@ -728,7 +747,14 @@ export async function handleRequest(request, env, { clientIp = 'unknown' } = {})
       // a name gets in the seconds BEFORE its owner sets a contenthash. Letting
       // a browser pin it defeats the whole premise that a freshly registered
       // name resolves instantly with no DNS write.
-      { status: 404, headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' } },
+      {
+        status: 404,
+        headers: {
+          'content-type': 'text/plain; charset=utf-8',
+          'cache-control': 'no-store',
+          'x-content-type-options': 'nosniff',
+        },
+      },
     )
   }
 
@@ -899,8 +925,12 @@ export async function handleRequest(request, env, { clientIp = 'unknown' } = {})
     // A held body is only correct where the id is content-addressed, so this is
     // `ipfs` and GET only — see the proxyCache note above for why `ipns` is
     // excluded. HEAD shares the key with nothing: it has no body to store.
+    const accept = request.headers.get('accept') || '*/*'
+    // Trustless-gateway formats (raw blocks, CAR, tar, dag-json) are chosen by
+    // Accept, which is not in the key — those are fetched but never shared.
+    const negotiated = /application\/(vnd\.ipld\.|x-tar|json|cbor)/i.test(accept)
     const proxyKey =
-      resolved.kind === 'ipfs' && request.method === 'GET'
+      resolved.kind === 'ipfs' && request.method === 'GET' && !negotiated
         ? `${resolved.id}|${url.pathname}${ipfsQuery(url.search)}`
         : null
     if (proxyKey) {
@@ -952,7 +982,6 @@ export async function handleRequest(request, env, { clientIp = 'unknown' } = {})
       Number(readEnv(env, 'PROXY_TIMEOUT_MS', PROXY_TIMEOUT_MS)) || PROXY_TIMEOUT_MS
     // Try the ones that were working most recently first; see byHealth.
     const attempts = byHealth(targets, now)
-    const discard = cancelBody
     for (let i = 0; i < attempts.length; i++) {
       const candidate = attempts[i]
       let res
@@ -965,7 +994,7 @@ export async function handleRequest(request, env, { clientIp = 'unknown' } = {})
         try {
           res = await fetch(candidate.url, {
             method: request.method,
-            headers: { accept: request.headers.get('accept') || '*/*' },
+            headers: { accept },
             signal: controller.signal,
           })
         } finally {
@@ -986,7 +1015,7 @@ export async function handleRequest(request, env, { clientIp = 'unknown' } = {})
       if (shouldFailover(res.status)) {
         benchUpstream(candidate.host)
         if (i < attempts.length - 1) {
-          if (rejected) discard(rejected)
+          if (rejected) cancelBody(rejected)
           rejected = res
           servedBy = candidate
           continue
@@ -1010,7 +1039,7 @@ export async function handleRequest(request, env, { clientIp = 'unknown' } = {})
         return upstreamError(lastError, 'fetching ' + attempts[attempts.length - 1].url)
       }
     }
-    if (rejected) discard(rejected)
+    if (rejected) cancelBody(rejected)
 
     // A path gateway applies none of the site's routing, so a link that the
     // site declares in `_redirects` arrives here as a 404. Consult the rules
@@ -1020,11 +1049,7 @@ export async function handleRequest(request, env, { clientIp = 'unknown' } = {})
     //
     // Only path targets (`servedBy.root`) reach this. A subdomain gateway
     // already applied the rules, so a 404 from one is final.
-    if (
-      upstream.status === 404 &&
-      servedBy?.root &&
-      (request.method === 'GET' || request.method === 'HEAD')
-    ) {
+    if (upstream.status === 404 && servedBy?.root) {
       const rules = await redirectRulesFor(servedBy.root, resolved, {
         timeoutMs: proxyTimeoutMs,
         now: Date.now(),
@@ -1032,8 +1057,8 @@ export async function handleRequest(request, env, { clientIp = 'unknown' } = {})
       // A rule pointing at the path it was reached by would just 404 again.
       const rule = rules.get(url.pathname)
       if (rule && rule.to !== url.pathname) {
-        if (rule.status === 301 || rule.status === 302) {
-          discard(upstream)
+        if (REDIRECT_STATUSES.has(rule.status)) {
+          cancelBody(upstream)
           done(null)
           // `to` is same-site and absolute (parseRedirects enforces both), so
           // this stays on <label>.<zone> and comes back through this gateway.
@@ -1055,17 +1080,21 @@ export async function handleRequest(request, env, { clientIp = 'unknown' } = {})
         try {
           rewritten = await proxyFetch(`${servedBy.root}${rule.to}${ipfsQuery(url.search)}`, {
             method: request.method,
-            accept: request.headers.get('accept') || '*/*',
+            accept,
             timeoutMs: proxyTimeoutMs,
           })
         } catch {}
         // Only a working rewrite replaces the 404; a broken rule leaves the
         // honest answer in place rather than inventing a worse one.
         if (rewritten && rewritten.ok) {
-          discard(upstream)
-          upstream = rewritten
+          cancelBody(upstream)
+          // A 404/410 rule serves its page with the rule's status, never as a
+          // cacheable 200
+          upstream = rule.status === 200
+            ? rewritten
+            : new Response(rewritten.body, { status: rule.status, headers: rewritten.headers })
         } else if (rewritten) {
-          discard(rewritten)
+          cancelBody(rewritten)
         }
       }
     }
@@ -1093,6 +1122,7 @@ export async function handleRequest(request, env, { clientIp = 'unknown' } = {})
     headers.set('cache-control', upstream.ok ? 'public, max-age=300' : 'no-store')
     // Defense-in-depth for untrusted content executing on this origin.
     headers.set('x-content-type-options', 'nosniff')
+    headers.set('vary', 'accept')
     headers.set('x-wns-name', sub)
     headers.set('x-wns-mode', resolved.kind)
     headers.set(idHeader[0], idHeader[1])

@@ -60,9 +60,10 @@ rather than silently testing nothing.
   and `server.js`. `handler.js` takes a Web `Request` and returns a `Response`.
 - **The `ZONE` env var and the `render.yaml` `domains:` list must agree** — a
   zone only resolves if it's both served by the handler and has a wildcard cert.
-  Same for `SUBDOMAIN_PARENTS` and the `*.<parent>.<zone>` entries: a parent not
-  listed there 404s before any RPC, which is deliberate (a `Host` header is free
-  to forge, so unreachable hosts must not cost `eth_calls`).
+  `<x>.<parent>.<zone>` also needs a `*.<parent>.<zone>` entry there; the chain,
+  not config, decides which parents exist (`SUBDOMAIN_PARENTS` is gone). A
+  `Host` header is free to forge, so malformed or too-deep hosts 404 before
+  any RPC and must never cost `eth_calls`.
 - **Never cache a contract page longer than its own `Cache-Control`.** The
   contract decides, not the gateway, and an expired entry is never a fallback
   when RPC fails — that stays a `502`. See `cache.js`.

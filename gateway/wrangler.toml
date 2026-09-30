@@ -12,7 +12,8 @@ routes = [
 ]
 
 [vars]
-# Zones served (comma-separated). Matches the default in handler.js.
+# Zones served (comma-separated). The handler default also serves wei.domains,
+# which runs on Render, not this Worker.
 ZONE = "wei.limo,wei.is"
 # 'redirect' (default, bandwidth-light) or 'proxy' (keeps <name>.<zone> in the
 # URL bar but streams content through the Worker).
@@ -36,6 +37,6 @@ IPFS_SUBDOMAIN_GATEWAY = "dweb.link"
 # that is going away and so was never a fallback from it.
 # IPFS_PATH_GATEWAY = "https://ipfs.example.org"
 # Comma-separated. Leave unset to use the built-in public RPC fallback list.
-# RPC_URLS = "https://eth.llamarpc.com,https://ethereum.publicnode.com"
+# RPC_URLS = "https://ethereum-rpc.publicnode.com,https://eth.drpc.org"
 # Extra reserved labels beyond the built-in set (www,api,zfi,multisig,...).
 # RESERVED_LABELS = "srcco,docs"

@@ -168,7 +168,7 @@ function decodeBytes(data) {
   if (!data || data === '0x' || data.length < 130) return null
   const hex = data.slice(2)
   const length = Number.parseInt(hex.slice(64, 128), 16)
-  if (!length) return null
+  if (!length || hex.length < 128 + 2 * length) return null
   return `0x${hex.slice(128, 128 + 2 * length)}`
 }
 
@@ -216,7 +216,7 @@ export async function ethCall(data, opts) {
       try {
         const controller = new AbortController()
         const timer = setTimeout(() => controller.abort(), timeoutMs)
-        let res
+        let res, json
         try {
           res = await fetch(url, {
             method: 'POST',
@@ -224,6 +224,10 @@ export async function ethCall(data, opts) {
             body,
             signal: controller.signal,
           })
+          // Read the body under the same timer: a node that sends headers and
+          // then stalls must not hold an inflight slot forever.
+          if (res.ok) json = await res.json()
+          else res.body?.cancel().catch(() => {})
         } finally {
           clearTimeout(timer)
         }
@@ -233,8 +237,7 @@ export async function ethCall(data, opts) {
           lastErr = new Error(`rpc http ${res.status}`)
           continue
         }
-        const json = await res.json()
-        if (json.error) {
+        if (json?.error) {
           // The node answered — the call itself failed (a revert, a rate limit,
           // an unsupported method). Still worth trying the next endpoint, but
           // tag it: callers probing for an optional function need to tell "this
@@ -243,10 +246,18 @@ export async function ethCall(data, opts) {
           if (isRateLimited(message)) unhealthyUntil.set(url, Date.now() + COOLDOWN_MS)
           lastErr = new Error(message)
           lastErr.rpcError = true
+          // A revert is deterministic: every other node would say the same
+          if (json.error?.code === 3 || /revert/i.test(message)) break
+          continue
+        }
+        // A reply with no hex result is a broken node, not an empty answer
+        if (typeof json?.result !== 'string' || !/^0x(?:[0-9a-fA-F]{2})*$/.test(json.result)) {
+          unhealthyUntil.set(url, Date.now() + COOLDOWN_MS)
+          lastErr = new Error('rpc: malformed result')
           continue
         }
         unhealthyUntil.delete(url)
-        return json.result ?? '0x'
+        return json.result
       } catch (e) {
         // Timeout or transport failure: the endpoint itself is the problem.
         unhealthyUntil.set(url, Date.now() + COOLDOWN_MS)
@@ -289,14 +300,16 @@ export async function resolveAddress(tokenId, opts) {
 }
 
 // ERC-4804 resolveMode() of a contract, as a trimmed ASCII tag ('' if the
-// address has no code, doesn't implement it, or reverts). Never throws for a
-// non-web3 address: a reverting call just means "not an on-chain dapp".
+// address has no code, doesn't implement it, or reverts). A revert just means
+// "not an on-chain dapp"; a transport failure throws, so it becomes a 502
+// rather than a cached "not a page".
 export async function resolveMode(address, opts) {
   try {
     const res = await ethCall(RESOLVE_MODE, { ...opts, contract: address })
     return decodeBytes32Ascii(res)
-  } catch {
-    return ''
+  } catch (e) {
+    if (e?.rpcError && /revert|invalid opcode|out of gas|execution/i.test(e.message || '')) return ''
+    throw e
   }
 }
 

@@ -9,7 +9,7 @@
 // TRUSTED_PROXY_CIDRS (only networks of proxies that sanitize/append XFF).
 
 import { createServer } from 'node:http'
-import { Readable } from 'node:stream'
+import { Readable, pipeline } from 'node:stream'
 import { handleRequest } from './handler.js'
 import { createClientIdentity } from './client-ip.js'
 
@@ -19,7 +19,7 @@ const clientIdentity = createClientIdentity(process.env)
 const server = createServer(async (req, res) => {
   try {
     const host = req.headers['x-forwarded-host'] || req.headers.host || 'wei.limo'
-    const proto = req.headers['x-forwarded-proto'] || 'https'
+    const proto = req.headers['x-forwarded-proto'] === 'http' ? 'http' : 'https'
     const request = new Request(`${proto}://${host}${req.url}`, {
       method: req.method,
       headers: req.headers,
@@ -31,17 +31,27 @@ const server = createServer(async (req, res) => {
     response.headers.forEach((value, key) => res.setHeader(key, value))
 
     if (response.body) {
-      Readable.fromWeb(response.body).pipe(res)
+      // pipeline, not pipe: an upstream reset mid-body must not crash the
+      // process, and a client abort must cancel the upstream read.
+      pipeline(Readable.fromWeb(response.body), res, () => {})
     } else {
       res.end()
     }
   } catch (e) {
+    console.error('gateway error:', e)
+    if (res.headersSent) { res.destroy(); return }
     res.statusCode = 500
     res.setHeader('content-type', 'text/plain; charset=utf-8')
-    res.end('Gateway error: ' + (e?.message || 'unknown'))
+    res.end('Gateway error')
   }
 })
 
 server.listen(PORT, () => {
   console.log(`wei.limo gateway listening on :${PORT}`)
+})
+
+// Let in-flight requests finish on a redeploy
+process.on('SIGTERM', () => {
+  server.close(() => process.exit(0))
+  setTimeout(() => process.exit(0), 10_000).unref()
 })

@@ -36,8 +36,11 @@ const HTML = '0x33c34ac3' // html()
 // what a hostile one can make the gateway allocate. The real zSwap page is
 // ~214 KB, so 8 MB is roughly 40x headroom rather than a tight fit.
 export const MAX_BODY_BYTES = 8 * 1024 * 1024
-const MAX_HEADERS = 32
+const MAX_HEADERS = 64
 const MAX_HEADER_LEN = 200
+// Decode bound for one header string. Wider than MAX_HEADER_LEN so a long
+// header the whitelist would drop anyway (a CSP, say) can't 404 the page.
+const MAX_HEADER_DECODE_LEN = 16 * 1024
 
 // Longer than a registry lookup: a page read returns the whole document.
 const PAGE_TIMEOUT_MS = 15_000
@@ -185,8 +188,8 @@ export function decodeRequestReturn(hex) {
   const headers = []
   for (let i = 0; i < count; i++) {
     const elem = base + readWord(bytes, base + 32 * i, bytes.length)
-    const key = readStringAt(bytes, elem + readWord(bytes, elem, bytes.length), MAX_HEADER_LEN)
-    const value = readStringAt(bytes, elem + readWord(bytes, elem + 32, bytes.length), MAX_HEADER_LEN)
+    const key = readStringAt(bytes, elem + readWord(bytes, elem, bytes.length), MAX_HEADER_DECODE_LEN)
+    const value = readStringAt(bytes, elem + readWord(bytes, elem + 32, bytes.length), MAX_HEADER_DECODE_LEN)
     headers.push([key, value])
   }
   return { statusCode, body, headers }
