@@ -39,7 +39,7 @@ function liftConst(name) {
 
 // Tacit's kit, vendored unmodified. The pin is the SHA-256 Tacit publishes for it.
 const KIT_PATH = path.join(here, 'vendor/tacit-address-kit.js');
-const KIT_SHA256 = '9fa0fd22dade0bf266c604740c42579ba6536dbf5bdc3f09451f3194de169dc1';
+const KIT_SHA256 = 'e1829fb389053a815dd2e977c0f08e35fd1bdad6d960a9dbc9a66b51307fb4f0';
 // Imported from its bytes: the kit has no imports, and a data: URL is ESM on every
 // supported Node, where a bare .js file outside a "type": "module" package isn't (Node 20).
 const kit = await import('data:text/javascript;base64,' + fs.readFileSync(KIT_PATH).toString('base64'));
