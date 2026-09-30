@@ -137,6 +137,12 @@ services:
       # growing slice of each hour, and it stops entirely on 2026-09-21 UTC.
       # A one-entry list is that shutdown, inherited, for every .wei name at
       # once. Keep at least one entry here that is NOT part of that fleet.
+      #
+      # When every entry fails, or only a path gateway answers and it doesn't
+      # hold the CID (a NoFetch node 404s on anything unpinned), a page load is
+      # 302'd to IPFS_BROWSER_GATEWAY (default inbrowser.link, `off` to disable),
+      # which fetches and verifies in the visitor's browser. Subresources are
+      # never redirected; they get the upstream's own answer.
       - key: IPFS_SUBDOMAIN_GATEWAY
         value: dweb.link
       # Last-resort path gateways (`<origin>/ipfs/<cid>/<path>`), comma-

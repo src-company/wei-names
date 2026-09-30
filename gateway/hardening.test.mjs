@@ -62,5 +62,68 @@ reply = () => new Error('connect ECONNREFUSED')
   eq('resolveMode: an unreachable node throws (502), not ""', threw, true)
 }
 
+// --- ipfs fallbacks ------------------------------------------------------------
+// A CID label skips the registry, so these need no rpc.
+const CID = 'bafybeibj6lixxzqtsb45ysdjnupvqkufgdvzqbnvmhw2kf7cfkesy7r7d4'
+let upstream = () => new Response('', { status: 404 })
+const seen = []
+globalThis.fetch = async (u, init) => {
+  seen.push(String(u))
+  const r = upstream(new URL(String(u)), init)
+  if (r instanceof Error) throw r
+  return r
+}
+const page = (host, env, nav = true) =>
+  handleRequest(new Request('https://' + host, { headers: nav ? { 'sec-fetch-mode': 'navigate', accept: 'text/html' } : {} }),
+    { ZONE: 'wei.limo', RATE_LIMIT_RPS: 0, GATEWAY_MODE: 'proxy', ...env })
+
+{
+  // Subdomain fleet rate-limited, the pinning node doesn't hold it
+  upstream = (u) => new Response('', { status: u.host.endsWith('sub1.gw') ? 429 : 404 })
+  const env = { IPFS_SUBDOMAIN_GATEWAY: 'sub1.gw', IPFS_PATH_GATEWAY: 'https://pin1.gw' }
+  let res = await page(CID + '.wei.limo/', env)
+  eq('unpinned page load: sent to the browser gateway', res.status, 302)
+  eq('unpinned page load: at its own cid origin', res.headers.get('location'), `https://${CID}.ipfs.inbrowser.link/`)
+  eq('unpinned page load: says why', res.headers.get('x-wns-fallback'), 'not-pinned')
+  eq('unpinned page load: never cached', res.headers.get('cache-control'), 'no-store')
+  res = await page(CID + '.wei.limo/app.js', env, false)
+  eq('unpinned subresource: the upstream answer, no redirect', res.status, 404)
+}
+{
+  // The pinning node is tried first (the fleet is benched) and misses; the next one has it
+  upstream = (u) => new Response(u.host.endsWith('sub2.gw') ? 'bytes' : '', { status: u.host.endsWith('sub2.gw') ? 200 : 404 })
+  const env = { IPFS_SUBDOMAIN_GATEWAY: 'sub2.gw', IPFS_PATH_GATEWAY: 'https://pin2.gw' }
+  const first = upstream
+  upstream = (u) => (u.host.endsWith('sub2.gw') ? new Response('', { status: 429 }) : first(u))
+  await page(CID + '.wei.limo/x', env, false)   // benches sub2.gw
+  upstream = first
+  seen.length = 0
+  const res = await page(CID + '.wei.limo/x', env, false)
+  eq('path 404 is not final while others remain: asked next', res.status, 200)
+  eq('path 404 is not final: pin node first, then the subdomain gateway',
+    seen.map((u) => new URL(u).host.split('.').slice(-2).join('.')).join(','), 'pin2.gw,sub2.gw')
+}
+{
+  upstream = () => new TypeError('fetch failed')
+  const res = await page(CID + '.wei.limo/', { IPFS_SUBDOMAIN_GATEWAY: 'sub3.gw' })
+  eq('every upstream unreachable: page load goes to the browser gateway', res.headers.get('x-wns-fallback'), 'unreachable')
+}
+{
+  seen.length = 0
+  upstream = () => new Response('ok', { status: 200 })
+  await page(CID + '.wei.limo/', { IPFS_SUBDOMAIN_GATEWAY: 'inbrowser.link,sub4.gw' })
+  eq('proxy never fetches the browser gateway (it serves a loader page)',
+    seen.some((u) => u.includes('inbrowser.link')), false)
+}
+{
+  const res = await page(CID + '.wei.limo/docs?x=1', { GATEWAY_MODE: 'redirect', IPFS_SUBDOMAIN_GATEWAY: 'inbrowser.link' })
+  eq('redirect mode: the browser gateway is a plain subdomain target', res.headers.get('location'), `https://${CID}.ipfs.inbrowser.link/docs`)
+}
+{
+  upstream = () => new Response('', { status: 503 })
+  const res = await page(CID + '.wei.limo/off', { IPFS_BROWSER_GATEWAY: 'off', IPFS_SUBDOMAIN_GATEWAY: 'sub5.gw' })
+  eq('browser fallback can be switched off', res.status, 503)
+}
+
 console.log(`\n${pass} passed, ${fail} failed`)
 if (fail) process.exit(1)

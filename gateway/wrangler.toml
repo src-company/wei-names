@@ -27,7 +27,12 @@ GATEWAY_MODE = "redirect"
 # hour since 2026-09-01, gone entirely on 2026-09-21 UTC. In `redirect` mode
 # there is no failing over from that, so this Worker needs an entry here that
 # outlives the fleet, not a longer list of it.
-IPFS_SUBDOMAIN_GATEWAY = "dweb.link"
+#
+# inbrowser.link is a service-worker gateway: the visitor's browser fetches and
+# verifies the content itself, on a per-CID origin, so it depends on no single
+# HTTP gateway. In `proxy` mode it is never fetched (it returns a loader page);
+# it is the page-load fallback instead — see IPFS_BROWSER_GATEWAY.
+IPFS_SUBDOMAIN_GATEWAY = "inbrowser.link"
 # Last-resort path gateways (`<origin>/ipfs/<cid>/<path>`), comma-separated.
 # Only consulted in `proxy` mode, and only after every subdomain entry: a path
 # gateway serves all CIDs from one origin and applies none of the site's own

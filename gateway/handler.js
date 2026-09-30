@@ -401,12 +401,32 @@ function envList(env, key, fallback) {
 // holding the same CID will answer differently. A 404 is NOT in here — a
 // missing path is a fact about the content and every gateway agrees on it, so
 // retrying it upstream by upstream is latency spent to arrive at the same 404.
+// The exception is a path gateway's 404, which can mean "not pinned here";
+// the proxy loop handles that one separately.
 //
 // 429 is the one that matters today: the public gateway fleet is being retired
 // and answers 429 for a growing slice of each hour, so a name pinned and
 // reachable everywhere else still goes dark on a schedule.
 function shouldFailover(status) {
   return status === 429 || (status >= 500 && status <= 599)
+}
+
+// Last resort for IPFS/IPNS in proxy mode: a service-worker gateway that
+// fetches and verifies the content in the visitor's own browser, on its own
+// per-CID origin. It returns a loader page rather than the bytes, so it is only
+// ever a redirect target for a page load, never something this gateway fetches.
+const BROWSER_GATEWAY = 'inbrowser.link'
+
+function browserGateway(env) {
+  const v = String(readEnv(env, 'IPFS_BROWSER_GATEWAY', BROWSER_GATEWAY)).trim()
+  return v === 'off' ? '' : v
+}
+
+// A top-level page load, as opposed to a script, image or fetch() from a page.
+function isNavigation(request) {
+  const mode = request.headers.get('sec-fetch-mode')
+  if (mode) return mode === 'navigate'
+  return /text\/html/i.test(request.headers.get('accept') || '')
 }
 
 // --- `_redirects` on a path gateway -----------------------------------------
@@ -873,10 +893,14 @@ export async function handleRequest(request, env, { clientIp = 'unknown' } = {})
   } else {
     // Only the parameters the gateway honours reach it; see ipfsQuery.
     const query = ipfsQuery(url.search)
-    targets = envList(env, 'IPFS_SUBDOMAIN_GATEWAY', 'dweb.link').map((gw) => ({
-      host: gw,
-      url: `https://${resolved.id}.${resolved.kind}.${gw}${url.pathname}${query}`,
-    }))
+    const browserGw = browserGateway(env)
+    targets = envList(env, 'IPFS_SUBDOMAIN_GATEWAY', 'dweb.link')
+      // The browser gateway only works as a redirect; fetched, it is a loader page
+      .filter((gw) => mode !== 'proxy' || gw !== browserGw)
+      .map((gw) => ({
+        host: gw,
+        url: `https://${resolved.id}.${resolved.kind}.${gw}${url.pathname}${query}`,
+      }))
     // Path-gateway fallbacks (`<origin>/ipfs/<cid>/<path>`), proxy mode only.
     // Deliberately last and deliberately never used for a redirect: a path
     // gateway serves every CID from one origin, so it applies none of the
@@ -906,14 +930,34 @@ export async function handleRequest(request, env, { clientIp = 'unknown' } = {})
   }
   // An env var set to nothing but separators would otherwise leave no upstream
   // at all; fall back to the documented default rather than 502 every name.
+  if (!targets.length && resolved.kind === 'web3') {
+    targets = [{ host: 'w3link.io', url: `https://${resolved.address}.1.w3link.io${pathAndQuery}` }]
+  }
+  // IPFS/IPNS with nothing to fetch from: hand page loads to the browser gateway
+  const browserTarget = () => {
+    const gw = resolved.kind !== 'web3' && browserGateway(env)
+    return gw ? `https://${resolved.id}.${resolved.kind}.${gw}${url.pathname}${ipfsQuery(url.search)}` : null
+  }
+  const toBrowser = (why) =>
+    new Response(null, {
+      status: 302,
+      headers: {
+        location: browserTarget(),
+        'cache-control': 'no-store',
+        'x-wns-name': sub,
+        'x-wns-mode': resolved.kind,
+        'x-wns-upstream': browserGateway(env),
+        'x-wns-fallback': why,
+        [idHeader[0]]: idHeader[1],
+      },
+    })
   if (!targets.length) {
+    if (browserTarget() && (mode !== 'proxy' || isNavigation(request))) return toBrowser('no-upstream')
     targets = [
-      resolved.kind === 'web3'
-        ? { host: 'w3link.io', url: `https://${resolved.address}.1.w3link.io${pathAndQuery}` }
-        : {
-            host: 'dweb.link',
-            url: `https://${resolved.id}.${resolved.kind}.dweb.link${url.pathname}${ipfsQuery(url.search)}`,
-          },
+      {
+        host: 'dweb.link',
+        url: `https://${resolved.id}.${resolved.kind}.dweb.link${url.pathname}${ipfsQuery(url.search)}`,
+      },
     ]
   }
   const target = targets[0].url
@@ -978,6 +1022,10 @@ export async function handleRequest(request, env, { clientIp = 'unknown' } = {})
     let rejected = null
     let lastError = null
     let servedBy = targets[0]
+    // A path gateway's 404 may only mean "not pinned here" (a NoFetch node), so
+    // it is held while the rest of the list is asked, and served if nothing
+    // better turns up — the _redirects step below still gets to see it.
+    let pathMiss = null
     const proxyTimeoutMs =
       Number(readEnv(env, 'PROXY_TIMEOUT_MS', PROXY_TIMEOUT_MS)) || PROXY_TIMEOUT_MS
     // Try the ones that were working most recently first; see byHealth.
@@ -1012,6 +1060,11 @@ export async function handleRequest(request, env, { clientIp = 'unknown' } = {})
         if (e?.overloaded) break
         continue
       }
+      if (res.status === 404 && candidate.root && i < attempts.length - 1) {
+        if (pathMiss) cancelBody(pathMiss.res)
+        pathMiss = { res, candidate }
+        continue
+      }
       if (shouldFailover(res.status)) {
         benchUpstream(candidate.host)
         if (i < attempts.length - 1) {
@@ -1027,12 +1080,20 @@ export async function handleRequest(request, env, { clientIp = 'unknown' } = {})
       servedBy = candidate
       break
     }
+    if (pathMiss && (!upstream || shouldFailover(upstream.status))) {
+      if (upstream) cancelBody(upstream)
+      upstream = pathMiss.res
+      servedBy = pathMiss.candidate
+    } else if (pathMiss) {
+      cancelBody(pathMiss.res)
+    }
     if (!upstream) {
       if (rejected) {
         upstream = rejected
         rejected = null
       } else {
         done(null)
+        if (isNavigation(request) && browserTarget()) return toBrowser('unreachable')
         // An unreachable IPFS gateway is upstream trouble like any other; without
         // this it escaped handleRequest entirely and server.js turned it into a
         // bare 500 with no retry-after and no cache-control.
@@ -1097,6 +1158,19 @@ export async function handleRequest(request, env, { clientIp = 'unknown' } = {})
           cancelBody(rewritten)
         }
       }
+    }
+
+    // Every upstream failed, or the only answer is a path gateway that doesn't
+    // hold the content: a page load goes to the browser gateway rather than
+    // bricking the site behind an error.
+    if (
+      isNavigation(request) &&
+      browserTarget() &&
+      (shouldFailover(upstream.status) || (upstream.status === 404 && servedBy?.root))
+    ) {
+      cancelBody(upstream)
+      done(null)
+      return toBrowser(upstream.status === 404 ? 'not-pinned' : 'upstream-' + upstream.status)
     }
 
     // Forward only a safe subset. Never propagate Set-Cookie: upstream content
