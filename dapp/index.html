@@ -1124,7 +1124,8 @@ const REGISTRAR_ABI = [
   'function config(uint256 parentId) view returns (address controller, bool enabled, address feeToken, uint96 price, address gateToken, uint96 minGateBalance, address payout)',
   'function withdrawETH(address to)',
   'function ethBalance(address) view returns (uint256)',
-  'function escrowedController(uint256) view returns (address)'
+  'function escrowedController(uint256) view returns (address)',
+  'function register(uint256 parentId, string label) payable returns (uint256)'
 ];
 
 // Gateway for .wei websites - resolves name.wei.domains to IPFS contenthash
@@ -1250,13 +1251,18 @@ function providerFor(url) {
 //   localStorage.setItem('wns_rpc', 'https://my-node')
 // When set, these REPLACE the public list (used exclusively), so behaviour is
 // deterministic and a healthy private node isn't undercut by a flaky public one.
+// https anywhere; plain http only for a node on this machine
+function rpcUrlAllowed(u) {
+  return /^https:\/\//i.test(u) || /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/i.test(u);
+}
+
 function customRpcs() {
   const out = [];
   try {
     const ls = localStorage.getItem('wns_rpc');
     if (ls) out.push(...ls.split(','));
   } catch (e) {}
-  return out.map(s => s.trim()).filter(u => /^https?:\/\//i.test(u));
+  return out.map(s => s.trim()).filter(rpcUrlAllowed);
 }
 
 // Build the read provider. With one endpoint (an explicitly saved wns_rpc override)
@@ -1380,7 +1386,12 @@ async function testRpcUrl(url) {
   const p = new ethers.JsonRpcProvider(url, ethers.Network.from(1), { staticNetwork: true });
   try {
     return await Promise.race([
-      p.getBlockNumber(),
+      (async () => {
+        if (BigInt(await p.send('eth_chainId', [])) !== 1n) throw new Error('not mainnet');
+        const out = await p.call({ to: CONTRACT, data: iface.encodeFunctionData('getFee', [5]) });
+        if (!out || out === '0x') throw new Error('eth_call unsupported');
+        return p.getBlockNumber();
+      })(),
       new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 6000))
     ]);
   } finally {
@@ -1394,7 +1405,7 @@ async function saveRpcSettings() {
   const raw = $('rpcInput').value.trim();
   const msg = $('rpcTestMsg');
   if (!raw) { resetRpcSettings(); return; }
-  if (!/^https?:\/\//i.test(raw)) {
+  if (!rpcUrlAllowed(raw)) {
     msg.textContent = 'Enter a full https:// URL.';
     msg.className = 'rpc-test error';
     return;
@@ -1405,7 +1416,7 @@ async function saveRpcSettings() {
     const bn = await testRpcUrl(raw);
     localStorage.setItem('wns_rpc', raw);
     invalidateRpc(); // force re-init on the new endpoint
-    await getRpc();
+    getRpc().catch(() => {});
     msg.textContent = 'Connected ✓  (block ' + bn + ')';
     msg.className = 'rpc-test success';
     setTimeout(closeRpcSettings, 1000);
@@ -1500,6 +1511,7 @@ const MULTICALL3_ABI = [
 const iface = new ethers.Interface(ABI);
 const regIface = new ethers.Interface(REGISTRAR_ABI);
 const ownerOfIface = new ethers.Interface(['function ownerOf(uint256) view returns (address)']);
+const balIface = new ethers.Interface(['function balanceOf(address) view returns (uint256)']);
 const approvalIface = new ethers.Interface(['function isApprovedForAll(address owner, address operator) view returns (bool)']);
 const erc20BalNonceIface = new ethers.Interface([
   'function balanceOf(address) view returns (uint256)',
@@ -1596,7 +1608,7 @@ async function wcTransaction(txPromise, message = 'Confirm in your wallet app') 
   notif.id = 'wcNotif';
   notif.innerHTML = `
     <div style="position:fixed;top:0;left:0;right:0;background:#1a1a2e;color:#fff;padding:16px;text-align:center;z-index:10000;font-size:14px;">
-      <div style="margin-bottom:8px;">📱 ${message}</div>
+      <div style="margin-bottom:8px;">📱 ${escapeHtml(message)}</div>
       <div style="font-size:12px;opacity:0.7;">Open your wallet app to approve the transaction</div>
       ${_wcDeepLink ? `<a href="${escapeHtml(_wcDeepLink)}" style="display:inline-block;margin-top:8px;padding:8px 16px;background:#fff;color:#000;border-radius:0;text-decoration:none;">Open Wallet</a>` : ''}
     </div>
@@ -1692,11 +1704,7 @@ function normalizeLabel(label) {
 // Normalize a full name (can include dots for subdomains)
 // Returns null if invalid, otherwise returns normalized full name
 function normalizeFullName(input) {
-  let s = input.trim().toLowerCase();
-  if (!s) return null;
-
-  // Remove .wei suffix if present
-  if (s.endsWith('.wei')) s = s.slice(0, -4);
+  const s = topLevelLabel(input);
   if (!s) return null;
 
   // Split into labels and normalize each
@@ -1710,6 +1718,22 @@ function normalizeFullName(input) {
   }
 
   return normalized.join('.');
+}
+
+// Strip a trailing ".wei" (any case) from a typed top-level name
+function topLevelLabel(raw) {
+  return raw.trim().replace(/\.wei$/i, '');
+}
+
+// Warning banner for names ENSIP-15 rejects (lookalikes, invisible characters).
+// Checks every label, so it covers subdomains too.
+function nonStandardWarning(raw) {
+  const why = topLevelLabel(raw).split('.').map(getNormalizationError).find(Boolean);
+  return why
+    ? '<div style="padding:10px;background:var(--status-warning,#fff3cd);color:#7a4f00;margin-bottom:10px;font-size:12px;border-radius:4px;">⚠ Non-standard name — ENSIP-15 rejects it ('
+      + escapeHtml(why) + '). It can still be registered, but apps following ENSIP-15 won\'t resolve it, '
+      + 'and it is a different name from any it resembles.</div>'
+    : '';
 }
 
 // Check if input looks like a subdomain (has dots, not just .wei suffix)
@@ -1763,6 +1787,7 @@ let checkVersion = 0;
 
 function checkName() {
   clearTimeout(checkDebounce);
+  $('commitBtn').disabled = true;   // re-enabled once this input has been checked
   checkDebounce = setTimeout(() => doCheckName(), 350);
 }
 
@@ -2042,14 +2067,17 @@ async function doCheckName() {
       hideTermRow();
       commitBtn.style.display = 'none';
       hideManage();
+      updateHash('');
       return;
     }
 
     const thisVersion = ++checkVersion;
+    const warnHtml = nonStandardWarning(raw);
 
     try {
-      if (!readContract) await getRpc();
-      if (!readContract) {
+      const rpcOk = await getRpc().catch(() => null);
+      if (thisVersion !== checkVersion) return;
+      if (!rpcOk) {
         availEl.innerHTML = '<span class="taken">RPC unavailable</span>';
         availEl.classList.add('show');
         return;
@@ -2086,7 +2114,7 @@ async function doCheckName() {
       if (!owner) {
         if (_awaitingTx === fullName) return paintConfirming('subdomain', fullName);
         hideManage(); // available subdomain — clear any manage panel from a prior search
-        availEl.innerHTML = '<span class="available">' + escaped + '.wei is available</span>' +
+        availEl.innerHTML = warnHtml + '<span class="available">' + escaped + '.wei is available</span>' +
           '<div class="view-link"><a href="#" onclick="copyShareLink();return false;">Copy link →</a></div>';
 
         try {
@@ -2167,7 +2195,7 @@ async function doCheckName() {
         }
       } else {
         const osLink = `https://opensea.io/assets/ethereum/${CONTRACT}/${tokenId}`;
-        availEl.innerHTML = '<span class="taken">' + escaped + '.wei exists</span>' +
+        availEl.innerHTML = warnHtml + '<span class="taken">' + escaped + '.wei exists</span>' +
           '<div class="view-link"><a href="' + osLink + '" target="_blank" rel="noopener">View on OpenSea →</a> · <a href="#" onclick="copyShareLink();return false;">Copy link →</a></div>';
         feeEl.textContent = '';
         hideTermRow();
@@ -2198,8 +2226,7 @@ async function doCheckName() {
   // route, so "vitalik.wei" correctly lands here — but the raw input was then handed
   // to normalizeLabel(), which rejects anything containing a dot. Typing or pasting
   // a name the way it is written everywhere else in the app answered "Invalid name".
-  let rawLabel = raw.trim();
-  if (rawLabel.toLowerCase().endsWith('.wei')) rawLabel = rawLabel.slice(0, -4);
+  const rawLabel = topLevelLabel(raw);
   const name = normalizeLabel(rawLabel);
 
   if (!name) {
@@ -2225,20 +2252,15 @@ async function doCheckName() {
   // Don't block — these are legitimately registerable, and refusing to display them
   // would stop a victim looking up the very name spoofing them. Just never let one
   // pass unremarked, on the available side or the taken one.
-  const nonStandard = getNormalizationError(rawLabel);
-  const warnHtml = nonStandard
-    ? '<div style="padding:10px;background:var(--status-warning,#fff3cd);color:#7a4f00;margin-bottom:10px;font-size:12px;border-radius:4px;">⚠ Non-standard name — ENSIP-15 rejects it ('
-      + escapeHtml(nonStandard) + '). It can still be registered, but apps following ENSIP-15 won\'t resolve it, '
-      + 'and it is a different name from any it resembles.</div>'
-    : '';
+  const warnHtml = nonStandardWarning(rawLabel);
 
   // Track this request version to ignore stale responses
   const thisVersion = ++checkVersion;
 
   try {
-    // Use read contract (public RPC) - no wallet needed
-    if (!readContract) await getRpc();
-    if (!readContract) {
+    const rpcOk = await getRpc().catch(() => null);
+    if (thisVersion !== checkVersion) return;
+    if (!rpcOk) {
       availEl.innerHTML = '<span class="taken">RPC unavailable</span>';
       availEl.classList.add('show');
       return;
@@ -2343,9 +2365,9 @@ let _refreshToken = 0;
 // settled(verdict) receives doCheckName()'s verdict and returns true once it is the
 // post-tx one. Fire-and-forget — it terminates on its own.
 async function refreshAfterTx(name, settled, receipt, { tries = 10, delayMs = 1500 } = {}) {
+  if (!name || normalizeFullName($('nameInput').value) !== name) return false;
   const token = ++_refreshToken;
   const alive = () => token === _refreshToken && normalizeFullName($('nameInput').value) === name;
-  if (!name || !alive()) return false;
 
   _awaitingTx = name;
   let ok = false;
@@ -2437,7 +2459,7 @@ const subNameRegistered = v => v.kind === 'subdomain' && v.exists && v.managed;
 const panelRepainted = v => !!v.managed;
 
 async function doCommit() {
-  const name = normalizeLabel($('nameInput').value);
+  const name = normalizeLabel(topLevelLabel($('nameInput').value));
   if (!name) return;
   // Not connected: open the wallet picker instead of dead-ending on a disabled
   // button. doCheckName re-runs on connect and re-enables the real Commit action.
@@ -2503,7 +2525,7 @@ async function doCommit() {
       // Keep a handle on the wait so a post-timeout rejection is swallowed here:
       // once the timeout wins the race, nothing is listening to it and it would
       // surface as an unhandled rejection. The pending-poller takes over regardless.
-      const waiting = waitForTx(tx).then(() => { confirmed = true; });
+      const waiting = waitForTx(tx, 55000).then(() => { confirmed = true; });
       waiting.catch(() => {});
       await Promise.race([
         waiting,
@@ -2678,62 +2700,68 @@ async function doRevealSelected() {
   }
 }
 
+// Checks shared by every reveal path. Returns { terms, total } or null after
+// saying why. Age is measured from the on-chain commit time when it can be read.
+async function revealPreflight(pending) {
+  if (pending.owner && _connectedAddress &&
+      pending.owner.toLowerCase() !== _connectedAddress.toLowerCase()) {
+    showStatus(`Connect the wallet used to commit: ${pending.owner.slice(0,6)}...${pending.owner.slice(-4)}`, 'error');
+    return null;
+  }
+  if (pending.confirmed === false) {
+    showStatus('Commitment not yet confirmed. Please wait.', 'error');
+    return null;
+  }
+  const terms = readPendingTerms(pending);
+  if (terms === null) {
+    showStatus('This commitment is unreadable. Cancel it and commit again.', 'error');
+    return null;
+  }
+
+  showStatus('Calculating fee...', '');
+  const calls = [
+    { fn: 'getFee', args: [byteLength(pending.name)] },
+    { fn: 'getPremium', args: [localComputeId(pending.name)] }
+  ];
+  if (pending.commitment) calls.push({ fn: 'commitments', args: [pending.commitment], allowFailure: true });
+  const r = await multicall(calls);
+  if (!r[0] || !r[1]) throw new Error('Failed to fetch fee data');
+
+  const chainTs = r[2] && r[2][0] ? Number(r[2][0]) : 0;
+  const elapsed = Math.floor(Date.now() / 1000) - (chainTs || pending.timestamp);
+  if (elapsed < MIN_COMMIT_AGE) {
+    showStatus('Wait ' + (MIN_COMMIT_AGE - elapsed) + ' more seconds', 'error');
+    return null;
+  }
+  if (elapsed > MAX_COMMIT_AGE) {
+    showStatus('Commitment expired. Please commit again.', 'error');
+    clearPending();
+    return null;
+  }
+
+  const total = termsTotal(r[0][0], r[1][0], terms);
+  // A fee raised between the commit and the reveal would otherwise be paid without comment,
+  // multiplied by the term count. Stop once, show the new price, and let a second press take it.
+  if (priceRose(pending.quotedWei, total)) {
+    pending.quotedWei = total.toString();
+    savePending(pending);
+    displayPending(pending);
+    showStatus('The price changed — ' + fmtEth(total, 6) + ' ETH for ' + terms +
+      (terms === 1 ? ' year' : ' years') + '. Press Register again to accept it.', 'error');
+    return null;
+  }
+  return { terms, total };
+}
+
 async function doReveal() {
   const pending = loadPending();
   if (!pending || !_signer) return;
 
   try {
-    // Verify same wallet that committed
-    if (pending.owner && _connectedAddress &&
-        pending.owner.toLowerCase() !== _connectedAddress.toLowerCase()) {
-      showStatus(`Connect the wallet used to commit: ${pending.owner.slice(0,6)}...${pending.owner.slice(-4)}`, 'error');
-      return;
-    }
-
-    // Verify commitment was confirmed on-chain
-    if (pending.confirmed === false) {
-      showStatus('Commitment not yet confirmed. Please wait.', 'error');
-      return;
-    }
-
-    const elapsed = Math.floor(Date.now() / 1000) - pending.timestamp;
-    if (elapsed < MIN_COMMIT_AGE) {
-      showStatus('Wait ' + (MIN_COMMIT_AGE - elapsed) + ' more seconds', 'error');
-      return;
-    }
-    if (elapsed > MAX_COMMIT_AGE) {
-      showStatus('Commitment expired. Please commit again.', 'error');
-      clearPending();
-      return;
-    }
-
-    showStatus('Calculating fee...', '');
-    // Compute tokenId locally to batch all reads into 1 RPC call
-    const tokenId = localComputeId(pending.name);
-    const results = await multicall([
-      { fn: 'getFee', args: [byteLength(pending.name)] },
-      { fn: 'getPremium', args: [tokenId] }
-    ]);
-    if (!results[0] || !results[1]) {
-      throw new Error('Failed to fetch fee data');
-    }
-    const terms = readPendingTerms(pending);
-    if (terms === null) {
-      showStatus('This commitment is unreadable. Cancel it and commit again.', 'error');
-      return;
-    }
-    const total = termsTotal(results[0][0], results[1][0], terms);
-
-    // A fee raised between the commit and the reveal would otherwise be paid without comment,
-    // multiplied by the term count. Stop once, show the new price, and let a second press take it.
-    if (priceRose(pending.quotedWei, total)) {
-      pending.quotedWei = total.toString();
-      savePending(pending);
-      displayPending(pending);
-      showStatus('The price changed — ' + fmtEth(total, 6) + ' ETH for ' + terms +
-        (terms === 1 ? ' year' : ' years') + '. Press Register again to accept it.', 'error');
-      return;
-    }
+    const pf = await revealPreflight(pending);
+    if (!pf) return;
+    const { terms, total } = pf;
+    const to = pending.owner || _connectedAddress;
 
     showStatus('Registering ' + pending.name + '.wei...', '');
     let tx;
@@ -2744,23 +2772,20 @@ async function doReveal() {
       // and using it directly leaves no way for the two to disagree.
       const helper = new ethers.Contract(WEI_TERMS, WEI_TERMS_ABI, _signer);
       tx = await wcTransaction(
-        helper.register(pending.name, pending.secret, pending.owner || _connectedAddress, terms,
+        helper.register(pending.name, pending.secret, to, terms,
           { value: total }),
         'Approve registration'
       );
     } else if (pending.commitOwner === ZROUTER) {
-      const rIface = new ethers.Interface([
-        'function revealName(string label, bytes32 secret, address to) returns (uint256)',
-        'function sweep(address token, uint256 id, uint256 amount, address to)',
-        'function multicall(bytes[] data) payable returns (bytes[])'
-      ]);
+      const rIface = new ethers.Interface(USDC_REVEAL.routerAbi);
       const router = new ethers.Contract(ZROUTER, rIface, _signer);
       tx = await wcTransaction(router.multicall([
-        rIface.encodeFunctionData('revealName', [pending.name, pending.secret, _connectedAddress]),
-        rIface.encodeFunctionData('sweep', [ethers.ZeroAddress, 0, 0, _connectedAddress])
+        rIface.encodeFunctionData('revealName', [pending.name, pending.secret, to]),
+        rIface.encodeFunctionData('sweep', [ethers.ZeroAddress, 0, 0, to])
       ], { value: total }), 'Approve registration');
     } else {
-      tx = await wcTransaction(contract.reveal(pending.name, pending.secret, { value: total }), 'Approve registration');
+      showStatus('This commitment is unreadable. Cancel it and commit again.', 'error');
+      return;
     }
     const txHash = tx.hash;
     // Persist the reveal tx so a reload mid-confirmation resumes polling instead
@@ -2831,37 +2856,10 @@ async function doRevealWithToken(tk) {
       return;
     }
 
-    if (pending.owner && _connectedAddress &&
-        pending.owner.toLowerCase() !== _connectedAddress.toLowerCase()) {
-      showStatus(`Connect the wallet used to commit: ${pending.owner.slice(0,6)}...${pending.owner.slice(-4)}`, 'error');
-      return;
-    }
-
-    if (pending.confirmed === false) {
-      showStatus('Commitment not yet confirmed. Please wait.', 'error');
-      return;
-    }
-
-    const elapsed = Math.floor(Date.now() / 1000) - pending.timestamp;
-    if (elapsed < MIN_COMMIT_AGE) {
-      showStatus('Wait ' + (MIN_COMMIT_AGE - elapsed) + ' more seconds', 'error');
-      return;
-    }
-    if (elapsed > MAX_COMMIT_AGE) {
-      showStatus('Commitment expired. Please commit again.', 'error');
-      clearPending();
-      return;
-    }
-
-    showStatus('Calculating fee...', '');
-
-    const tokenId = localComputeId(pending.name);
-    const feeResults = await multicall([
-      { fn: 'getFee', args: [byteLength(pending.name)] },
-      { fn: 'getPremium', args: [tokenId] }
-    ]);
-    if (!feeResults[0] || !feeResults[1]) throw new Error('Failed to fetch fee data');
-    const totalEth = feeResults[0][0] + feeResults[1][0];
+    const pf = await revealPreflight(pending);
+    if (!pf) return;
+    const totalEth = pf.total;
+    const to = pending.owner || _connectedAddress;
 
     showStatus(`Getting ${tk.name} price...`, '');
     const rpc = await getRpc();
@@ -2879,8 +2877,8 @@ async function doRevealWithToken(tk) {
     if (quote.best.amountIn === 0n) throw new Error(`Could not get ${tk.name} quote`);
 
     const [balRes, nonceRes] = await Promise.all([
-      rpc.call({ to: tk.addr, data: erc20BalNonceIface.encodeFunctionData('balanceOf', [_connectedAddress]) }),
-      rpc.call({ to: tk.addr, data: erc20BalNonceIface.encodeFunctionData('nonces', [_connectedAddress]) })
+      rpc.call({ to: tk.addr, data: erc20BalNonceIface.encodeFunctionData('balanceOf', [to]) }),
+      rpc.call({ to: tk.addr, data: erc20BalNonceIface.encodeFunctionData('nonces', [to]) })
     ]);
     const balance = erc20BalNonceIface.decodeFunctionResult('balanceOf', balRes)[0];
     const nonce = erc20BalNonceIface.decodeFunctionResult('nonces', nonceRes)[0];
@@ -2895,7 +2893,7 @@ async function doRevealWithToken(tk) {
 
     const sig = await wcTransaction(
       _signer.signTypedData(tk.permitDomain, tk.permitTypes,
-        tk.permitValue(_connectedAddress, maxAmount, nonce, deadline)),
+        tk.permitValue(to, maxAmount, nonce, deadline)),
       `Sign ${tk.name} permit in your wallet`
     );
 
@@ -2905,8 +2903,8 @@ async function doRevealWithToken(tk) {
 
     const routerIface = new ethers.Interface(tk.routerAbi);
     const permitCall = tk.encodePermit(routerIface, maxAmount, deadline, nonce, v, r, s);
-    const revealCall = routerIface.encodeFunctionData('revealName', [pending.name, pending.secret, _connectedAddress]);
-    const sweepCall = routerIface.encodeFunctionData('sweep', [ethers.ZeroAddress, 0, 0, _connectedAddress]);
+    const revealCall = routerIface.encodeFunctionData('revealName', [pending.name, pending.secret, to]);
+    const sweepCall = routerIface.encodeFunctionData('sweep', [ethers.ZeroAddress, 0, 0, to]);
 
     const router = new ethers.Contract(ZROUTER, routerIface, _signer);
     const tx = await wcTransaction(router.multicall([permitCall, quote.callData, revealCall, sweepCall]), `Approve ${tk.name} registration`);
@@ -2966,13 +2964,27 @@ function savePending(data) {
   }
 }
 
+const HASH32_RE = /^0x[0-9a-fA-F]{64}$/;
+
+// Storage is not trusted: drop entries that can't be a commitment, and any hash
+// field that isn't a 32-byte hex value (they end up in links and innerHTML).
+function sanePending(d) {
+  if (!d || typeof d !== 'object' || typeof d.name !== 'string' || !d.name ||
+      !Number.isFinite(Number(d.timestamp)) || !HASH32_RE.test(String(d.secret))) return null;
+  for (const k of ['txHash', 'revealTxHash', 'commitment']) {
+    if (d[k] != null && !HASH32_RE.test(String(d[k]))) delete d[k];
+  }
+  d.timestamp = Number(d.timestamp);
+  return d;
+}
+
 function loadPending() {
   const key = pendingKeyFor(_connectedAddress);
   if (key) {
     if (pendingCache && pendingCache.key === key) return pendingCache.data;
     try {
       const raw = localStorage.getItem(key);
-      const data = raw ? JSON.parse(raw) : null;
+      const data = raw ? sanePending(JSON.parse(raw)) : null;
       pendingCache = { key, data };
       return data;
     } catch (_) { return null; }
@@ -2984,7 +2996,8 @@ function loadPending() {
     for (let i = 0; i < localStorage.length; i++) {
       const k = localStorage.key(i);
       if (!k || k.indexOf(PENDING_PREFIX) !== 0) continue;
-      const d = JSON.parse(localStorage.getItem(k) || 'null');
+      let d = null;
+      try { d = sanePending(JSON.parse(localStorage.getItem(k) || 'null')); } catch (_) {}
       if (d && (!best || (d.timestamp || 0) > (best.timestamp || 0))) { best = d; bestKey = k; }
     }
     pendingCache = bestKey ? { key: bestKey, data: best } : null;
@@ -3040,10 +3053,7 @@ function clearPending() {
     if (key) localStorage.removeItem(key);
     localStorage.removeItem(STORAGE_KEY); // legacy slot, just in case
   } catch (e) {}
-  $('pending').classList.remove('show');
-  const oldBtn = $('manualCheckBtn'); if (oldBtn) oldBtn.remove();
-  pendingTimerId++; // Invalidate any running timer callbacks
-  if (pendingTimeoutId) { clearTimeout(pendingTimeoutId); pendingTimeoutId = null; }
+  hidePendingPanel();
   // Re-enable commit if there was a name entered
   if ($('nameInput').value.trim() && contract) doCheckName();
 }
@@ -3117,6 +3127,11 @@ async function updateTimer(timerId) {
     timerEl.innerHTML = spinnerSVG(13) + 'Registering — confirming… <a href="' + esLink +
       '" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;">Check Etherscan</a>';
     revealBtn.disabled = true;
+    if (isRevealing) {   // the reveal flow is awaiting this receipt itself
+      if (pendingTimeoutId) clearTimeout(pendingTimeoutId);
+      pendingTimeoutId = setTimeout(() => updateTimer(timerId), 2000);
+      return;
+    }
     pending._revealPolls = (pending._revealPolls || 0) + 1;
     try {
       const receipt = await withRpc(p => p.getTransactionReceipt(pending.revealTxHash));
@@ -3160,15 +3175,14 @@ async function updateTimer(timerId) {
     if (!pending._pollAttempts) pending._pollAttempts = 0;
 
     // If we have a txHash and have been waiting >15s, poll for receipt
-    if (pending.txHash && elapsed > 15) {
+    if ((pending.txHash || pending.commitment) && elapsed > 15) {
       pending._pollAttempts++;
 
       // Show an actionable fallback (Etherscan link + retry) instead of
       // spinning "Waiting for confirmation..." forever.
       const showVerifyFallback = (lead) => {
-        const esLink = `https://etherscan.io/tx/${pending.txHash}`;
-        timerEl.innerHTML = escapeHtml(lead) + ' <a href="' + esLink +
-          '" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;">Check Etherscan</a>';
+        timerEl.innerHTML = escapeHtml(lead) + (pending.txHash ? ' <a href="https://etherscan.io/tx/' + pending.txHash +
+          '" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;">Check Etherscan</a>' : '');
         if (!$('manualCheckBtn')) {
           const btn = document.createElement('button');
           btn.id = 'manualCheckBtn';
@@ -3187,9 +3201,10 @@ async function updateTimer(timerId) {
         }
       };
 
-      const markCommitConfirmed = () => {
+      // ts: the on-chain commit time when known; the reveal window runs from it
+      const markCommitConfirmed = (ts) => {
         pending.confirmed = true;
-        pending.timestamp = Math.floor(Date.now() / 1000);
+        pending.timestamp = ts ? Number(ts) : Math.floor(Date.now() / 1000);
         delete pending._pollAttempts;
         delete pending._pollErrors;
         savePending(pending);
@@ -3203,29 +3218,32 @@ async function updateTimer(timerId) {
       // null = couldn't ask. Never conflate that with a real "no commitment":
       // the only caller that acts destructively (clearPending below) must not
       // delete a paid-for secret because an RPC happened to be rate-limited.
+      // Returns the commit timestamp (0n if absent), or null if it couldn't ask.
       const commitLandedOnchain = async () => {
-        if (!pending.commitment) return false;
+        if (!pending.commitment) return 0n;
         try {
-          const ts = await withRpc(p => new ethers.Contract(CONTRACT, ABI, p).commitments(pending.commitment));
-          return !!ts && ts !== 0n;
+          return (await withRpc(p => new ethers.Contract(CONTRACT, ABI, p).commitments(pending.commitment))) || 0n;
         } catch (_) { return null; }
       };
 
+      let landedTs;
       try {
-        const receipt = await withRpc(p => p.getTransactionReceipt(pending.txHash));
+        const receipt = pending.txHash ? await withRpc(p => p.getTransactionReceipt(pending.txHash)) : null;
         // Bail if the commitment was cleared/restarted while we awaited the RPC,
         // otherwise savePending() below would resurrect the dead commitment.
         if (timerId !== pendingTimerId) return;
         pending._pollErrors = 0; // RPC answered — reset the error streak
         if (receipt && receipt.status === 1) {
-          markCommitConfirmed();
+          const ts = await commitLandedOnchain();
+          if (timerId !== pendingTimerId) return;
+          markCommitConfirmed(ts);
         } else if (receipt && receipt.status === 0) {
           // The mined tx reverted — but only give up if no commitment exists
           // on-chain (a replacement tx could have committed successfully).
           const landed = await commitLandedOnchain();
           if (timerId !== pendingTimerId) return;
           if (landed) {
-            markCommitConfirmed();
+            markCommitConfirmed(landed);
           } else if (landed === null) {
             // Couldn't reach an RPC to check. Keep the secret and let the user retry.
             showVerifyFallback('Could not check whether the commitment landed.');
@@ -3235,10 +3253,10 @@ async function updateTimer(timerId) {
             clearPending();
             return;
           }
-        } else if (await commitLandedOnchain()) {
+        } else if ((landedTs = await commitLandedOnchain())) {
           // No receipt for our hash, but the commitment is on-chain (replaced tx).
           if (timerId !== pendingTimerId) return;
-          markCommitConfirmed();
+          markCommitConfirmed(landedTs);
         } else if (pending._pollAttempts >= 30) {
           // Mined txs index within seconds; this long with no receipt means
           // the RPC is behind or the tx never landed.
@@ -3279,13 +3297,15 @@ async function updateTimer(timerId) {
     // pendingTimerId (e.g. doRevealSelected's finally after a failed reveal) would
     // spawn a second self-sustaining setTimeout chain that never invalidates.
     if (pendingTimeoutId) clearTimeout(pendingTimeoutId);
-    pendingTimeoutId = setTimeout(() => updateTimer(timerId), 1000);
+    const delay = pending.confirmed === false && elapsed > 15 ? 4000 : 1000;
+    pendingTimeoutId = setTimeout(() => updateTimer(timerId), delay);
   }
 }
 
 // Pause/resume timer when tab visibility changes
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
+    pendingTimerId++;
     if (pendingTimeoutId) { clearTimeout(pendingTimeoutId); pendingTimeoutId = null; }
   } else {
     // Resume timer if there's a pending commitment. Bump the id first so any
@@ -3310,7 +3330,7 @@ function showStatus(msg, type, txHash) {
   // No success/error type => an in-progress step: lead with a spinner so the user
   // sees the tx is actively working rather than stalled.
   const lead = type ? '' : spinnerSVG();
-  if (txHash) {
+  if (txHash && /^0x[0-9a-fA-F]{64}$/.test(txHash)) {
     const link = `https://etherscan.io/tx/${txHash}`;
     el.innerHTML = lead + escapeHtml(msg) + ` <a href="${link}" target="_blank" rel="noopener" style="color:inherit;">View tx →</a>`;
   } else {
@@ -3509,7 +3529,7 @@ async function showManage(tokenId, name) {
         infoHtml += `<div><span>${label}:</span><a href="${escapeHtml(href)}" target="_blank" rel="noopener" style="color:inherit;">${escaped}</a></div>`;
       } else if (key === 'com.twitter') {
         const handle = val.startsWith('@') ? val : '@' + val;
-        infoHtml += `<div><span>${label}:</span><a href="https://x.com/${escapeHtml(val.replace('@',''))}" target="_blank" rel="noopener" style="color:inherit;">${escapeHtml(handle)}</a></div>`;
+        infoHtml += `<div><span>${label}:</span><a href="https://x.com/${escapeHtml(val.replace(/^@+/, ''))}" target="_blank" rel="noopener" style="color:inherit;">${escapeHtml(handle)}</a></div>`;
       } else if (key === TACIT_RECORD_KEY) {
         const short = val.length > 24 ? val.slice(0, 12) + '\u2026' + val.slice(-8) : val;
         infoHtml += `<div data-tacit-set><span>Tacit:</span><a href="https://tacit.finance" target="_blank" rel="noopener" title="Paid privately via Tacit" style="color:inherit;"><img src="${TACIT_LOGO}" alt="" width="12" height="12" style="vertical-align:-2px;margin-right:4px;opacity:0.85;"></a><span title="${escaped}" style="font-family:monospace;font-size:11px;opacity:1;text-transform:none;letter-spacing:0;margin:0;">${escapeHtml(short)}</span></div>`;
@@ -3720,7 +3740,7 @@ function normalizeRecipientName(input) {
 
 async function resolveRecipient(input) {
   // If it's already an address, return it
-  if (ethers.isAddress(input)) return { address: input, name: null };
+  if (ethers.isAddress(input)) return input.toLowerCase() === ethers.ZeroAddress ? null : { address: input, name: null };
 
   const normalized = normalizeRecipientName(input);
   if (!normalized) return null;
@@ -3743,42 +3763,38 @@ async function resolveRecipient(input) {
   }
 }
 
-let transferPreviewDebounce = null;
-let transferPreviewVersion = 0;
+// Live "name resolves to 0x…" hint under a recipient box. Every keystroke bumps the
+// version, so a slow lookup for an older value never paints under a newer one.
+const _recipientPreview = {};
 
-function previewTransferRecipient() {
-  const preview = $('transferPreview');
-  const input = $('transferTo').value.trim();
+function previewRecipient(inputId, previewId) {
+  const preview = $(previewId);
+  const input = $(inputId).value.trim();
+  const st = _recipientPreview[inputId] || (_recipientPreview[inputId] = { timer: null, version: 0 });
+  clearTimeout(st.timer);
+  const thisVersion = ++st.version;
 
-  // Clear preview if empty or already an address
   if (!input || ethers.isAddress(input)) {
     preview.style.display = 'none';
     return;
   }
 
-  // Show loading for .wei names
   preview.innerHTML = '<span style="opacity:0.5;">' + spinnerSVG(13) + 'Resolving…</span>';
   preview.style.display = 'block';
 
-  clearTimeout(transferPreviewDebounce);
-  transferPreviewDebounce = setTimeout(async () => {
-    const thisVersion = ++transferPreviewVersion;
-
+  st.timer = setTimeout(async () => {
     const result = await resolveRecipient(input);
-
-    // Ignore stale responses
-    if (thisVersion !== transferPreviewVersion) return;
-
+    if (thisVersion !== st.version) return;
     if (result && result.name) {
       const addrShort = result.address.slice(0, 10) + '...' + result.address.slice(-8);
-      preview.innerHTML = `<span style="opacity:0.6;">→ ${escapeHtml(result.name)} resolves to </span><a href="https://etherscan.io/address/${result.address}" target="_blank" rel="noopener" style="color:inherit;">${addrShort}</a>`;
-      preview.style.display = 'block';
+      preview.innerHTML = `<span style="opacity:0.6;">→ ${escapeHtml(result.name)} resolves to </span><a href="https://etherscan.io/address/${result.address}" target="_blank" rel="noopener noreferrer" style="color:inherit;">${addrShort}</a>`;
     } else {
       preview.innerHTML = '<span style="color:#c00;">Could not resolve name</span>';
-      preview.style.display = 'block';
     }
   }, 300);
 }
+
+function previewTransferRecipient() { previewRecipient('transferTo', 'transferPreview'); }
 
 async function doTransfer() {
   if (isProcessing || !contract || !currentTokenId) return;
@@ -4299,6 +4315,7 @@ function encodeContenthash(input) {
 
   let cidBytes;
 
+  if (/^BAF[A-Z2-7]+$/.test(cid)) cid = cid.toLowerCase();   // base32upper multibase
   if (cid.startsWith('Qm')) {
     // CIDv0 - base58 encoded multihash
     const multihash = base58Decode(cid);
@@ -4446,8 +4463,10 @@ async function doSubdomain() {
   if (isProcessing || !contract || !currentTokenId) return;
   const label = normalizeLabel($('subLabel').value);
   if (!label) { showStatus('Invalid subdomain label', 'error'); return; }
-  // Capture parent name before the tx so we can navigate into the new subdomain afterward
-  const parentName = currentTokenName;
+  // Capture the parent now; the user can navigate elsewhere while we await
+  const parentName = currentTokenName, parentId = currentTokenId;
+  isProcessing = true;
+  const btn = (typeof event !== 'undefined' && event?.target) || null; if (btn) btn.disabled = true;
 
   // _register does NOT revert on an existing subdomain: it bumps the epoch, burns the
   // current token, wipes its records and re-mints to the parent owner. So registering a
@@ -4457,18 +4476,22 @@ async function doSubdomain() {
     const subId = computeIdFull(label + '.' + parentName);
     const [held] = await aggregate3([{ target: CONTRACT, iface: ownerOfIface, fn: 'ownerOf', args: [subId] }]);
     const holder = held && held[0];
-    if (holder && _connectedAddress && holder.toLowerCase() !== _connectedAddress.toLowerCase()) {
-      if (!confirm(label + '.' + parentName + '.wei already exists and is held by\n' + holder +
-                   '\n\nRe-registering it as the parent burns their NFT, clears its records and ' +
-                   'mints it back to you. Continue?')) return;
+    if (holder) {
+      const mine = _connectedAddress && holder.toLowerCase() === _connectedAddress.toLowerCase();
+      if (!confirm(label + '.' + parentName + '.wei already exists' +
+                   (mine ? ' (you hold it)' : ' and is held by\n' + holder) +
+                   '\n\nRe-registering it burns the NFT, clears all its records (address, text, website) ' +
+                   'and mints it back to you. Continue?')) {
+        isProcessing = false;
+        if (btn) btn.disabled = false;
+        return;
+      }
     }
   } catch (_) { /* couldn't check — fall through; the tx itself is still valid */ }
 
-  isProcessing = true;
-  const btn = (typeof event !== 'undefined' && event?.target) || null; if (btn) btn.disabled = true;
   try {
     showStatus('Registering subdomain...', '');
-    const tx = await wcTransaction(contract.registerSubdomain(label, currentTokenId), 'Approve subdomain');
+    const tx = await wcTransaction(contract.registerSubdomain(label, parentId), 'Approve subdomain');
     showStatus('Waiting for confirmation...', '', tx.hash);
     const receipt = await waitForTx(tx);
     const fullName = label + '.' + parentName;
@@ -4526,20 +4549,15 @@ function previewSubSalesToken() {
       info.textContent = '';
       return;
     }
-    try {
-      const rpc = await getRpc();
-      const [decimals, symbol] = await Promise.all([
-        getTokenDecimals(addr, rpc),
-        getTokenSymbol(addr, rpc)
-      ]);
-      subSalesTokenDecimals = decimals;
-      subSalesTokenSymbol = symbol;
-      info.textContent = symbol + ' (' + decimals + ' decimals)';
-    } catch {
-      info.textContent = 'Could not read token info';
-      subSalesTokenDecimals = 18;
-      subSalesTokenSymbol = '';
-    }
+    const rpc = await getRpc();
+    let decimals = null, symbol = '';
+    try { decimals = await getTokenDecimals(addr, rpc); } catch {}
+    try { symbol = await getTokenSymbol(addr, rpc); } catch {}
+    if (addr !== $('subSalesToken')?.value.trim()) return;
+    subSalesTokenDecimals = decimals ?? 18;
+    subSalesTokenSymbol = symbol;
+    info.textContent = decimals == null ? 'Could not read token info'
+      : (symbol || 'Token') + ' (' + decimals + ' decimals)';
   }, 400);
 }
 
@@ -4583,18 +4601,15 @@ async function showSubSalesForm() {
       } else {
         currentFeeType = 'erc20';
         currentTokenAddr = cfgFeeToken;
-        try {
-          const rpc = await getRpc();
-          const [dec, sym] = await Promise.all([
-            getTokenDecimals(cfgFeeToken, rpc),
-            getTokenSymbol(cfgFeeToken, rpc)
-          ]);
-          subSalesTokenDecimals = dec;
-          subSalesTokenSymbol = sym;
-          currentPriceStr = cfgPrice > 0n ? ethers.formatUnits(cfgPrice, dec) : '';
-        } catch {
-          currentPriceStr = cfgPrice.toString();
-        }
+        // Read decimals and symbol separately: a bytes32-symbol token must not
+        // lose its decimals, and a raw base-unit price must never be pre-filled.
+        const rpc = await getRpc();
+        let dec = null, sym = '';
+        try { dec = await getTokenDecimals(cfgFeeToken, rpc); } catch {}
+        try { sym = await getTokenSymbol(cfgFeeToken, rpc); } catch {}
+        subSalesTokenDecimals = dec ?? 18;
+        subSalesTokenSymbol = sym;
+        currentPriceStr = (dec != null && cfgPrice > 0n) ? ethers.formatUnits(cfgPrice, dec) : '';
       }
       if (cfgPayout !== ethers.ZeroAddress && cfgPayout.toLowerCase() !== _connectedAddress.toLowerCase()) {
         currentPayoutStr = cfgPayout;
@@ -4693,6 +4708,11 @@ async function doConfigureSubSales() {
         const decimals = await getTokenDecimals(feeToken, rpc);
         price = ethers.parseUnits(priceStr, decimals);
       }
+    }
+
+    if (price >= (1n << 96n)) {
+      showStatus('Price too large', 'error');
+      return;
     }
 
     const payoutAddr = $('subSalesPayout')?.value.trim() || ethers.ZeroAddress;
@@ -4826,7 +4846,6 @@ async function gateSatisfied(gateToken, minGateBalance) {
   if (!gateToken || gateToken === ethers.ZeroAddress || !minGateBalance) return true;
   try {
     const rpc = await getRpc();
-    const balIface = new ethers.Interface(['function balanceOf(address) view returns (uint256)']);
     const res = await rpc.call({ to: gateToken, data: balIface.encodeFunctionData('balanceOf', [_connectedAddress]) });
     return balIface.decodeFunctionResult('balanceOf', res)[0] >= minGateBalance;
   } catch (e) {
@@ -4881,6 +4900,7 @@ function checkFreeLabel() {
 }
 
 async function doFreeMint() {
+  if (isProcessing) return;
   const label = normalizeLabel($('freeLabelInput').value);
   if (!label) {
     const reason = getNormalizationError($('freeLabelInput').value) || 'Invalid name';
@@ -4890,6 +4910,7 @@ async function doFreeMint() {
 
   const btn = $('freeMintBtn');
   btn.disabled = true;
+  isProcessing = true;
 
   try {
     // Ensure wallet
@@ -4942,12 +4963,10 @@ async function doFreeMint() {
       return;
     }
 
-    // Check availability
-    const subFullName = label + '.id.wei';
-    const tokenId = computeIdFull(subFullName);
-    let owner = null;
-    try { owner = await readContract.ownerOf(tokenId); } catch (e) {}
-    if (owner) {
+    // Same check the registrar makes (a stale subdomain still has an owner but is available)
+    let avail = true;
+    try { avail = await readContract.isAvailable(label, ID_WEI_PARENT); } catch (_) {}
+    if (!avail) {
       showFreeStatus(label + '.id.wei is already taken', 'error');
       btn.disabled = false;
       return;
@@ -4955,9 +4974,7 @@ async function doFreeMint() {
 
     // Mint
     showFreeStatus('Minting ' + label + '.id.wei...', '');
-    const registrar = new ethers.Contract(SUBDOMAIN_REGISTRAR, [
-      'function register(uint256 parentId, string label) payable returns (uint256)'
-    ], _signer);
+    const registrar = new ethers.Contract(SUBDOMAIN_REGISTRAR, REGISTRAR_ABI, _signer);
     const tx = await wcTransaction(
       registrar.register(ID_WEI_PARENT, label, { value: 0n }),
       'Approve mint'
@@ -4976,6 +4993,7 @@ async function doFreeMint() {
       showFreeStatus(msg || 'Mint failed', 'error');
     }
   } finally {
+    isProcessing = false;
     btn.disabled = false;
   }
 }
@@ -4986,35 +5004,31 @@ async function doMintSubdomain() {
   // where this button lives — the new one arrives enabled, so a second click could
   // submit a second paid mint for a name the first is already buying.
   if (isProcessing || !_signer || !pendingMintInfo) return;
-  const { parentId, subLabel, feeToken, price, symbol, gateToken, minGateBalance } = pendingMintInfo;
+  const info = pendingMintInfo;
+  const { parentId, subLabel, parentName, feeToken, price, symbol, gateToken, minGateBalance } = info;
   isProcessing = true;
   const btn = (typeof event !== 'undefined' && event?.target) || null; if (btn) btn.disabled = true;
 
   try {
-    // Check if subdomain is already taken
-    if (readContract && pendingMintInfo.parentName) {
-      try {
-        const tokenId = computeIdFull(subLabel + '.' + pendingMintInfo.parentName);
-        const owner = await readContract.ownerOf(tokenId);
-        if (owner) {
-          showStatus(subLabel + '.' + pendingMintInfo.parentName + '.wei is already taken', 'error');
-          if (btn) btn.disabled = false;
-          return;
-        }
-      } catch (e) { /* ownerOf reverts if not minted — name is available */ }
+    // Same check the registrar makes (a stale subdomain still has an owner but is available)
+    if (readContract) {
+      let avail = true;
+      try { avail = await readContract.isAvailable(subLabel, parentId); } catch (_) {}
+      if (!avail) {
+        showStatus(subLabel + '.' + parentName + '.wei is already taken', 'error');
+        return;
+      }
     }
 
     // Bail before spending gas if the seller revoked the registrar's approval.
     if (!(await registrarFlashApproved(parentId))) {
       showStatus("This name's owner hasn't approved the registrar — minting is temporarily unavailable", 'error');
-      if (btn) btn.disabled = false;
       return;
     }
 
     // Same, for the optional token gate the seller can put on the sale.
     if (!(await gateSatisfied(gateToken, minGateBalance))) {
       showStatus('This name is token-gated — your wallet doesn\'t hold enough of the required token to mint', 'error');
-      if (btn) btn.disabled = false;
       return;
     }
 
@@ -5025,16 +5039,13 @@ async function doMintSubdomain() {
         const bal = await rpc.getBalance(_connectedAddress);
         if (bal < price) {
           showStatus('Insufficient ETH — need ' + ethers.formatEther(price) + ' ETH', 'error');
-          if (btn) btn.disabled = false;
           return;
         }
       } else {
-        const balIface = new ethers.Interface(['function balanceOf(address) view returns (uint256)']);
         const balRes = await rpc.call({ to: feeToken, data: balIface.encodeFunctionData('balanceOf', [_connectedAddress]) });
         const bal = balIface.decodeFunctionResult('balanceOf', balRes)[0];
         if (bal < price) {
           showStatus('Insufficient ' + (symbol || 'token') + ' balance', 'error');
-          if (btn) btn.disabled = false;
           return;
         }
       }
@@ -5057,6 +5068,11 @@ async function doMintSubdomain() {
         const tokenContract = new ethers.Contract(feeToken, [
           'function approve(address spender, uint256 amount) returns (bool)'
         ], _signer);
+        // USDT-style tokens revert on a nonzero -> nonzero approve
+        if (currentAllowance > 0n) {
+          const resetTx = await wcTransaction(tokenContract.approve(SUBDOMAIN_REGISTRAR, 0n), 'Reset token allowance');
+          await waitForTx(resetTx);
+        }
         const approveTx = await wcTransaction(
           tokenContract.approve(SUBDOMAIN_REGISTRAR, price),
           'Approve token spend'
@@ -5068,9 +5084,7 @@ async function doMintSubdomain() {
 
     // Mint the subdomain
     showStatus('Minting subdomain...', '');
-    const registrar = new ethers.Contract(SUBDOMAIN_REGISTRAR, [
-      'function register(uint256 parentId, string label) payable returns (uint256)'
-    ], _signer);
+    const registrar = new ethers.Contract(SUBDOMAIN_REGISTRAR, REGISTRAR_ABI, _signer);
     const value = feeToken === ethers.ZeroAddress ? price : 0n;
     const tx = await wcTransaction(
       registrar.register(parentId, subLabel, { value }),
@@ -5079,8 +5093,8 @@ async function doMintSubdomain() {
     showStatus('Waiting for confirmation...', '', tx.hash);
     const receipt = await waitForTx(tx);
 
-    const mintedName = normalizeFullName($('nameInput').value) || subLabel;
-    pendingMintInfo = null;
+    const mintedName = subLabel + '.' + parentName;
+    if (pendingMintInfo === info) pendingMintInfo = null;
     showStatus(mintedName + '.wei minted!', 'success', tx.hash);
     refreshAfterTx(mintedName, subNameRegistered, receipt);
   } catch (e) {
@@ -5122,17 +5136,18 @@ async function doOwnerRegisterSubdomain() {
 async function doRenew() {
   if (isProcessing || !contract || !currentTokenId) return;
 
+  const tokenId = currentTokenId, name = currentTokenName;
   isProcessing = true;
   const btn = (typeof event !== 'undefined' && event?.target) || null; if (btn) btn.disabled = true;
   try {
     const rc = readContract || contract;
-    const fee = await rc.getFee(byteLength(currentTokenName));
+    const fee = await rc.getFee(byteLength(name));
     const terms = termsAvailable() ? renewTermCount() : 1;
 
     // The quote in the panel was priced when the panel opened. If the fee moved since, the
     // multi-year path would send the new one multiplied by the term count without ever having
     // shown it. Repaint, and let a second press accept the number now on screen.
-    if (terms > 1 && _renewFee != null && fee !== _renewFee) {
+    if (terms > 1 && (_renewFee == null || fee !== _renewFee)) {
       _renewFee = fee;
       renderRenewQuote();
       showStatus('The price changed — the quote above is current. Press Renew again to accept it.',
@@ -5146,13 +5161,13 @@ async function doRenew() {
     const tx = terms > 1
       ? await wcTransaction(
           new ethers.Contract(WEI_TERMS, WEI_TERMS_ABI, _signer)
-            .renew(currentTokenId, terms, { value: fee * BigInt(terms) }),
+            .renew(tokenId, terms, { value: fee * BigInt(terms) }),
           'Approve renewal')
-      : await wcTransaction(contract.renew(currentTokenId, { value: fee }), 'Approve renewal');
+      : await wcTransaction(contract.renew(tokenId, { value: fee }), 'Approve renewal');
     showStatus('Waiting for confirmation...', '', tx.hash);
     const receipt = await waitForTx(tx);
     showStatus(terms > 1 ? 'Renewed for ' + terms + ' years!' : 'Renewed!', 'success', tx.hash);
-    refreshAfterTx(currentTokenName, panelRepainted, receipt);
+    refreshAfterTx(name, panelRepainted, receipt);
   } catch (e) {
     handleError(e);
   } finally {
@@ -5175,35 +5190,7 @@ function toggleSend(event) {
   }
 }
 
-let sendPreviewDebounce = null;
-let sendPreviewVersion = 0;
-
-function previewSendRecipient() {
-  const preview = $('sendPreview');
-  const input = $('sendTo').value.trim();
-
-  if (!input || ethers.isAddress(input)) {
-    preview.style.display = 'none';
-    return;
-  }
-
-  preview.innerHTML = '<span style="opacity:0.5;">' + spinnerSVG(13) + 'Resolving…</span>';
-  preview.style.display = 'block';
-
-  clearTimeout(sendPreviewDebounce);
-  sendPreviewDebounce = setTimeout(async () => {
-    const thisVersion = ++sendPreviewVersion;
-    const result = await resolveRecipient(input);
-    if (thisVersion !== sendPreviewVersion) return;
-
-    if (result && result.name) {
-      const addrShort = result.address.slice(0, 10) + '...' + result.address.slice(-8);
-      preview.innerHTML = `<span style="opacity:0.6;">→ ${escapeHtml(result.name)} resolves to </span><a href="https://etherscan.io/address/${result.address}" target="_blank" rel="noopener" style="color:inherit;">${addrShort}</a>`;
-    } else {
-      preview.innerHTML = '<span style="color:#c00;">Could not resolve name</span>';
-    }
-  }, 300);
-}
+function previewSendRecipient() { previewRecipient('sendTo', 'sendPreview'); }
 
 // Network selection for send
 let sendNetwork = 'mainnet';
@@ -5676,14 +5663,22 @@ function closeRoll() {
 }
 
 // Cheap per-second repaint of just the countdown, so the whole panel isn't re-fetched.
+var _rollEdgeFor = 0, _rollTicks = 0;   // only read by the interval, which starts later
+
 function rollTick() {
   try {
     if (document.hidden) return;
     const el = document.getElementById('rollCountdown');
-    if (!el) return;
-    const end = Number(el.dataset.end || 0);
-    if (!end) return;
-    el.textContent = fmtCountdown(end - Math.floor(Date.now() / 1000));
+    const end = el ? Number(el.dataset.end || 0) : 0;
+    if (end) {
+      const left = end - Math.floor(Date.now() / 1000);
+      el.textContent = fmtCountdown(left);
+      // Refresh once the deadline passes (with slack for block time) so the
+      // panel moves on to the draw instead of offering an entry that reverts.
+      if (left <= -15 && _rollEdgeFor !== end) { _rollEdgeFor = end; refreshRoll(); }
+    }
+    // While a draw is ready or in flight, re-read every minute
+    if (++_rollTicks % 60 === 0 && (_rollPhase === 2 || _rollPhase === 3)) refreshRoll();
   } catch (_) {}
 }
 
@@ -5743,7 +5738,11 @@ function fmtEth(wei, dp = 4) {
   } catch (_) { return '0'; }
 }
 
+// var with no initializer: initFromHash can reach refreshRoll before this line runs
+var _rollRefreshSeq, _rollPhase;
+
 async function refreshRoll() {
+  const seq = _rollRefreshSeq = (_rollRefreshSeq || 0) + 1;
   const body = $('rollBody');
   if (!body) return;
   if (!LOTTERY) {
@@ -5764,8 +5763,8 @@ async function refreshRoll() {
       const from = Math.max(0, round - 6);
       const rounds = [];
       for (let r = round - 1; r >= from; r--) rounds.push(r);
-      const claimRounds = [];
-      for (let r = round; r >= from; r--) claimRounds.push(r);
+      // The current round can't be claimable yet: it has no winner until it rolls forward.
+      const claimRounds = rounds;
       // The current round's field is worth showing while there's a live round with entrants.
       const liveField = [1, 2, 3].includes(Number(st.phase)) && Number(st.tickets) > 0;
 
@@ -5796,8 +5795,11 @@ async function refreshRoll() {
     // Resolve the field's names + owners in one multicall, and the ETH price — both optional.
     data.field = await rollBuildField(data.tickets, me).catch(() => null);
     data.usd = await rollEthUsd().catch(() => null);
+    if (seq !== _rollRefreshSeq) return;   // a newer refresh (e.g. account switch) owns the panel
+    _rollPhase = Number(data.st.phase);
     renderRoll(body, data, me);
   } catch (e) {
+    if (seq !== _rollRefreshSeq) return;
     // Almost always a throttled public RPC, not a missing deployment — say so, and
     // give the same retry affordance the rest of the file offers.
     body.innerHTML = '<div class="roll-note" style="font-size:12px;opacity:0.6;">Couldn’t reach the lottery contract — the RPC may be busy. ' +
@@ -6257,6 +6259,7 @@ async function rollDraw(settlesHint) {
     // under-sending reverts Underpaid, so the buffer errs high.
     let quote = null;
     if (settles) { try { quote = await withRpc((p) => rollDrawQuote(p)); } catch (_) {} }
+    if (settles && !quote) { showStatus('Couldn’t price the draw — try again', 'error'); return; }
     const value = settles ? rollDrawValue(quote) : 0n;
     const c = new ethers.Contract(LOTTERY, LOTTERY_ABI, window._signer);
     const tx = await wcTransaction(c.draw({ value }),
@@ -6347,6 +6350,18 @@ let _namesRollSeq = 0;     // invalidates an eligibility fetch the account or a 
 // block the scan reached, so the full-range walk is paid once per address per
 // browser and every later open only scans the blocks since. Nothing here is
 // trusted: ownerOf re-checks every id on the way to the screen.
+// One getLogs over the whole range; if the endpoint refuses it, walk it in spans.
+async function namesLogs(p, topic, from, to, span = 50000) {
+  const q = (a, b) => p.getLogs({ address: CONTRACT, topics: [NAMES_TRANSFER, null, topic], fromBlock: a, toBlock: b });
+  try { return await q(from, to); }
+  catch (e) {
+    if (to - from < span) throw e;
+    const out = [];
+    for (let a = from; a <= to; a += span) out.push(...await q(a, Math.min(to, a + span - 1)));
+    return out;
+  }
+}
+
 async function namesReceived(addr, force) {
   const key = 'wns:names:' + addr.toLowerCase();
   let cached = [], from = NAMES_DEPLOY_BLOCK;
@@ -6368,15 +6383,7 @@ async function namesReceived(addr, force) {
       // An endpoint a few blocks behind the one that wrote the cache would ask for
       // a backwards range and be told so; there is simply nothing new to read.
       if (at < from) return { head: at, logs: [] };
-      return {
-        head: at,
-        logs: await p.getLogs({
-          address: CONTRACT,
-          topics: [NAMES_TRANSFER, null, topic],
-          fromBlock: from,
-          toBlock: at
-        })
-      };
+      return { head: at, logs: await namesLogs(p, topic, from, at) };
     }, NAMES_LOG_FIRST));
   } catch (e) {
     // No endpoint would serve the query. A cached list is stale but real, and
@@ -6386,7 +6393,7 @@ async function namesReceived(addr, force) {
     throw e;
   }
   const ids = [...new Set([...cached, ...logs.map(l => l.topics[3])])];
-  try { localStorage.setItem(key, JSON.stringify({ head, ids })); } catch (_) {}
+  try { localStorage.setItem(key, JSON.stringify({ head: Math.max(from - 1, head - 64), ids })); } catch (_) {}
   return { ids, stale: false };
 }
 
@@ -6522,9 +6529,9 @@ function namesOrder(a, b) {
 
 async function namesScan(force) {
   const me = window._connectedAddress;
-  if (!me || _namesScanning) return;
+  if (!me || (_namesScanning && _namesScanning === _namesSeq)) return;
   const seq = ++_namesSeq;
-  _namesScanning = true;
+  _namesScanning = seq;
   const body = $('namesBody');
   if (body && !_namesState) body.innerHTML = '<div class="names-sum">scanning…</div>';
   try {
@@ -6569,7 +6576,7 @@ async function namesScan(force) {
     if (body) body.innerHTML = '<div class="names-sum">' + escapeHtml(namesError(e)) + '</div>'
       + '<button class="names-more" onclick="namesScan(true)">try again</button>';
   } finally {
-    if (seq === _namesSeq) _namesScanning = false;
+    if (_namesScanning === seq) _namesScanning = 0;
   }
 }
 
@@ -6949,12 +6956,12 @@ async function doRenewAll() {
       helper.renewMany(picked.map(r => r.id), picked.map(() => terms), { value: quote.total }),
       'Approve renewal');
     showStatus('Waiting for confirmation...', '', tx.hash);
-    await waitForTx(tx);
+    const receipt = await waitForTx(tx);
     showStatus(picked.length + ' name' + (picked.length === 1 ? '' : 's') + ' renewed for '
       + terms + ' year' + (terms === 1 ? '' : 's') + '!', 'success', tx.hash);
     _namesSel = null;      // let the fresh scan re-derive what still needs attention
     _namesQuote = null;
-    namesScan(true);
+    afterReceipt(receipt, () => namesScan(false));
   } catch (e) {
     handleError(e);
   } finally {
@@ -6989,7 +6996,7 @@ async function rollPollCallsStatus(id, tries = 10, delayMs = 1500) {
       // it stops reading as pending.
       const pending = status === 100 || status === 'PENDING' || status === undefined;
       if (!pending) return res;
-    } catch (_) { return null; } // not supported here — the rescan is still the truth
+    } catch (_) { if (i >= 2) return null; } // unsupported, or the id isn't known yet
     await new Promise(r => setTimeout(r, delayMs));
   }
   return null; // gave up polling; still not a failure, just unknown
@@ -6998,10 +7005,10 @@ async function rollPollCallsStatus(id, tries = 10, delayMs = 1500) {
 // The ERC-5792 call list for a batch: unboosted enter() per name, explicit zero value since
 // enter() is non-payable. Pure and deterministic, so the encoding is what gets tested — the
 // wallet plumbing around it (rollEnterAtomic) cannot be exercised outside a real wallet.
-function namesRollCalls(picked) {
-  return picked.map(r => ({
+function namesRollCalls(picked, pids = []) {
+  return picked.map((r, i) => ({
     to: LOTTERY,
-    data: rollIface.encodeFunctionData('enter', [r.id, 0]),
+    data: rollIface.encodeFunctionData('enter', [r.id, pids[i] || 0]),
     value: '0x0'
   }));
 }
@@ -7010,8 +7017,8 @@ function namesRollCalls(picked) {
 // false — these are independent actions with nothing shared between them, so a wallet that can
 // only best-effort a batch should still submit whichever calls it can rather than refuse the
 // whole thing because one might fail.
-async function rollEnterAtomic(picked) {
-  const calls = namesRollCalls(picked);
+async function rollEnterAtomic(picked, pids) {
+  const calls = namesRollCalls(picked, pids);
   showStatus('Entering ' + picked.length + ' name' + (picked.length === 1 ? '' : 's')
     + ' into the round…', '');
   const res = await window._connectedWalletProvider.request({
@@ -7026,7 +7033,12 @@ async function rollEnterAtomic(picked) {
   });
   const bundleId = typeof res === 'string' ? res : (res && res.id);
   showStatus('Submitted — confirming…', '');
-  if (bundleId) await rollPollCallsStatus(bundleId);
+  const st = bundleId ? await rollPollCallsStatus(bundleId) : null;
+  const code = st && st.status;
+  if ((typeof code === 'number' && code >= 400) || code === 'FAILED') {
+    showStatus('The wallet reports the batch failed. Rescanning…', 'error');
+    return;
+  }
   showStatus(picked.length + ' name' + (picked.length === 1 ? '' : 's')
     + ' submitted to the round. Rescanning to confirm which landed…', 'success');
 }
@@ -7034,7 +7046,7 @@ async function rollEnterAtomic(picked) {
 // The fallback: one enter() per name, each its own signed transaction. Independent actions, so
 // one failing must not stop the rest — a user decline is the one exception, since declining one
 // popup is a signal to stop, not to skip ahead to the next.
-async function rollEnterSequential(picked) {
+async function rollEnterSequential(picked, pids = []) {
   let ok = 0;
   const failed = [];
   for (let i = 0; i < picked.length; i++) {
@@ -7043,7 +7055,7 @@ async function rollEnterSequential(picked) {
     showStatus('Entering ' + (i + 1) + ' of ' + picked.length + ' — ' + label + '…', '');
     try {
       const c = new ethers.Contract(LOTTERY, LOTTERY_ABI, window._signer);
-      const tx = await wcTransaction(c.enter(r.id, 0), 'Confirm lottery entry (' + (i + 1) + '/' + picked.length + ')');
+      const tx = await wcTransaction(c.enter(r.id, pids[i] || 0), 'Confirm lottery entry (' + (i + 1) + '/' + picked.length + ')');
       await waitForTx(tx);
       ok++;
     } catch (e) {
@@ -7068,18 +7080,29 @@ async function rollEnterSequential(picked) {
 async function doEnterRollMany() {
   if (isProcessing || !window._signer || !_namesState) return;
   const rows = _namesState.rows;
-  // Re-check against the rows and round state as they stand, not as they stood when ticked —
-  // a round can close, or a name can already have been entered elsewhere, while this sat open.
-  const picked = namesRollSelected(rows, _rollSel);
-  if (!picked.length || namesRollOverCap(picked.length)) return namesRollPaint();
-
   isProcessing = true;
   namesRollPaint();
   try {
-    if (window._walletSendCalls) await rollEnterAtomic(picked);
-    else await rollEnterSequential(picked);
+    // Re-read the round first: it can close, or a name can be entered elsewhere, while this sat open.
+    await namesRollScan(rows);
+    const picked = namesRollSelected(rows, _rollSel);
+    if (!picked.length || namesRollOverCap(picked.length)) return;
+
+    // Same boost check as a single entry: entering unboosted locks that in for the round.
+    showStatus('Checking governance boosts…', '');
+    const boosts = await Promise.all(picked.map(r => rollDetectBoost(r.id)));
+    const pids = boosts.map(b => b.pid);
+    if (boosts.some(b => !b.pid && !b.sure) &&
+        !confirm('Could not check whether some of these names back a live proposal (the RPC is busy).\n\n' +
+                 'Entering now locks them in unboosted for the whole round. Enter anyway?')) {
+      $('status').className = 'status';
+      return;
+    }
+
+    if (window._walletSendCalls) await rollEnterAtomic(picked, pids);
+    else await rollEnterSequential(picked, pids);
     _rollSel = null; // let the fresh scan re-derive who still has a ticket to take
-    namesScan(true);
+    namesScan(false);
   } catch (e) {
     handleError(e);
   } finally {
@@ -7221,7 +7244,7 @@ function namesOnDisconnect() {
   _namesSeq++;
   _namesState = null;
   _namesCount = 0;
-  _namesScanning = false;
+  _namesScanning = 0;
   // A selection is a set of token ids belonging to one address. Carrying it across a
   // disconnect would tick names the next account does not hold.
   _namesSel = null;

@@ -36,7 +36,7 @@ function rpcHarness(search, saved = null) {
     setTimeout() {}, closeRpcSettings() {},
   });
   vm.runInContext('let _rpcProvider = null;\n' +
-    ['customRpcs', 'buildRpcProvider', 'urlRpc', 'openRpcSettings', 'saveRpcSettings', 'resetRpcSettings'].map(n => lift(app,n)).join('\n') +
+    ['rpcUrlAllowed', 'customRpcs', 'buildRpcProvider', 'urlRpc', 'openRpcSettings', 'saveRpcSettings', 'resetRpcSettings'].map(n => lift(app,n)).join('\n') +
     '\n' + lift(wallet, 'getRpcProvider'), ctx);
   return ctx;
 }

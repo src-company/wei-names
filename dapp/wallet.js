@@ -33,6 +33,7 @@ window._connectedWalletProvider = null;
 let _walletConnectProvider = null;
 let _isConnecting = false;
 let _silentConnecting = false; // the in-flight attempt is a silent auto-connect
+let _acctSeq = 0;              // last accountsChanged re-derive wins
 let _connectSeq = 0;           // invalidates a superseded (abandoned) attempt
 
 // Bound a wallet RPC that has no business hanging. Only ever applied to the
@@ -55,7 +56,7 @@ let _appName = 'zFi';
 window.addEventListener('eip6963:announceProvider', (event) => {
   try {
     const { info, provider } = event.detail || {};
-    if (info?.uuid && provider) eip6963Providers.set(info.uuid, { info, provider });
+    if (typeof info?.uuid === 'string' && typeof info.name === 'string' && provider) eip6963Providers.set(info.uuid, { info, provider });
   } catch (e) {}
 });
 window.dispatchEvent(new Event('eip6963:requestProvider'));
@@ -110,9 +111,8 @@ function detectWallets() {
   for (const [uuid, { info, provider }] of eip6963Providers.entries()) {
     const name = info?.name || 'Unknown';
     if (!seenNames.has(name.toLowerCase())) {
-      const iconUrl = info.icon && (info.icon.startsWith('data:image/') || info.icon.startsWith('https://')) ? info.icon : null;
-      const safeIconUrl = iconUrl ? iconUrl.replace(/[<>&"']/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'}[c])) : null;
-      detected.push({ key: `eip6963_${uuid}`, name, icon: safeIconUrl ? `<img src="${safeIconUrl}" style="width:1.5rem;height:1.5rem;border-radius:4px;">` : '🔌', getProvider: () => provider });
+      const iconUrl = typeof info.icon === 'string' && info.icon.startsWith('data:image/') ? info.icon : null;
+      detected.push({ key: `eip6963_${uuid}`, name, icon: iconUrl ? `<img src="${_escA(iconUrl)}" alt="" style="width:1.5rem;height:1.5rem;border-radius:4px;">` : '🔌', getProvider: () => provider });
       seenNames.add(name.toLowerCase());
     }
   }
@@ -148,8 +148,14 @@ function injectWalletDOM() {
   overlay.className = 'wallet-modal-overlay';
   overlay.id = 'walletModal';
   overlay.onclick = function(e) { if (e.target === this) closeWalletModal(); };
-  overlay.innerHTML = '<div class="wallet-modal"><div class="wallet-modal-header"><div class="wallet-modal-title">Connect Wallet</div><button class="wallet-modal-close" onclick="closeWalletModal()">&times;</button></div><div class="wallet-modal-body" id="walletOptions"></div></div>';
+  overlay.setAttribute('role', 'dialog');
+  overlay.setAttribute('aria-modal', 'true');
+  overlay.setAttribute('aria-label', 'Connect wallet');
+  overlay.innerHTML = '<div class="wallet-modal"><div class="wallet-modal-header"><div class="wallet-modal-title">Connect Wallet</div><button type="button" class="wallet-modal-close" aria-label="Close" onclick="closeWalletModal()">&times;</button></div><div class="wallet-modal-body" id="walletOptions"></div></div>';
   document.body.appendChild(overlay);
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && overlay.classList.contains('active')) closeWalletModal();
+  });
 }
 
 // --- Modal ---
@@ -171,9 +177,9 @@ function renderWalletModal(wallets) {
   if (_connectedAddress) {
     const displayName = document.getElementById('walletBtn').textContent;
     const showName = displayName && displayName !== 'connect' && !displayName.startsWith('0x');
-    container.innerHTML = `<div style="padding:12px;border:1px solid currentColor;margin-bottom:12px;"><div style="font-weight:600;margin-bottom:6px;">Connected</div>${showName ? `<div style="font-size:16px;margin-bottom:4px;">${_esc(displayName)}</div>` : ''}<div style="font-size:12px;word-break:break-all;opacity:0.6;">${_esc(_connectedAddress)}</div></div><div class="wallet-option disconnect" onclick="disconnectWallet()"><span class="wallet-option-name">Disconnect</span></div>`;
+    container.innerHTML = `<div style="padding:12px;border:1px solid currentColor;margin-bottom:12px;"><div style="font-weight:600;margin-bottom:6px;">Connected</div>${showName ? `<div style="font-size:16px;margin-bottom:4px;">${_esc(displayName)}</div>` : ''}<div style="font-size:12px;word-break:break-all;opacity:0.6;">${_esc(_connectedAddress)}</div></div><button type="button" class="wallet-option disconnect" onclick="disconnectWallet()"><span class="wallet-option-name">Disconnect</span></button>`;
   } else {
-    container.innerHTML = wallets.length > 0 ? wallets.map(w => `<div class="wallet-option" data-wallet-key="${_escA(w.key)}"><span class="wallet-option-icon">${w.icon}</span><span class="wallet-option-name">${_esc(w.name)}</span></div>`).join('') : '<div style="padding:12px;text-align:center;">No wallets detected.</div>';
+    container.innerHTML = wallets.length > 0 ? wallets.map(w => `<button type="button" class="wallet-option" data-wallet-key="${_escA(w.key)}"><span class="wallet-option-icon">${w.icon}</span><span class="wallet-option-name">${_esc(w.name)}</span></button>`).join('') : '<div style="padding:12px;text-align:center;">No wallets detected.</div>';
     container.querySelectorAll('[data-wallet-key]').forEach(el => {
       el.addEventListener('click', () => connectWithWallet(el.dataset.walletKey));
       // Prefetch on intent rather than on modal-open, so picking MetaMask never
@@ -222,6 +228,7 @@ async function connectWithWallet(walletKey, options = {}) {
   const superseded = () => seq !== _connectSeq;
   _isConnecting = true;
   _silentConnecting = silent;
+  let myWc = null;   // the WalletConnect provider this attempt created, if any
   try {
     closeWalletModal();
     let walletProvider;
@@ -241,13 +248,13 @@ async function connectWithWallet(walletKey, options = {}) {
       if (!WCProvider?.init) throw new Error('WalletConnect not available');
       if (_walletConnectProvider) { try { await _walletConnectProvider.disconnect?.(); } catch (e) {} _walletConnectProvider = null; }
       _walletConnectProvider = await WCProvider.init({ projectId: WC_PROJECT_ID, chains: [1], showQrModal: !silent, rpcMap: { 1: 'https://ethereum-rpc.publicnode.com' }, metadata: { name: _appName, description: _appName, url: window.location.origin, icons: [] } });
-      if (!silent) _walletConnectProvider.on('display_uri', () => { _wcDeepLink = readWalletConnectRedirect(_walletConnectProvider.session?.peer?.metadata); });
+      myWc = _walletConnectProvider;
       // WalletConnect v2 emits 'disconnect'/'session_delete' when the session is
       // ended from the wallet side or expires — it does NOT emit accountsChanged:[]
       // then, so without this the dapp lingers in a ghost-connected state. The
       // guard makes it a no-op after a manual disconnect (which already cleared
       // _isWalletConnect), so _onDisconnectCallbacks never double-fire.
-      const _wcEnd = () => { if (_isWalletConnect && _connectedAddress) { try { window.disconnectWallet(); } catch (e) {} } };
+      const _wcEnd = () => { if (_walletConnectProvider === myWc && _isWalletConnect && _connectedAddress) { try { window.disconnectWallet(); } catch (e) {} } };
       _walletConnectProvider.on('disconnect', _wcEnd);
       _walletConnectProvider.on('session_delete', _wcEnd);
       // enable() never settles when there is no session to restore, so the silent
@@ -332,31 +339,40 @@ async function connectWithWallet(walletKey, options = {}) {
     // ERC-5792: probe wallet_sendCalls support (non-blocking, no delay to connect)
     _walletSendCalls = false;
     walletProvider.request({ method: 'wallet_getCapabilities', params: [_connectedAddress] }).then(caps => {
+      if (superseded() || _connectedWalletProvider !== walletProvider) return;
       if (caps) { const c = caps['0x1']; if (c?.atomicBatch?.supported || c?.['atomic-batch']?.supported || c?.atomic?.status === 'supported' || c?.atomic?.status === 'ready') _walletSendCalls = true; }
     }).catch(() => {});
     if (oldWP && _walletEventHandlers) { try { oldWP.removeListener('accountsChanged', _walletEventHandlers.accountsChanged); oldWP.removeListener('chainChanged', _walletEventHandlers.chainChanged); } catch (e) {} }
     _walletEventHandlers = {
       accountsChanged: (accts) => {
+        if (_connectedWalletProvider !== walletProvider) return;
         if (!accts || accts.length === 0) {
           // Some wallets emit empty accounts transiently during page transitions.
           // Wait briefly and re-check before disconnecting.
           setTimeout(async () => {
-            try {
-              const recheck = await _connectedWalletProvider?.request({ method: 'eth_accounts' });
-              if (!recheck || recheck.length === 0) window.disconnectWallet();
-            } catch { window.disconnectWallet(); }
+            if (_connectedWalletProvider !== walletProvider) return;
+            let recheck = null;
+            try { recheck = await walletProvider.request({ method: 'eth_accounts' }); } catch (_) {}
+            if (_connectedWalletProvider === walletProvider && !recheck?.length) window.disconnectWallet();
           }, 500);
           return;
         }
+        // Same account re-announced (common on unlock): nothing to reset
+        if (_connectedAddress && String(accts[0]).toLowerCase() === _connectedAddress.toLowerCase()) return;
         // Clear previous session state (PP keys, loaded notes, proof workers)
         // before re-deriving, so the old account's data is never accessible.
         for (const fn of _onDisconnectCallbacks) { try { fn(); } catch (e) { console.error('onDisconnect callback error:', e); } }
         // Re-derive signer/address from the new account without a full reload
+        const acctSeq = ++_acctSeq;
         (async () => {
           try {
-            _walletProvider = new ethers.BrowserProvider(_connectedWalletProvider);
-            _signer = await _walletProvider.getSigner();
-            _connectedAddress = await _signer.getAddress();
+            const bp = new ethers.BrowserProvider(walletProvider);
+            const sg = await bp.getSigner();
+            const addr = await sg.getAddress();
+            if (acctSeq !== _acctSeq || _connectedWalletProvider !== walletProvider) return;
+            _walletProvider = bp;
+            _signer = sg;
+            _connectedAddress = addr;
             setWalletLabel(_connectedAddress);
             resolveWeiName(_connectedAddress);
             for (const fn of _onConnectCallbacks) { try { fn(); } catch (e) { console.error('onConnect callback error:', e); } }
@@ -410,7 +426,10 @@ async function connectWithWallet(walletKey, options = {}) {
     }
     if (silent) {
       // Auto-connect failed silently — clean up WC provider if applicable
-      if (_walletConnectProvider) { try { Promise.resolve(_walletConnectProvider.disconnect()).catch(() => {}); } catch (_) {} _walletConnectProvider = null; }
+      if (myWc) {
+        try { Promise.resolve(myWc.disconnect()).catch(() => {}); } catch (_) {}
+        if (_walletConnectProvider === myWc) _walletConnectProvider = null;
+      }
       // A WC auto-connect sets _isWalletConnect before enable() resolves; leaving
       // it true after a failed/timed-out restore makes wcTransaction() deep-link
       // into a wallet app that was never connected.
@@ -603,7 +622,8 @@ let _autoConnectRan = false;
 async function tryAutoConnect() {
   if (_autoConnectRan) return;
   _autoConnectRan = true;
-  const savedWallet = localStorage.getItem('zfi_wallet');
+  let savedWallet = null;
+  try { savedWallet = localStorage.getItem('zfi_wallet'); } catch (_) {}
   if (!savedWallet) return;
   const btn = document.getElementById('walletBtn');
   if (btn && !_connectedAddress) {

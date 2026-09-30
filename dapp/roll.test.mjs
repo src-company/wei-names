@@ -44,7 +44,7 @@ function lift(name) {
 
 const LIFTED = [
   'tokenIdCandidate', 'parseTokenId',
-  'normalizeLabelContract', 'normalizeLabel', 'normalizeFullName', 'computeIdFull',
+  'normalizeLabelContract', 'normalizeLabel', 'topLevelLabel', 'normalizeFullName', 'computeIdFull',
   'rollTokenFor', 'rollDrawQuote', 'rollDrawValue', 'rollPanelOpen',
   'rollNameChanged', 'rollPreviewWeight', 'rollEnter', 'rollOnConnect', 'rollOnDisconnect',
   'rollDetectBoost', 'rollBoostBps', 'rollBuildField',

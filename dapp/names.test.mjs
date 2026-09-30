@@ -75,7 +75,7 @@ const CONSTS = ['NAMES_DEPLOY_BLOCK', 'NAMES_TRANSFER', 'NAMES_LOG_FIRST', 'NAME
   'NAMES_SOON', 'NAMES_CHUNK', 'NAMES_RANK', 'LOG_ENDPOINTS_FIRST', 'NAMES_MAX_RENEWALS',
   'MAX_TERMS', 'NAMES_MAX_ROLL_ENTRIES', 'LOTTERY', 'LOTTERY_ABI', 'rollIface'];
 
-const ALL = ['anyEndpoint', 'namesReceived', 'namesRead', 'namesRoot', 'namesRootExpiry',
+const ALL = ['anyEndpoint', 'namesLogs', 'namesReceived', 'namesRead', 'namesRoot', 'namesRootExpiry',
   'namesClassify', 'namesOrder', 'namesScan', 'namesError', 'namesDate', 'namesDays',
   'namesWhen', 'namesRow', 'namesPick', 'namesFooter', 'namesRender', 'namesPanelOpen',
   'namesSetToggle', 'toggleNames', 'namesOnConnect', 'namesOnDisconnect',
@@ -405,8 +405,8 @@ const logFor = ids => ids.map(id => ({ topics: [null, null, null, id] }));
     [s.run('NAMES_TRANSFER'), null, '0x' + '0'.repeat(24) + ME_LC.slice(2)]);
   eq('scan: the walk leads with an endpoint that serves the full range',
     s.calls.getLogs.map(g => g.url), [TENDERLY]);
-  eq('scan: the block it reached is cached with the ids',
-    JSON.parse(s.store.get(KEY)), { head: 25900000, ids: [ID('a'), ID('b')] });
+  eq('scan: the block it reached, less a reorg margin, is cached with the ids',
+    JSON.parse(s.store.get(KEY)), { head: 25900000 - 64, ids: [ID('a'), ID('b')] });
   eq('scan: nothing stale about a live scan', out.stale, false);
 }
 {
@@ -419,7 +419,7 @@ const logFor = ids => ids.map(id => ({ topics: [null, null, null, id] }));
   eq('scan: resumes at the block after the cached one',
     s.calls.getLogs[0].filter.fromBlock, 25000001);
   eq('scan: new ids merge onto the cached ones', out.ids, [ID('a'), ID('b')]);
-  eq('scan: the cache advances', JSON.parse(s.store.get(KEY)).head, 25900000);
+  eq('scan: the cache advances', JSON.parse(s.store.get(KEY)).head, 25900000 - 64);
 }
 {
   const s = sandbox({
@@ -452,7 +452,7 @@ const logFor = ids => ids.map(id => ({ topics: [null, null, null, id] }));
   const out = await s.run(`namesReceived(${JSON.stringify(ME)}, false)`);
   eq('scan: falls back to the cached ids', out.ids, [ID('a')]);
   ok('scan: and says the list is stale', out.stale === true);
-  ok('scan: after trying every endpoint', s.calls.getLogs.length === 3,
+  ok('scan: after trying every endpoint', new Set(s.calls.getLogs.map(g => g.url)).size === 3,
     JSON.stringify(s.calls.getLogs.map(g => g.url)));
 }
 {
