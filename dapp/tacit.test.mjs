@@ -40,7 +40,9 @@ function liftConst(name) {
 // Tacit's kit, vendored unmodified. The pin is the SHA-256 Tacit publishes for it.
 const KIT_PATH = path.join(here, 'vendor/tacit-address-kit.js');
 const KIT_SHA256 = '9fa0fd22dade0bf266c604740c42579ba6536dbf5bdc3f09451f3194de169dc1';
-const kit = await import(KIT_PATH);
+// Imported from its bytes: the kit has no imports, and a data: URL is ESM on every
+// supported Node, where a bare .js file outside a "type": "module" package isn't (Node 20).
+const kit = await import('data:text/javascript;base64,' + fs.readFileSync(KIT_PATH).toString('base64'));
 
 const ctx = vm.createContext({ ethers, BigInt, Error, Uint8Array, Array, String, RegExp, console });
 vm.runInContext([
@@ -178,7 +180,7 @@ eq('derive: a signature from another account is refused', !!refused, true);
 // ── registration: the pending panel's box and what follows the reveal ─────────
 // A DOM of just the elements these functions touch, and stubs for the chain.
 const el = () => ({ value: '', checked: false, disabled: false, classList: { on: false, toggle(_, v) { this.on = v; } } });
-const dom = { tacitOpt: el(), tacitOn: el(), regTacitAddr: el() };
+const dom = { tacitOpt: { ...el(), style: {} }, tacitOn: el(), regTacitAddr: el(), regTacitNote: { textContent: '' } };
 const store = new Map();
 const calls = [];
 const reg = vm.createContext({
@@ -197,7 +199,7 @@ const reg = vm.createContext({
 vm.runInContext([
   liftConst('TACIT_RECORD_KEY'), liftConst('TACIT_BECH32'), liftConst('TACIT_PREF_PREFIX'),
   ...['tacitPolymod', 'tacitHrpExpand', 'tacitConvertBits', 'tacitIsPoint', 'decodeTacitAddress',
-      'sanePending', 'tacitIsCurrent', 'tacitPref', 'lockTacitOpt', 'onTacitToggle', 'tacitChoice', 'writeTacitRecord', 'afterRegister'].map(lift),
+      'sanePending', 'tacitIsCurrent', 'tacitNameOk', 'tacitNote', 'tacitPref', 'lockTacitOpt', 'onTacitToggle', 'tacitChoice', 'writeTacitRecord', 'afterRegister'].map(lift),
   SRC.find(l => l.startsWith('let _tacitOptFor')), lift('paintTacitOpt'),
 ].join('\n'), reg, { filename: 'index.html:tacit-register' });
 const r = (n) => vm.runInContext(n, reg);
@@ -264,6 +266,78 @@ eq('rejected setText: explains, does not throw', calls.some(c => c[0] === 'statu
 
 r('lockTacitOpt')(true);
 eq('locked once the reveal is out', dom.tacitOn.disabled && dom.regTacitAddr.disabled, true);
+
+// ── names Tacit can look up ─────────────────────────────────────────────────
+const nameCtx = vm.createContext({ String });
+vm.runInContext(lift('tacitNameOk'), nameCtx);
+const nameOk = vm.runInContext('tacitNameOk', nameCtx);
+for (const [n, want] of [['alice', true], ['z-0', true], ['blog.alice', true], ['123', true],
+                         ['café', false], ['🦄', false], ['z_0', false], ['a..b', false], ['', false], ['.a', false]]) {
+  eq(`tacitNameOk(${JSON.stringify(n)})`, nameOk(n), want);
+}
+// Hidden, unticked and never written for a name Tacit can't look up.
+dom.tacitOn.checked = true; dom.regTacitAddr.value = UNIFIED;
+store.set('wei-tacit:' + owner.toLowerCase(), UNIFIED);
+r('paintTacitOpt')({ name: 'café', owner, commitment: '0x05' });
+eq('unsupported name: option hidden', dom.tacitOpt.style.display, 'none');
+eq('unsupported name: box unticked even with a remembered address', dom.tacitOn.checked, false);
+reg.contract.setText = async (...a) => { calls.push(['setText', ...a]); return { hash: '0x' + '11'.repeat(32) }; };
+calls.length = 0;
+await r('afterRegister')({ name: 'café', owner, tacit: UNIFIED }, {});
+eq('unsupported name: afterRegister writes nothing', calls.some(c => c[0] === 'setText'), false);
+
+// ── format note ─────────────────────────────────────────────────────────────
+dom.note = { textContent: 'stale' };
+r('tacitNote')(REAL_RECORD, 'note');
+eq('note: older 0x03 address is flagged', /Older Tacit address format/.test(dom.note.textContent), true);
+r('tacitNote')(EXPLICIT, 'note');
+eq('note: older 0x07 address is flagged', /Older/.test(dom.note.textContent), true);
+r('tacitNote')(UNIFIED, 'note');
+eq('note: current address clears it', dom.note.textContent, '');
+r('tacitNote')('tacit1nope', 'note');
+eq('note: invalid input says nothing (the save reports it)', dom.note.textContent, '');
+
+// ── reload after the registration confirmed ────────────────────────────────
+async function reload({ pending, owner: onChainOwner }) {
+  const seen = [];
+  const c = vm.createContext({
+    ethers, CONTRACT: '0x' + '00'.repeat(20), ABI: [],
+    loadPending: () => pending, hidePendingPanel: () => {}, displayPending: () => seen.push('display'),
+    clearPending: () => seen.push('clear'), afterRegister: (p) => seen.push('afterRegister:' + p.name),
+    localComputeId: () => 1n,
+    withRpc: (() => { const q = [false, onChainOwner]; return async () => q.shift(); })(),
+  });
+  vm.runInContext(lift('initPending'), c);
+  await vm.runInContext('initPending()', c);
+  return seen.join(',');
+}
+eq('reload, ours, box was ticked: write it', await reload({ pending: { name: 'alice', owner, tacit: UNIFIED }, owner }), 'clear,afterRegister:alice');
+eq('reload, ours, box unticked: just clear', await reload({ pending: { name: 'alice', owner }, owner }), 'clear');
+eq('reload, someone else registered it: never write', await reload({ pending: { name: 'alice', owner, tacit: UNIFIED }, owner: '0x' + '77'.repeat(20) }), 'clear');
+
+// ── derive & save never silently replaces a different current address ──────
+async function deriveSave(existing, derived) {
+  const seen = [];
+  const c = vm.createContext({
+    isProcessing: false, contract: {}, currentTokenId: 1n, currentTokenName: 'alice', currentTacitRecord: existing,
+    $: () => null, tacitNote: () => {}, handleError: e => seen.push('error:' + e.message),
+    showStatus: (m, t) => seen.push(t + ':' + m), deriveTacitAddress: async () => derived,
+    writeTacitRecord: async (n, id, v) => seen.push('write:' + v.slice(0, 9)),
+  });
+  vm.runInContext([lift('decodeTacitAddress'), lift('tacitIsCurrent'), lift('tacitPolymod'), lift('tacitHrpExpand'),
+                   lift('tacitConvertBits'), lift('tacitIsPoint'), liftConst('TACIT_BECH32'), lift('doTacitDeriveAndSave')].join('\n'),
+                  Object.assign(c, { ethers, Uint8Array, Array, String, Error, BigInt }));
+  await vm.runInContext('doTacitDeriveAndSave()', c);
+  return seen;
+}
+const OTHER_UNIFIED = await (async () => { const w = ethers.Wallet.createRandom();
+  return kit.addressesFromKey(kit.keyFromSignature(ethers.getBytes(await w.signMessage(msg)), { address: w.address })).address; })();
+eq('derive & save: empty name gets written', (await deriveSave(null, UNIFIED)).some(x => x.startsWith('write:')), true);
+eq('derive & save: older record gets upgraded', (await deriveSave(REAL_RECORD, UNIFIED)).some(x => x.startsWith('write:')), true);
+eq('derive & save: same address, no transaction', (await deriveSave(UNIFIED, UNIFIED)).some(x => x.startsWith('write:')), false);
+const clash = await deriveSave(OTHER_UNIFIED, UNIFIED);
+eq('derive & save: a different current address is not replaced', clash.some(x => x.startsWith('write:')), false);
+eq('derive & save: and says why', clash.some(x => /differs/.test(x)), true);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

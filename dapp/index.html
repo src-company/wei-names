@@ -365,6 +365,8 @@ button.secondary:hover:not(:disabled) { background: var(--fg); color: var(--bg);
 .tacit-opt.on .tacit-fields { display: block; }
 .tacit-fields input { font-family: monospace; font-size: 11px; padding: 6px 0; }
 .tacit-fields div { font-size: 11px; margin-top: 4px; line-height: 1.4; }
+.tacit-note { font-size: 11px; line-height: 1.4; color: var(--fg-muted); }
+.tacit-note:empty { display: none; }
 .suffix {
   font-size: 24px;
   color: var(--fg-dim);
@@ -1006,7 +1008,8 @@ try{if(localStorage.getItem('wns_dao_banner')==='1'){var _db=document.getElement
   <div class="tacit-opt" id="tacitOpt">
     <label class="tacit-check"><input type="checkbox" id="tacitOn" onchange="onTacitToggle()"><img src="assets/tacit.svg" width="14" height="14" alt=""><span>Get paid privately at this name with <a href="https://tacit.finance" target="_blank" rel="noopener">Tacit</a></span></label>
     <div class="tacit-fields">
-      <input type="text" id="regTacitAddr" placeholder="tacit1…" spellcheck="false" autocomplete="off" autocapitalize="none">
+      <input type="text" id="regTacitAddr" placeholder="tacit1…" spellcheck="false" autocomplete="off" autocapitalize="none" oninput="tacitNote(this.value, 'regTacitNote')">
+      <div id="regTacitNote" class="tacit-note"></div>
       <div>On Bitcoin, Ethereum &amp; L2s. Paste your address from tacit.finance/pay, or <a href="#" onclick="doTacitDerive('regTacitAddr');return false;">derive it from this wallet</a>. One more confirmation after registering.</div>
     </div>
   </div>
@@ -3226,13 +3229,17 @@ async function initPending() {
   try {
     const available = await withRpc(p => new ethers.Contract(CONTRACT, ABI, p).isAvailable(pending.name, 0));
     if (!available) {
-      let registered = false;
+      let registered = false, owner = null;
       try {
-        const owner = await withRpc(p => new ethers.Contract(CONTRACT, ABI, p).ownerOf(localComputeId(pending.name)));
+        owner = await withRpc(p => new ethers.Contract(CONTRACT, ABI, p).ownerOf(localComputeId(pending.name)));
         registered = !!owner && owner !== ethers.ZeroAddress;
       } catch (_) { registered = false; } // ownerOf reverts for an unminted token
       if (registered) {
         clearPending();
+        // Ours, and the page closed before the Tacit write: finish it now.
+        if (pending.tacit && pending.owner && owner.toLowerCase() === pending.owner.toLowerCase()) {
+          afterRegister(pending, null);
+        }
         return null;
       }
     }
@@ -3555,6 +3562,7 @@ function showStatus(msg, type, txHash) {
 let currentTokenId = null;
 let currentTokenName = null;
 let currentExpiresAt = null; // renewals extend from this, so the renew quote dates from it
+let currentTacitRecord = null; // the shown name's finance.tacit value, if any
 let isProcessing = false; // Prevent double-click on manage actions
 let pendingMintInfo = null;
 let pendingOwnerSub = null; // parent-owner direct subdomain registration (free, via NameNFT)
@@ -3568,6 +3576,7 @@ function hideManage() {
   currentTokenId = null;
   currentTokenName = null;
   currentExpiresAt = null;
+  currentTacitRecord = null;
 }
 
 let manageVersion = 0;
@@ -3576,6 +3585,7 @@ async function showManage(tokenId, name) {
   currentTokenId = tokenId;
   currentTokenName = name;
   currentExpiresAt = null;
+  currentTacitRecord = null;
   const thisManageVersion = ++manageVersion;
   // True once a newer showManage()/hideManage() has superseded this call. Guard
   // every DOM mutation with it so an older, slower response can't clobber a
@@ -3639,6 +3649,7 @@ async function showManage(tokenId, name) {
       const val = results[4 + i]?.[0];
       if (val) textRecords[key] = val;
     });
+    currentTacitRecord = textRecords[TACIT_RECORD_KEY] || null;
 
     const isOwner = _connectedAddress && owner.toLowerCase() === _connectedAddress.toLowerCase();
     // Is THIS the name the connected address currently shows as? setPrimaryName is
@@ -3746,7 +3757,7 @@ async function showManage(tokenId, name) {
         const short = val.length > 24 ? val.slice(0, 12) + '\u2026' + val.slice(-8) : val;
         infoHtml += `<div><span>Tacit:</span><a href="https://tacit.finance" target="_blank" rel="noopener" title="Paid privately via Tacit" style="color:inherit;"><img src="${TACIT_LOGO}" alt="" width="12" height="12" style="vertical-align:-2px;margin-right:4px;opacity:0.85;"></a><span title="${escaped}" style="font-family:monospace;font-size:11px;opacity:1;text-transform:none;letter-spacing:0;margin:0;">${escapeHtml(short)}</span>${
           // An older-form record still works; its owner can re-derive to the current one.
-          isOwner && !isExpiredInGrace && !isSubInactive && !tacitIsCurrent(val)
+          isOwner && !isExpiredInGrace && !isSubInactive && tacitNameOk(name) && !tacitIsCurrent(val)
             ? ` <a href="#" onclick="showManageForm('tacit');return false;" title="Re-derive to the current Tacit address format" style="color:inherit;font-size:11px;opacity:0.6;margin-left:6px;">update →</a>` : ''
         }</div>`;
       } else if (key === 'com.github') {
@@ -3755,7 +3766,7 @@ async function showManage(tokenId, name) {
         infoHtml += `<div><span>${label}:</span>${escaped}</div>`;
       }
     }
-    if (isOwner && !isExpiredInGrace && !isSubInactive && !textRecords[TACIT_RECORD_KEY]) {
+    if (isOwner && !isExpiredInGrace && !isSubInactive && tacitNameOk(name) && !textRecords[TACIT_RECORD_KEY]) {
       infoHtml += `<div style="font-size:11px;opacity:0.55;margin:8px 0 0;"><a href="https://tacit.finance" target="_blank" rel="noopener"><img src="${TACIT_LOGO}" alt="Tacit" width="12" height="12" style="vertical-align:-2px;margin-right:5px;"></a><a href="#" onclick="showManageForm('tacit');return false;" style="color:inherit;">Get paid privately at ${escapeHtml(name)}.wei on Bitcoin, Ethereum &amp; L2s →</a></div>`;
     }
     $('manageInfo').innerHTML = infoHtml;
@@ -3775,7 +3786,7 @@ async function showManage(tokenId, name) {
         <button onclick="showManageForm('setAddr')">Set Recipient</button>
         <button onclick="showManageForm('setContent')">Set Website</button>
         <button onclick="showManageForm('setText')">Set Text</button>
-        <button onclick="showManageForm('tacit')">Tacit Address</button>
+        ${tacitNameOk(name) ? `<button onclick="showManageForm('tacit')">Tacit Address</button>` : ''}
         <button onclick="showManageForm('subdomain')">Subdomain</button>
         <button onclick="showManageForm('subSales')">Subdomain Sales</button>
         ${unsetBtn || `<button onclick="doSetPrimary()">Set as Display Name</button>`}
@@ -3819,6 +3830,7 @@ function showManageForm(action) {
         <label>Recipient</label>
         <input type="text" id="transferTo" placeholder="0x... or name.wei" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" oninput="previewTransferRecipient()">
         <div id="transferPreview" style="font-size:12px;margin-bottom:12px;display:none;"></div>
+        ${currentTacitRecord ? `<label class="tacit-check" style="margin-bottom:12px;"><input type="checkbox" id="transferClearTacit" checked><img src="${TACIT_LOGO}" width="14" height="14" alt=""><span>Clear the Tacit address first — Tacit apps pay whatever it holds, even after a transfer</span></label>` : ''}
         <button onclick="doTransfer()">Transfer</button>
         <button class="secondary" onclick="$('manageForm').classList.remove('show')">Cancel</button>
       `;
@@ -3846,7 +3858,8 @@ function showManageForm(action) {
       html = `
         <label style="display:flex;align-items:center;gap:6px;"><img src="${TACIT_LOGO}" alt="" width="14" height="14">Tacit Address</label>
         <div style="font-size:11px;opacity:0.5;margin-bottom:8px;">Let anyone pay ${escapeHtml(currentTokenName)}.wei privately on Bitcoin, Ethereum and L2s with <a href="https://tacit.finance" target="_blank" rel="noopener" style="color:inherit;">Tacit</a>. Paste your address from tacit.finance/pay (Receive \u2192 Your Tacit address), or derive it from this wallet.</div>
-        <input type="text" id="tacitAddr" placeholder="tacit1..." spellcheck="false" autocomplete="off" style="font-family:monospace;font-size:11px;">
+        <input type="text" id="tacitAddr" placeholder="tacit1..." spellcheck="false" autocomplete="off" style="font-family:monospace;font-size:11px;" oninput="tacitNote(this.value, 'tacitNote')">
+        <div id="tacitNote" class="tacit-note"></div>
         <button onclick="doTacitDeriveAndSave()" title="Signs the Tacit identity message, then saves the address. The signature never leaves this page and is discarded once the address is computed.">Derive &amp; save</button>
         <button class="secondary" onclick="doSetTacit()">Save pasted</button>
         <button class="secondary" onclick="$('manageForm').classList.remove('show')">Cancel</button>
@@ -4031,6 +4044,13 @@ async function doTransfer() {
     const displayTo = result.name ? result.name : to.slice(0, 8) + '...' + to.slice(-4);
     if (!confirm('Transfer ' + currentTokenName + '.wei to ' + displayTo + '?\n\nRecipient: ' + to + '\n\nThis action is irreversible.')) {
       return;
+    }
+    if ($('transferClearTacit')?.checked) {
+      showStatus('Clearing the Tacit address...', '');
+      const clr = await wcTransaction(contract.setText(currentTokenId, TACIT_RECORD_KEY, ''), 'Approve clearing the Tacit address');
+      showStatus('Waiting for confirmation...', '', clr.hash);
+      await waitForTx(clr);
+      currentTacitRecord = null;
     }
     showStatus('Transferring to ' + displayTo + '...', '');
     const tx = await wcTransaction(contract.transferFrom(_connectedAddress, to, currentTokenId), 'Approve transfer');
@@ -4223,6 +4243,7 @@ async function doTacitDerive(inputId = 'tacitAddr') {
     showStatus('Sign the Tacit identity message in your wallet...', '');
     const addr = await deriveTacitAddress();
     if ($(inputId)) $(inputId).value = addr;
+    tacitNote(addr, inputId === 'regTacitAddr' ? 'regTacitNote' : 'tacitNote');
     showStatus('Tacit address derived — check it matches tacit.finance/pay', 'success');
   } catch (e) {
     handleError(e);
@@ -4252,7 +4273,15 @@ async function doTacitDeriveAndSave() {
   try {
     showStatus('Sign the Tacit identity message in your wallet...', '');
     const addr = await deriveTacitAddress();
-    if ($('tacitAddr')) $('tacitAddr').value = addr;
+    if ($('tacitAddr')) { $('tacitAddr').value = addr; tacitNote(addr, 'tacitNote'); }
+    const existing = currentTokenName === name ? currentTacitRecord : null;
+    if (existing === addr) { showStatus(name + '.wei already has this Tacit address', 'success'); return; }
+    // An older-format record is the expected upgrade; a different current one may be
+    // another wallet's address, so stop and let the owner decide.
+    if (existing && tacitIsCurrent(existing)) {
+      showStatus('This wallet\u2019s Tacit address differs from the one on ' + name + '.wei. Check it against tacit.finance/pay, then use Save pasted to replace it.', 'error');
+      return;
+    }
     await writeTacitRecord(name, tokenId, decodeTacitAddress(addr));
   } catch (e) {
     handleError(e);
@@ -4280,6 +4309,21 @@ async function doSetTacit() {
   }
 }
 
+// Tacit apps look names up only in a–z, 0–9 and hyphens (café.wei or 🦄.wei can't be
+// paid by name there), so the option is offered only where it can work.
+function tacitNameOk(name) {
+  return /^[a-z0-9-]+(\.[a-z0-9-]+)*$/.test(String(name ?? ''));
+}
+
+// A valid address in an older format still works, just not on L2 pools; say so.
+function tacitNote(value, noteId) {
+  const el = $(noteId);
+  if (!el) return;
+  let older = false;
+  try { older = !tacitIsCurrent(decodeTacitAddress(value)); } catch (_) {}
+  el.textContent = older ? 'Older Tacit address format — it won\u2019t receive on L2 pools. Copy it again from tacit.finance/pay, or derive it.' : '';
+}
+
 // ── the pending panel's "Get paid privately" box ──
 // Only a current-form address pre-fills, so a new name never starts on an older one.
 function tacitPref(owner) {
@@ -4304,9 +4348,12 @@ function paintTacitOpt(pending) {
   const key = pending.commitment || pending.name;
   if (_tacitOptFor === key || !$('tacitOn')) return;
   _tacitOptFor = key;
-  const addr = pending.tacit || (pending.owner && tacitPref(pending.owner));
+  const ok = tacitNameOk(pending.name);
+  $('tacitOpt').style.display = ok ? '' : 'none';
+  const addr = ok ? pending.tacit || (pending.owner && tacitPref(pending.owner)) : null;
   $('tacitOn').checked = !!addr;
   $('regTacitAddr').value = addr || '';
+  tacitNote(addr || '', 'regTacitNote');
   onTacitToggle();
 }
 
@@ -4319,7 +4366,7 @@ function tacitChoice() {
 // Everything that follows a confirmed registration, whichever path paid for it.
 async function afterRegister(pending, receipt) {
   refreshAfterTx(pending.name, nameRegistered, receipt);
-  if (!pending.tacit) return;
+  if (!pending.tacit || !tacitNameOk(pending.name)) return;
   const owner = pending.owner || _connectedAddress;
   if (!contract || !_connectedAddress || !owner || owner.toLowerCase() !== _connectedAddress.toLowerCase()) {
     showStatus(pending.name + '.wei is registered. Connect its wallet and add the Tacit address from Manage.', 'error');
