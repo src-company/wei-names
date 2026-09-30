@@ -3847,8 +3847,8 @@ function showManageForm(action) {
         <label style="display:flex;align-items:center;gap:6px;"><img src="${TACIT_LOGO}" alt="" width="14" height="14">Tacit Address</label>
         <div style="font-size:11px;opacity:0.5;margin-bottom:8px;">Let anyone pay ${escapeHtml(currentTokenName)}.wei privately on Bitcoin, Ethereum and L2s with <a href="https://tacit.finance" target="_blank" rel="noopener" style="color:inherit;">Tacit</a>. Paste your address from tacit.finance/pay (Receive \u2192 Your Tacit address), or derive it from this wallet.</div>
         <input type="text" id="tacitAddr" placeholder="tacit1..." spellcheck="false" autocomplete="off" style="font-family:monospace;font-size:11px;">
-        <button onclick="doSetTacit()">Save</button>
-        <button class="secondary" onclick="doTacitDerive()" title="Signs the Tacit identity message. The signature never leaves this page and is discarded once the address is computed.">Derive from wallet</button>
+        <button onclick="doTacitDeriveAndSave()" title="Signs the Tacit identity message, then saves the address. The signature never leaves this page and is discarded once the address is computed.">Derive &amp; save</button>
+        <button class="secondary" onclick="doSetTacit()">Save pasted</button>
         <button class="secondary" onclick="$('manageForm').classList.remove('show')">Cancel</button>
       `;
       break;
@@ -4241,6 +4241,25 @@ async function writeTacitRecord(name, tokenId, value) {
   try { localStorage.setItem(TACIT_PREF_PREFIX + _connectedAddress.toLowerCase(), value); } catch (_) {}
   showStatus(name + '.wei can now be paid privately with Tacit', 'success', tx.hash);
   refreshAfterTx(name, panelRepainted, receipt);
+}
+
+// One action from the Manage form: sign, show the derived address, write the record.
+async function doTacitDeriveAndSave() {
+  if (isProcessing || !contract || !currentTokenId) return;
+  const name = currentTokenName, tokenId = currentTokenId;
+  isProcessing = true;
+  const btn = (typeof event !== 'undefined' && event?.target) || null; if (btn) btn.disabled = true;
+  try {
+    showStatus('Sign the Tacit identity message in your wallet...', '');
+    const addr = await deriveTacitAddress();
+    if ($('tacitAddr')) $('tacitAddr').value = addr;
+    await writeTacitRecord(name, tokenId, decodeTacitAddress(addr));
+  } catch (e) {
+    handleError(e);
+  } finally {
+    isProcessing = false;
+    if (btn) btn.disabled = false;
+  }
 }
 
 async function doSetTacit() {
