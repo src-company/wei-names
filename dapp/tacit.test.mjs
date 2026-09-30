@@ -102,5 +102,88 @@ const unknown = enc([...pay(0, 0x0b, spend), 1, 2, 3]);
 eq('unknown lane with extra bytes validates', decode(unknown), unknown);
 throws('unknown lane shorter than known lanes', () => decode(enc(pay(0, 0x0b))));
 
+// ── registration: the pending panel's box and what follows the reveal ─────────
+// A DOM of just the elements these functions touch, and stubs for the chain.
+const el = () => ({ value: '', checked: false, disabled: false, classList: { on: false, toggle(_, v) { this.on = v; } } });
+const dom = { tacitOpt: el(), tacitOn: el(), regTacitAddr: el() };
+const store = new Map();
+const calls = [];
+const reg = vm.createContext({
+  ethers, BigInt, Error, Uint8Array, Array, String, Number, JSON, console,
+  $: id => dom[id],
+  localStorage: { getItem: k => store.get(k) ?? null, setItem: (k, v) => store.set(k, String(v)) },
+  HASH32_RE: /^0x[0-9a-fA-F]{64}$/,
+  contract: { setText: async (...a) => { calls.push(['setText', ...a]); return { hash: '0x' + '11'.repeat(32) }; } },
+  _connectedAddress: '0x' + 'aB'.repeat(20),
+  wcTransaction: p => p, waitForTx: async () => ({ blockNumber: 1 }),
+  showStatus: (m, t) => calls.push(['status', t, m]),
+  refreshAfterTx: (...a) => { calls.push(['refresh', a[0]]); return Promise.resolve(true); },
+  nameRegistered: 'nameRegistered', panelRepainted: 'panelRepainted',
+  localComputeId: n => 'id:' + n,
+});
+vm.runInContext([
+  liftConst('TACIT_RECORD_KEY'), liftConst('TACIT_BECH32'), liftConst('SECP_N'), liftConst('TACIT_PREF_PREFIX'),
+  ...['tacitPolymod', 'tacitHrpExpand', 'tacitConvertBits', 'tacitIsPoint', 'decodeTacitAddress',
+      'sanePending', 'tacitPref', 'lockTacitOpt', 'onTacitToggle', 'tacitChoice', 'writeTacitRecord', 'afterRegister'].map(lift),
+  SRC.find(l => l.startsWith('let _tacitOptFor')), lift('paintTacitOpt'),
+].join('\n'), reg, { filename: 'index.html:tacit-register' });
+const r = (n) => vm.runInContext(n, reg);
+const owner = r('_connectedAddress');
+
+// First commitment for an account with no history: unticked, empty.
+r('paintTacitOpt')({ name: 'alice', owner, commitment: '0x01' });
+eq('no remembered address: box unticked', dom.tacitOn.checked, false);
+eq('unticked: choice is null', r('tacitChoice')(), null);
+
+// Ticked with a bad address: the reveal must stop before paying.
+dom.tacitOn.checked = true; dom.regTacitAddr.value = 'tacit1nope';
+throws('ticked with a bad address', () => r('tacitChoice')());
+dom.regTacitAddr.value = VECTOR.toUpperCase();
+eq('ticked with a good address: normalised value', r('tacitChoice')(), VECTOR);
+
+// A repaint of the SAME commitment keeps what the user typed.
+dom.regTacitAddr.value = 'typing…';
+r('paintTacitOpt')({ name: 'alice', owner, commitment: '0x01' });
+eq('repaint of the same commitment leaves input alone', dom.regTacitAddr.value, 'typing…');
+
+// Storage is untrusted: a bad saved address is dropped, a good one kept.
+const secret = '0x' + '22'.repeat(32);
+eq('sanePending keeps a valid tacit', r('sanePending')({ name: 'a', timestamp: 1, secret, tacit: VECTOR }).tacit, VECTOR);
+eq('sanePending drops an invalid tacit', 'tacit' in r('sanePending')({ name: 'a', timestamp: 1, secret, tacit: '<img>' }), false);
+
+// After registering with the box ticked: refresh, then one setText on the new name.
+calls.length = 0;
+await r('afterRegister')({ name: 'alice', owner, tacit: VECTOR }, {});
+const set = calls.find(c => c[0] === 'setText');
+eq('afterRegister refreshes the name', calls[0][0] + ':' + calls[0][1], 'refresh:alice');
+eq('afterRegister writes finance.tacit on the new id', set && set.slice(1).join('|'), `id:alice|finance.tacit|${VECTOR}`);
+eq('the address is remembered for this account', store.get('wei-tacit:' + owner.toLowerCase()), VECTOR);
+
+// The next commitment from the same account comes pre-ticked and pre-filled.
+r('paintTacitOpt')({ name: 'bob', owner, commitment: '0x02' });
+eq('next commitment: box pre-ticked', dom.tacitOn.checked, true);
+eq('next commitment: address pre-filled', dom.regTacitAddr.value, VECTOR);
+eq('fields shown when ticked', dom.tacitOpt.classList.on, true);
+
+// Unticked: nothing beyond the refresh.
+calls.length = 0;
+await r('afterRegister')({ name: 'carol', owner }, {});
+eq('unticked: no setText', calls.some(c => c[0] === 'setText'), false);
+
+// Registered but a different wallet is connected now: no tx, a pointer to Manage.
+calls.length = 0;
+await r('afterRegister')({ name: 'dave', owner: '0x' + '99'.repeat(20), tacit: VECTOR }, {});
+eq('other wallet connected: no setText', calls.some(c => c[0] === 'setText'), false);
+eq('other wallet connected: says where to finish', calls.some(c => c[0] === 'status' && /Manage/.test(c[2])), true);
+
+// Wallet rejects the setText: registration still reads as done, no throw.
+reg.contract.setText = async () => { throw new Error('user rejected'); };
+calls.length = 0;
+await r('afterRegister')({ name: 'erin', owner, tacit: VECTOR }, {});
+eq('rejected setText: explains, does not throw', calls.some(c => c[0] === 'status' && /registered/.test(c[2]) && /Manage/.test(c[2])), true);
+
+r('lockTacitOpt')(true);
+eq('locked once the reveal is out', dom.tacitOn.disabled && dom.regTacitAddr.disabled, true);
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
