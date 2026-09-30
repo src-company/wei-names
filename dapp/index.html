@@ -122,6 +122,9 @@ h1 {
 .section {
   margin-bottom: 40px;
 }
+.name-section { margin-bottom: 24px; }
+.commit-section { margin-bottom: 32px; }
+#commitBtn { margin-top: 0; }
 label {
   display: block;
   font-size: 11px;
@@ -181,7 +184,7 @@ button.secondary:hover { background: var(--surface-hover); }
 .status.success { background: var(--status-success); }
 .availability {
   font-size: 18px;
-  margin-top: 16px;
+  margin-top: 20px;
   display: none;
 }
 .availability.show { display: block; }
@@ -192,10 +195,11 @@ button.secondary:hover { background: var(--surface-hover); }
   color: var(--fg-muted);
   margin-top: 8px;
 }
+.fee:empty { display: none; }
 .free-cta {
   display: block; width: auto; background: none; border: 0; padding: 0;
   font-family: inherit; text-transform: none; text-align: left;
-  margin-top: 10px;
+  margin-top: 14px;
   font-size: 12px;
   color: var(--free-accent);
   cursor: pointer;
@@ -318,8 +322,8 @@ button.secondary:hover { background: var(--surface-hover); }
 .pay-option svg { display: block; }
 .term-row {
   display: flex;
-  align-items: center;
-  gap: 10px;
+  align-items: baseline;
+  gap: 6px 14px;
   flex-wrap: wrap;
   margin-top: 10px;
 }
@@ -332,18 +336,28 @@ button.secondary:hover { background: var(--surface-hover); }
   white-space: nowrap;
 }
 .term-select {
+  -webkit-appearance: none;
+  appearance: none;
+  width: auto;
+  margin: 0;
   font-family: inherit;
-  font-size: 12px;
-  font-weight: 600;
-  padding: 6px 10px;
-  border: 1.5px solid var(--border);
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.4;
+  padding: 2px 20px 3px 0;
+  border: 0;
+  border-bottom: 1px solid var(--border);
   border-radius: 0;
-  background: var(--bg);
+  background: transparent url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23666' stroke-width='1.3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat right 2px center / 10px 6px;
   color: var(--fg);
   cursor: pointer;
+  transition: border-color 0.15s;
 }
-.term-note { font-size: 12px; color: var(--fg-muted); }
-.term-note b { color: var(--fg); font-weight: 600; }
+.dark .term-select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23999' stroke-width='1.3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"); }
+.term-select:hover, .term-select:focus-visible { border-bottom-color: var(--fg); outline: none; }
+.term-select option { background: var(--bg); color: var(--fg); }
+.term-note { font-size: 13px; color: var(--fg-muted); }
+.term-note b { color: var(--fg); font-weight: 500; }
 .tacit-opt { margin: 0 0 14px; font-size: 12px; color: var(--fg-muted); }
 .tacit-opt a { color: inherit; }
 .tacit-check { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 12px; text-transform: none; letter-spacing: 0; cursor: pointer; }
@@ -368,10 +382,12 @@ button.secondary:hover { background: var(--surface-hover); }
 /* "random" draw, sitting in the Name label's row */
 .label-row {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: 12px;
+  margin-bottom: 8px;
 }
+.label-row label, .label-row .rand-btn { margin: 0; }
 .rand-btn {
   display: inline-flex;
   align-items: center;
@@ -464,13 +480,14 @@ body.modal-open { overflow: hidden; }
 }
 .view-link {
   font-size: 12px;
-  margin-top: 8px;
+  margin-top: 6px;
 }
 .view-link a {
   color: var(--fg);
   opacity: 0.5;
+  text-decoration: none;
 }
-.view-link a:hover { opacity: 1; }
+.view-link a:hover { opacity: 1; text-decoration: underline; }
 
 /* Scrolling names */
 .scroll-names {
@@ -527,7 +544,7 @@ body.modal-open { overflow: hidden; }
   .view-link a, .send-toggle, .free-cta { display: inline-block; padding: 6px 0; }
   /* Same, for the random draw — and keep it off the blanket button{width:100%},
      which would otherwise stretch it across the Name label's row. */
-  .rand-btn { width: auto; padding: 6px 0 6px 16px; margin-bottom: 2px; }
+  .rand-btn { width: auto; padding: 6px 0 6px 16px; }
   /* Integrations: two aligned columns on phones. */
   .integrations-row { grid-template-columns: repeat(2, auto); gap: 16px 28px; }
   .pending .actions { flex-direction: row; gap: 8px; }
@@ -559,8 +576,7 @@ body.modal-open { overflow: hidden; }
 
 /* Send section */
 .send-section {
-  margin-bottom: 40px;
-  padding-top: 24px;
+  padding: 20px 0;
   border-top: 1px solid var(--border);
 }
 .send-toggle {
@@ -924,7 +940,7 @@ try{if(localStorage.getItem('wns_dao_banner')==='1'){var _db=document.getElement
 
 <h1>wei name service</h1>
 
-<div class="section">
+<div class="section name-section">
   <div class="label-row">
     <label for="nameInput">Name</label>
     <button type="button" id="randomBtn" class="rand-btn" onclick="randomName()" title="Draw a random name that nobody has registered">
@@ -981,7 +997,7 @@ try{if(localStorage.getItem('wns_dao_banner')==='1'){var _db=document.getElement
   <div style="font-size:10px;opacity:0.5;margin-top:12px;line-height:1.4;">Your secret is stored locally. Don't clear site data or you won't be able to reveal.</div>
 </div>
 
-<div class="section">
+<div class="section commit-section">
   <button id="commitBtn" onclick="doCommit()" disabled>Commit</button>
   <div style="font-size:11px;opacity:0.4;margin-top:16px;letter-spacing:0.05em;">a simple namespace on ethereum named after the smallest unit of ether</div>
 </div>
@@ -2348,11 +2364,11 @@ async function doCheckName() {
       commitBtn.textContent = _signer ? 'Commit' : 'Connect to commit';
       hideManage();
 
-      let feeText = ethers.formatEther(fee) + ' ETH per year';
+      let feeText = ethers.formatEther(fee) + ' ETH / year';
       if (premium > 0n) {
         feeText += ' + ' + ethers.formatEther(premium) + ' ETH premium';
       }
-      feeEl.textContent = 'Fee: ' + feeText;
+      feeEl.textContent = feeText;
       showTermRow(fee, premium);
     } else {
       const osLink = `https://opensea.io/assets/ethereum/${CONTRACT}/${tokenId}`;
