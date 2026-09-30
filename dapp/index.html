@@ -449,6 +449,10 @@ body.modal-open { overflow: hidden; }
   color: var(--fg-muted);
 }
 .manage-info a { color: inherit; }
+.tacit-val { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; min-width: 0; }
+.tacit-val img { display: block; }
+.tacit-val code { font-size: 11px; white-space: nowrap; }
+.tacit-val .act, .tacit-val em { font-size: 11px; font-style: normal; color: var(--fg-muted); }
 .manage-actions {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -3754,12 +3758,21 @@ async function showManage(tokenId, name) {
         const handle = val.startsWith('@') ? val : '@' + val;
         infoHtml += `<div><span>${label}:</span><a href="https://x.com/${escapeHtml(val.replace(/^@+/, ''))}" target="_blank" rel="noopener" style="color:inherit;">${escapeHtml(handle)}</a></div>`;
       } else if (key === TACIT_RECORD_KEY) {
-        const short = val.length > 24 ? val.slice(0, 12) + '\u2026' + val.slice(-8) : val;
-        infoHtml += `<div><span>Tacit:</span><a href="https://tacit.finance" target="_blank" rel="noopener" title="Paid privately via Tacit" style="color:inherit;"><img src="${TACIT_LOGO}" alt="" width="12" height="12" style="vertical-align:-2px;margin-right:4px;opacity:0.85;"></a><span title="${escaped}" style="font-family:monospace;font-size:11px;opacity:1;text-transform:none;letter-spacing:0;margin:0;">${escapeHtml(short)}</span>${
+        // Public: anyone can copy the address to pay this name privately. Only a
+        // valid record gets a copy button, so a malformed one is never passed on.
+        let valid = null;
+        try { valid = decodeTacitAddress(val); } catch (_) {}
+        const short = val.length > 20 ? val.slice(0, 10) + '\u2026' + val.slice(-6) : val;
+        infoHtml += `<div><span>Tacit:</span><div class="tacit-val"><a href="https://tacit.finance" target="_blank" rel="noopener" title="Paid privately via Tacit"><img src="${TACIT_LOGO}" alt="Tacit" width="12" height="12"></a><code title="${escaped}">${escapeHtml(short)}</code>${
+          valid
+            ? `<a class="act" href="#" onclick="copyTacitAddress();return false;" title="Copy the full address, to pay ${escapeHtml(name)}.wei privately from any Tacit wallet">copy</a>` +
+              `<a class="act" href="https://tacit.finance/pay" target="_blank" rel="noopener">pay \u2197</a>`
+            : `<em>not a valid address</em>`
+        }${
           // An older-form record still works; its owner can re-derive to the current one.
           isOwner && !isExpiredInGrace && !isSubInactive && tacitNameOk(name) && !tacitIsCurrent(val)
-            ? ` <a href="#" onclick="showManageForm('tacit');return false;" title="Re-derive to the current Tacit address format" style="color:inherit;font-size:11px;opacity:0.6;margin-left:6px;">update →</a>` : ''
-        }</div>`;
+            ? `<a class="act" href="#" onclick="showManageForm('tacit');return false;" title="Re-derive to the current Tacit address format">update \u2192</a>` : ''
+        }</div></div>`;
       } else if (key === 'com.github') {
         infoHtml += `<div><span>${label}:</span><a href="https://github.com/${escaped}" target="_blank" rel="noopener" style="color:inherit;">${escaped}</a></div>`;
       } else {
@@ -4326,6 +4339,21 @@ function tacitNote(value, noteId) {
   let older = false;
   try { older = !tacitIsCurrent(decodeTacitAddress(value)); } catch (_) {}
   el.textContent = older ? 'Older Tacit address format — it won\u2019t receive on L2 pools. Copy it again from tacit.finance/pay, or derive it.' : '';
+}
+
+// Copy the shown name's Tacit address (validated, so what's copied is payable).
+// Falls back to a hidden textarea where the async clipboard isn't available.
+async function copyTacitAddress() {
+  let addr;
+  try { addr = decodeTacitAddress(currentTacitRecord); } catch (_) { return; }
+  const done = () => showStatus('Tacit address copied — paste it in any Tacit wallet to pay ' + currentTokenName + '.wei privately', 'success');
+  try { await navigator.clipboard.writeText(addr); return done(); } catch (_) {}
+  const ta = document.createElement('textarea');
+  ta.value = addr; ta.setAttribute('readonly', ''); ta.style.cssText = 'position:fixed;opacity:0;';
+  document.body.appendChild(ta); ta.select();
+  const ok = document.execCommand && document.execCommand('copy');
+  ta.remove();
+  if (ok) done(); else showStatus('Copy failed — the full address is in the tooltip', 'error');
 }
 
 // ── the pending panel's "Get paid privately" box ──

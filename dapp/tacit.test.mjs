@@ -362,5 +362,36 @@ eq('Set Text: unchanged tacit value sends nothing', await save('doSetText', { ex
 eq('Set Text: clearing an empty tacit record sends nothing', await save('doSetText', { existing: null, input: '' }), false);
 eq('Set Text: clearing a set tacit record is written', await save('doSetText', { existing: UNIFIED, input: '' }), true);
 
+// ── public copy ─────────────────────────────────────────────────────────────
+async function copyWith({ record, clipboardOk = true, execOk = true }) {
+  const seen = { copied: null, status: null };
+  const c = vm.createContext({
+    ethers, Uint8Array, Array, String, Error, BigInt,
+    currentTacitRecord: record, currentTokenName: 'alice',
+    navigator: { clipboard: { writeText: async v => { if (!clipboardOk) throw new Error('denied'); seen.copied = v; } } },
+    document: {
+      createElement: () => ({ value: '', style: {}, setAttribute() {}, select() {}, remove() {} }),
+      body: { appendChild: el => { seen.fallback = el; } },
+      execCommand: () => { if (execOk) seen.copied = seen.fallback.value; return execOk; },
+    },
+    showStatus: (m, t) => { seen.status = t + ':' + m; },
+  });
+  vm.runInContext([liftConst('TACIT_BECH32'), ...['tacitPolymod', 'tacitHrpExpand', 'tacitConvertBits', 'tacitIsPoint',
+    'decodeTacitAddress', 'copyTacitAddress'].map(lift)].join('\n'), c);
+  await vm.runInContext('copyTacitAddress()', c);
+  return seen;
+}
+let cp = await copyWith({ record: UNIFIED });
+eq('copy: the full address', cp.copied, UNIFIED);
+eq('copy: says how to use it', /pay alice\.wei privately/.test(cp.status), true);
+cp = await copyWith({ record: UNIFIED.toUpperCase() });
+eq('copy: an all-caps record is copied in its stored-lowercase form', cp.copied, UNIFIED);
+cp = await copyWith({ record: UNIFIED, clipboardOk: false });
+eq('copy: falls back when the clipboard API is refused', cp.copied, UNIFIED);
+cp = await copyWith({ record: UNIFIED, clipboardOk: false, execOk: false });
+eq('copy: says so when nothing can copy', /^error:/.test(cp.status), true);
+cp = await copyWith({ record: 'tacit1nope' });
+eq('copy: an invalid record is never copied', cp.copied, null);
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
