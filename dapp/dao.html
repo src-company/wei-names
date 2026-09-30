@@ -18,10 +18,11 @@ try{var d=localStorage.getItem('dark');if(d==='1'||(d===null&&matchMedia('(prefe
 /* Same ink and lines as the lander: near-black rather than pure #000, structural
    lines that whisper. theme.css only carries body/a/dark-toggle, so the rest of
    the WNS palette is restated here. */
-html:not(.dark){--fg:#1a1a1a;--fg-muted:#6b6b6b;--fg-dim:#a3a3a3;--border:#d6d6d6;
-                --border-muted:#e6e6e6;--btn-bg:#1a1a1a;--btn-hover:#000;--input-ph:#ccc;
-                --btn-dis-bg:#ccc;--btn-dis-border:#ccc;--btn-dis-fg:#999}
-html.dark{--input-ph:#555;--btn-dis-bg:#444;--btn-dis-border:#444;--btn-dis-fg:#666}
+html:not(.dark){--fg:#111;--fg-muted:#666;--fg-dim:#9e9e9e;--border:#dedede;--border-muted:#ececec;
+                --frame:#111;--btn-bg:#111;--btn-hover:#000;--input-ph:#bbb;
+                --ok:#137a2a;--bad:#c01c1c;--warn:#a86b00}
+html.dark{--border:#2a2a2a;--border-muted:#1f1f1f;--fg-dim:#6b6b6b;--frame:#5a5a56;--input-ph:#555;
+          --ok:#3ccb5a;--bad:#ff5a52;--warn:#e0a33a}
 
 body{max-width:720px;padding:64px 24px 24px;font-family:Helvetica,Arial,sans-serif;font-size:15px}
 a{color:inherit}
@@ -52,12 +53,11 @@ button{display:inline-block;padding:11px 22px;font-size:11px;font-family:inherit
        border-radius:0;cursor:pointer}
 button:hover:not(:disabled){background:var(--btn-hover)}
 button:active:not(:disabled){transform:translateY(1px)}
-button:disabled{background:var(--btn-dis-bg);border-color:var(--btn-dis-border);color:var(--btn-dis-fg);cursor:not-allowed}
-button.sec{background:var(--bg);color:var(--fg);border-color:var(--border)}
-button.sec:hover:not(:disabled){background:var(--bg);border-color:var(--fg)}
-button.sec:disabled{background:var(--bg);color:var(--btn-dis-fg);border-color:var(--btn-dis-border)}
+button:disabled,button.sec:disabled{background:transparent;border:1px dashed var(--border);color:var(--fg-dim);cursor:not-allowed}
+button.sec{background:transparent;color:var(--fg);border-color:var(--frame)}
+button.sec:hover:not(:disabled){background:var(--fg);color:var(--bg);border-color:var(--fg)}
 button.sm{padding:7px 14px;font-size:10px}
-button.danger{background:#b4232b;border-color:#b4232b;color:#fff}
+button.danger{background:var(--bad);border-color:var(--bad);color:#fff}
 button:focus-visible,a:focus-visible{outline:2px solid var(--btn-bg);outline-offset:2px}
 
 label{display:block;font-size:10px;letter-spacing:0.08em;text-transform:uppercase;
@@ -73,10 +73,9 @@ input[type=checkbox]{width:auto;accent-color:var(--fg);cursor:pointer;margin:0}
 .row{display:flex;gap:14px;flex-wrap:wrap;align-items:center}
 #wpick{display:none;gap:18px;flex-wrap:wrap;margin-top:14px}
 #wpick.show{display:flex}
-.ok{color:#1a8917}.warn{color:#9a6a00}.bad{color:#b4232b}.dim{color:var(--fg-dim)}
-html.dark .ok{color:#2ecc40}html.dark .warn{color:#fbbf24}html.dark .bad{color:#fb7185}
+.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}.dim{color:var(--fg-dim)}
 .note{font-size:11.5px;color:var(--fg-muted);line-height:1.65}
-pre{border:none;border-left:2px solid var(--border);padding:2px 0 2px 12px;overflow:auto;max-height:150px;
+pre{border:1px solid var(--frame);padding:10px 12px !important;overflow:auto;max-height:150px;
     font-size:11px;color:var(--fg-muted);word-break:break-all;white-space:pre-wrap;
     font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 
@@ -91,30 +90,27 @@ pre{border:none;border-left:2px solid var(--border);padding:2px 0 2px 12px;overf
 .pval{margin-left:auto;font-variant-numeric:tabular-nums;color:var(--fg)}
 .pdesc{font-size:17px;line-height:1.4;margin:10px 0 4px;letter-spacing:-0.015em;
        text-transform:none;color:var(--fg)}
-.pill{letter-spacing:0.12em}
-.pill.open{color:var(--fg-dim)}
-.pill.exec{color:#1a8917}
-.pill.veto{color:#b4232b}
-.pill.ready{color:#9a6a00}
-html.dark .pill.exec{color:#2ecc40}html.dark .pill.veto{color:#fb7185}html.dark .pill.ready{color:#fbbf24}
-.bars{display:grid;grid-template-columns:54px 1fr 92px;gap:12px;align-items:center;
-      font-size:9.5px;letter-spacing:0.1em;text-transform:uppercase;margin:7px 0;color:var(--fg-dim)}
-.bars > span:last-child{text-align:right;font-variant-numeric:tabular-nums;letter-spacing:0.04em}
-.bar{height:3px;background:var(--border-muted);position:relative}
+.pill{letter-spacing:0.1em;border:1px solid currentColor;padding:1px 6px}
+.pill.open{color:var(--fg-muted)}
+.pill.exec{color:var(--ok)}
+.pill.veto{color:var(--bad)}
+.pill.ready{color:var(--fg);background:var(--fg);color:var(--bg);border-color:var(--fg)}
+.bars{display:grid;grid-template-columns:54px 1fr 64px;gap:12px;align-items:center;
+      font-size:10px;letter-spacing:0.1em;text-transform:uppercase;margin:8px 0;color:var(--fg-muted)}
+.bars > span:last-child{text-align:right;font-variant-numeric:tabular-nums;letter-spacing:0.02em;color:var(--fg)}
+.bar{height:6px;background:var(--border-muted);position:relative}
 .bar > i{display:block;height:100%;background:var(--fg);min-width:1px}
-.bar.v > i{background:#b4232b}
-html.dark .bar.v > i{background:#fb7185}
+.bar.v > i{background:var(--bad)}
 /* the bar for a proposal that cannot reach the bar at its weight */
 .bar.dead > i{background:var(--fg-dim)}
-.pnote{font-size:10.5px;color:var(--fg-dim);letter-spacing:0.04em;margin-top:12px}
+.pnote{font-size:11px;color:var(--fg-muted);letter-spacing:0.02em;margin-top:12px;overflow-wrap:anywhere}
 .pacts{display:flex;gap:18px;align-items:center;margin-top:16px;flex-wrap:wrap}
 /* secondary actions read as text, so the one real action can be a button */
 .tbtn{background:none;border:none;padding:0;font:inherit;font-size:10px;letter-spacing:0.12em;
       text-transform:uppercase;color:var(--fg-muted);cursor:pointer;border-bottom:1px solid var(--border);
       border-radius:0}
 .tbtn:hover:not(:disabled){background:none;color:var(--fg);border-bottom-color:var(--fg)}
-.tbtn.warn{color:#b4232b;border-bottom-color:rgba(180,35,43,0.4)}
-html.dark .tbtn.warn{color:#fb7185}
+.tbtn.warn{color:var(--bad);border-bottom-color:currentColor}
 
 .scroll{max-height:250px;overflow:auto}
 table{width:100%;border-collapse:collapse;font-size:13px}
@@ -130,11 +126,21 @@ footer{margin-top:44px;padding-top:18px;text-align:center;font-size:11px;
        letter-spacing:0.06em;opacity:0.45;border-top:1px solid var(--border)}
 footer a{text-decoration:none}
 
+/* theme toggle: the same square chip as the lander */
+.dark-toggle,:root.dark .dark-toggle{width:36px;height:36px;padding:0;margin:0;border-radius:0;
+  border:1px solid var(--frame);background:var(--bg);background-clip:border-box;opacity:0.8;
+  display:flex;align-items:center;justify-content:center}
+.dark-toggle::before{content:'';width:12px;height:12px;border:1px solid var(--fg);
+  background:linear-gradient(135deg,var(--fg) 50%,transparent 50%)}
+.dark-toggle:hover{opacity:1}
+#acct .name{font-weight:600}
+#acct .addr{color:var(--fg-muted);margin-left:8px;font-variant-numeric:tabular-nums}
+
 @media (max-width:560px){
   body{padding:44px 16px 20px}
   .grid{grid-template-columns:1fr 1fr;gap:16px}
   .stat .v{font-size:19px}
-  .bars{grid-template-columns:44px 1fr;row-gap:2px}
+  .bars{grid-template-columns:62px 1fr;row-gap:2px}
   .bars > span:last-child{grid-column:2;text-align:left}
   .top nav{width:100%;margin-left:0;gap:14px}
 }
@@ -165,14 +171,14 @@ footer a{text-decoration:none}
 <div class="row" style="margin-top:18px">
 <button class="sec sm" id="rescan">Rescan</button><span id="pf" class="dim" style="font-size:12px">connect to scan</span></div>
 <div class="scroll" style="margin-top:14px"><table id="tbl"><thead><tr>
-<th style="width:30px" aria-label="select"></th><th>name</th><th class="n">weight (ETH)</th></tr></thead><tbody></tbody></table></div>
+<th style="width:30px"><input type="checkbox" id="selAll" aria-label="select all" checked></th><th>name</th><th class="n">weight (ETH)</th></tr></thead><tbody></tbody></table></div>
 </section>
 
 <section><h2>Proposals</h2>
 <div class="note" style="margin-bottom:20px">Descriptions are read from <code>ProposalCreated</code> logs,
 so they survive even where a proposal's <code>&lt;id&gt;.dao.wei</code> record was never written &mdash;
 three of these have none on-chain.</div>
-<div class="row" style="margin-bottom:6px">
+<div class="row" style="margin-bottom:26px">
 <button class="sec sm" id="refresh">Refresh</button>
 <label style="margin:0;display:flex;align-items:center;gap:7px;text-transform:none;letter-spacing:normal;font-size:12px;color:var(--fg-muted)">
 <input type="checkbox" id="showClosed"> show closed</label>
@@ -216,7 +222,7 @@ const S={proposalCount:"da35c664",proposals:"013cf08b",convictionOf:"cea5b888",t
          supportOf:"02cd4a68",support:"9be56c67",unsupport:"84a1faba",execute:"fe0d94c1",
          propose:"82ff16c1",veto:"1d28dec7",vetoer:"d8bff440",executor:"c34c08e5",
          vetoable:"6be60ea0",multicall:"ac9650d8",ownerOf:"6352211e",records:"34461067",
-         computeId:"fb021939",primaryName:"eba951aa",resolve:"4f896d4f",owner:"8da5cb5b"};
+         computeId:"fb021939",primaryName:"eba951aa",reverseResolve:"9af8b7aa",resolve:"4f896d4f",owner:"8da5cb5b"};
 let NAMES=[], PROPS=[], ACCT=null, PROV=null, DAOINFO=null;
 const NFT_OWNER_EXPECT=()=>DAO.toLowerCase();
 const $=id=>document.getElementById(id);
@@ -495,8 +501,14 @@ function renderNames(){
     `<td class="n">${fmt(n.w,9)}</td></tr>`).join("")
     :`<tr><td colspan="3" class="dim">${ACCT?"nothing found":"connect a wallet"}</td></tr>`;
   tb.querySelectorAll("input").forEach(cb=>{
-    cb.onchange=()=>{ const n=NAMES.find(x=>x.id===cb.dataset.id); if(n) n.sel=cb.checked; };
+    cb.onchange=()=>{ const n=NAMES.find(x=>x.id===cb.dataset.id); if(n) n.sel=cb.checked; syncSelAll(); };
   });
+  syncSelAll();
+}
+function syncSelAll(){
+  const all=$("selAll"); if(!all) return;
+  const on=NAMES.filter(n=>n.sel).length;
+  all.checked=NAMES.length>0&&on===NAMES.length; all.indeterminate=on>0&&on<NAMES.length;
 }
 
 /* ---------------- actions ---------------- */
@@ -629,8 +641,20 @@ function renderWallets(){
 // Listeners live on exactly one provider at a time, and PROV only changes once
 // a connect has succeeded on mainnet.
 let LISTENING=null;
+// The connected account as its primary .wei name when it has one, and a short address
+async function showAcct(a){
+  $("connect").style.display="none"; $("wpick").classList.remove("show");
+  $("acct").className="";
+  $("acct").innerHTML=`<span class="addr">${esc(a.slice(0,6)+"…"+a.slice(-4))}</span>`;
+  try{
+    const raw=(await call(NFT,"0x"+S.reverseResolve+h(a))).slice(2);
+    const name=raw.length>=128?readString(raw,0):"";
+    if(name&&ACCT===String(a).toLowerCase())
+      $("acct").innerHTML=`<span class="name">${esc(name)}</span><span class="addr">${esc(a.slice(0,6)+"…"+a.slice(-4))}</span>`;
+  }catch(_){}
+}
 const onAccts=as=>{ ACCT=as[0]?String(as[0]).toLowerCase():null; NAMES=[]; renderNames();
-  $("acct").innerHTML=as[0]?esc(as[0]):'<span class="bad">disconnected</span>';
+  if(as[0]) showAcct(as[0]); else { $("acct").innerHTML='<span class="bad">disconnected</span>'; $("connect").style.display=""; }
   $("propose").disabled=!ACCT||!DAOINFO; if(ACCT) scanNames(false); };
 const onChain=()=>location.reload();
 async function connect(p){
@@ -645,7 +669,7 @@ async function connect(p){
     if(LISTENING?.removeListener){ LISTENING.removeListener("accountsChanged",onAccts); LISTENING.removeListener("chainChanged",onChain); }
     LISTENING=null;
     PROV=next; ACCT=String(a).toLowerCase();
-    $("acct").innerHTML=esc(a); $("acct").className="";
+    showAcct(a);
     if(PROV.on){ PROV.on("accountsChanged",onAccts); PROV.on("chainChanged",onChain); LISTENING=PROV; }
     $("propose").disabled=!DAOINFO;
     scanNames(false);
@@ -664,6 +688,7 @@ $("connect").onclick=()=>{
   connect(null);
 };
 $("rescan").onclick=()=>scanNames(true);
+$("selAll").onchange=()=>{ const v=$("selAll").checked; NAMES.forEach(n=>n.sel=v); renderNames(); };
 $("refresh").onclick=refreshAll;
 $("showClosed").onchange=renderProposals;
 $("copy").onclick=()=>navigator.clipboard.writeText($("cd").textContent).then(()=>log("copied","dim"),()=>log("copy failed","bad"));
