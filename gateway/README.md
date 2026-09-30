@@ -15,8 +15,11 @@ GET alice.wei.limo/some/path
   ├─ else eth_call addr.html()                -> ERC-8244 document, served as-is
   └─ else eth_call WNS.contenthash(tokenId)   -> 0xe301…/0xe501…  (EIP-1577)
        ├─ decode contenthash                   -> bafy… (IPFS) or k51… (IPNS)
-       └─ 302  https://bafy….ipfs.dweb.link/   (default) — or proxy the bytes
-              https://k51….ipns.dweb.link/     (IPNS → .ipns. gateway)
+       ├─ redirect mode: 302  https://bafy….ipfs.<IPFS_SUBDOMAIN_GATEWAY>/
+       └─ proxy mode: stream from the subdomain, then path gateways in turn;
+             if none holds it, a page load is 302'd to
+             https://bafy….ipfs.inbrowser.link/  (verified in the browser)
+             (IPNS keys go to the .ipns. form of the same gateways)
 
 GET 0x1234…cdef.wei.limo/          # an address label: skips WNS, serves that
                                    # exact contract and no other
