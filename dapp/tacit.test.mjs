@@ -89,8 +89,10 @@ const scan = ethers.getBytes('0x036d4fcf6cd1084f448d7ef18ef159dd27ad129d78497899
 const pay = (v, f, ...rest) => [v, f, ...spend, ...scan, ...rest.flatMap(r => [...r])];
 eq('re-encoding the vector payload round-trips', enc(pay(0, 3, spend)), VECTOR);
 throws('version 1', () => decode(enc(pay(1, 3, spend))));
-throws('Bitcoin lane only (no Ethereum lane)', () => decode(enc(pay(0, 1))));
+throws('Bitcoin lane only (no Ethereum-side key)', () => decode(enc(pay(0, 1))));
 throws('flag 0x01 unset', () => decode(enc([0, 2, ...spend, ...scan, ...spend])));
+throws('Ethereum-side key both written out and marked (0x83)', () => decode(enc(pay(0, 0x83, spend))));
+throws('pool lane with no Ethereum-side key (0x05)', () => decode(enc(pay(0, 5, new Uint8Array(97)))));
 throws('trailing byte with no unknown flag', () => decode(enc([...pay(0, 3, spend), 0])));
 const badPoint = new Uint8Array(33); badPoint[0] = 2; badPoint[32] = 5; // x=5 is not on the curve
 throws('invalid Ethereum-side key', () => decode(enc(pay(0, 3, badPoint))));
@@ -101,6 +103,22 @@ eq('pool address is 329 characters', withPool.length, 329);
 const unknown = enc([...pay(0, 0x0b, spend), 1, 2, 3]);
 eq('unknown lane with extra bytes validates', decode(unknown), unknown);
 throws('unknown lane shorter than known lanes', () => decode(enc(pay(0, 0x0b))));
+const markedUnknown = enc([...pay(0, 0x8d, pool), 1, 2, 3]);
+eq('unknown lane beside the 0x80 marker validates', decode(markedUnknown), markedUnknown);
+throws('0x80 marker with a stray written-out key and no unknown lane', () => decode(enc(pay(0, 0x85, spend, pool))));
+
+// Pinned in Tacit's tests/tacit-address-pool.mjs (57ae243).
+const REAL_RECORD = 'tacit1qqpsxr8grjvk4asyvlk4aguyd0suvtmg3cevxxcznec82u70rrxps7hjqgedd68hq0su4dzzvcsl482xhz8put8p5fv7qctmg7k9twznf6lngqcvaqwfj6hkq3n76h4rs347r330dz8r9scmq208qatneuvvcxr67gpe2s29';
+const UNIFIED = 'tacit1qzzs9xyupdmvk43ew87un0hnrmqxcdtq7vjf6mhfuhvrc4mz2ktwqhm0qdk5lnmv6yyy73yd0mccau2em5n66y5a0pyh3xfuhzwmf8g39kctxqngxmx5kxhvt2xqfmf4rufjqgcrgplldjykhww6nnq83gv2kcplcplm0hgggeadk2kqtqtqrk6qpedvat59c6sdeam6ankwjfjgldpjp05v82lv45dajuwype9n88tfdv4d0ta6qyvd9zzzwq58ed9pq75emyyf75';
+const EXPLICIT = 'tacit1qqrs9xyupdmvk43ew87un0hnrmqxcdtq7vjf6mhfuhvrc4mz2ktwqhm0qdk5lnmv6yyy73yd0mccau2em5n66y5a0pyh3xfuhzwmf8g39kctxq5cns9hdj6k89clmjd77v0vqmp4vrejf8twa8jas0zhvf2edczldupxsdkdfvdwck5vqnkn28cnyq3sxsrl7myfdwua48xq0zsc4dsrlsrlklwss3n6mv4vqkqkq8d5qrj6e6hgt34qmnmh4m8vayny376ryzlgcw47etgmm9cugrjtxwwkj6e267hm5qgc62yyyupg0j62zpafjgjz2hf';
+eq('a real .wei record validates', decode(REAL_RECORD), REAL_RECORD);
+eq('unified (0x85) validates', decode(UNIFIED), UNIFIED);
+eq('unified is 276 characters', UNIFIED.length, 276);
+eq('written-out form (0x07) still validates', decode(EXPLICIT), EXPLICIT);
+const v0 = [...spend, ...scan];
+const short81 = enc([0, 0x81, ...v0]);
+eq('marked, no pool lane (0x81, 121 characters) validates', decode(short81) === short81 && short81.length, 121);
+eq('re-encoding the unified keys round-trips', enc([0, 0x85, ...v0, ...[...fn('tacitConvertBits')(Array.from(UNIFIED.slice(6, -6), c => fn('TACIT_BECH32').indexOf(c)), 5, 8, false)].slice(68)]), UNIFIED);
 
 // ── registration: the pending panel's box and what follows the reveal ─────────
 // A DOM of just the elements these functions touch, and stubs for the chain.

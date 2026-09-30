@@ -4009,13 +4009,17 @@ function decodeTacitAddress(input) {
   if (p.length < 2 || p[0] !== 0x00) throw new Error('unsupported version');
   const flags = p[1];
   if (!(flags & 0x01)) throw new Error('missing the Bitcoin lane');
-  // Tacit's name lookup pays through the Ethereum-side key, so an address
-  // without it would resolve to a record no Tacit app can pay.
-  if (!(flags & 0x02)) throw new Error('missing the Ethereum lane');
-  const want = 68 + 33 + ((flags & 0x04) ? 97 : 0);
-  if ((flags & ~0x07) ? p.length < want : p.length !== want) throw new Error(`payload is ${p.length} bytes, expected ${want}`);
-  const keys = [p.slice(2, 35), p.slice(35, 68), p.slice(68, 101)];
-  if (flags & 0x04) keys.push(p.slice(101, 134)); // pool view key V
+  // The Ethereum-side key is named exactly once: written out (0x02, 33 bytes at
+  // 68) or marked as the spend key (0x80, no bytes). Offsets follow the flags.
+  const evm = flags & 0x02, same = flags & 0x80;
+  if (evm && same) throw new Error('names its Ethereum-side key twice');
+  if (!evm && !same) throw new Error('missing the Ethereum-side key');
+  const poolAt = 68 + (evm ? 33 : 0);
+  const want = poolAt + ((flags & 0x04) ? 97 : 0);
+  if ((flags & ~0x87) ? p.length < want : p.length !== want) throw new Error(`payload is ${p.length} bytes, expected ${want}`);
+  const keys = [p.slice(2, 35), p.slice(35, 68)];
+  if (evm) keys.push(p.slice(68, 101));
+  if (flags & 0x04) keys.push(p.slice(poolAt, poolAt + 33)); // pool view key V
   if (!keys.every(k => tacitIsPoint(Uint8Array.from(k)))) throw new Error('contains an invalid key');
   return s;
 }
@@ -4067,10 +4071,10 @@ function tacitAddressFromPriv(priv) {
   }
 }
 
-// Derives the flags-0x03 address (Bitcoin lane + Ethereum-side key). Tacit's EVM
-// and L2 pools also need the pool lane (0x04), whose keys can't be derived from
-// public keys here; Tacit plans to ship a pinned helper for that. A pasted
-// unified address (0x07) already validates and is stored exactly as given.
+// Derives the flags-0x03 address (Bitcoin lane + Ethereum-side key), as Tacit
+// apps publish today. The unified form (0x85) adds the pool lane, whose keys
+// can't be derived from public keys here; a pasted one validates and is stored
+// exactly as given.
 //
 // Derive the connected wallet's tacit1 address the way every Tacit app does:
 // personal_sign the identity message, priv = sha256(sig). The signature and key
