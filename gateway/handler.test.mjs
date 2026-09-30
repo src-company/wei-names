@@ -67,6 +67,14 @@ const RET_HOSTILE_HEADERS =
 const RET_HTML =
   '0x0000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000000f3c68746d6c3e6f6b3c2f68746d6c3e0000000000000000000000000000000000'
 
+// An ipfs contenthash (ENSIP-7 0xe3 + CIDv1), for the scenarios where a name
+// carries one alongside (or instead of) an addr record.
+const IPFS_CH =
+  '0x0000000000000000000000000000000000000000000000000000000000000020' +
+  '0000000000000000000000000000000000000000000000000000000000000026' +
+  'e3010170122029f2d17be6139079dc48696d1f582a8530eb9805b561eda517e22a892c7e3f1f' +
+  '0000000000000000000000000000000000000000000000000000'
+
 // --- fake node ---------------------------------------------------------------
 
 let calls = []
@@ -208,6 +216,23 @@ routes = { [`${N7}:${HTML}`]: 'revert' }
 res = await get(N7 + '.wei.limo/')
 eq('address label, not a page: 404', res.status, 404)
 eq('address label, not a page: says why', (await res.text()).includes('not an on-chain page'), true)
+
+// A non-page addr (unset, or set to the owner's default per resolve()'s
+// fallback to ownerOf, or to any other contract/EOA that answers neither
+// resolveMode() nor html()) must not shadow a contenthash the same name also
+// carries — the gateway falls through to it rather than 404ing.
+const P7D = addr(0xbad07d)
+routes = nameRoutes(6, P7D, {
+  [`${P7D}:${HTML}`]: 'revert',
+  [`${WNS}:${CONTENTHASH}`]: IPFS_CH,
+})
+res = await get('noaddr.wei.limo/')
+eq('not a page, but a contenthash is set: falls back to ipfs', res.status, 302)
+eq(
+  'not a page, but a contenthash is set: redirects to the cid',
+  res.headers.get('location'),
+  'https://bafybeibj6lixxzqtsb45ysdjnupvqkufgdvzqbnvmhw2kf7cfkesy7r7d4.ipfs.dweb.link/',
+)
 
 // --- 8. Rule 3 corollary: RPC failure is a 502, never something cached ------
 
@@ -362,13 +387,6 @@ eq('depth: a stale SUBDOMAIN_PARENTS env var is inert', res.status, 200)
 // --- proxy mode --------------------------------------------------------------
 
 const PROXY_ENV = { ...ENV, GATEWAY_MODE: 'proxy' }
-// An ipfs contenthash (ENSIP-7 0xe3 + CIDv1) so the name resolves to a gateway
-// target rather than a contract page.
-const IPFS_CH =
-  '0x0000000000000000000000000000000000000000000000000000000000000020' +
-  '0000000000000000000000000000000000000000000000000000000000000026' +
-  'e3010170122029f2d17be6139079dc48696d1f582a8530eb9805b561eda517e22a892c7e3f1f' +
-  '0000000000000000000000000000000000000000000000000000'
 // An IPNS contenthash (0xe501 + CIDv1 libp2p-key). IPNS is mutable, so the
 // gateway must resolve it fresh rather than holding the body.
 const IPNS_CH =
