@@ -965,7 +965,7 @@ try{if(localStorage.getItem('wns_dao_banner')==='1'){var _db=document.getElement
     <label class="tacit-check"><input type="checkbox" id="tacitOn" onchange="onTacitToggle()"><img src="assets/tacit.svg" width="14" height="14" alt=""><span>Get paid privately at this name with <a href="https://tacit.finance" target="_blank" rel="noopener">Tacit</a></span></label>
     <div class="tacit-fields">
       <input type="text" id="regTacitAddr" placeholder="tacit1…" spellcheck="false" autocomplete="off" autocapitalize="none">
-      <div>On Bitcoin, Ethereum &amp; L2s. Paste it from tacit.finance/pay, or <a href="#" onclick="doTacitDerive('regTacitAddr');return false;">derive it from this wallet</a>. One more confirmation after registering.</div>
+      <div>Paste your address from tacit.finance/pay, or <a href="#" onclick="doTacitDerive('regTacitAddr');return false;">derive it from this wallet</a>. One more confirmation after registering.</div>
     </div>
   </div>
   <div class="pay-method" id="payMethod">
@@ -3578,7 +3578,7 @@ async function showManage(tokenId, name) {
       }
     }
     if (isOwner && !isExpiredInGrace && !isSubInactive && !textRecords[TACIT_RECORD_KEY]) {
-      infoHtml += `<div style="font-size:11px;opacity:0.55;margin:8px 0 0;"><a href="https://tacit.finance" target="_blank" rel="noopener"><img src="${TACIT_LOGO}" alt="Tacit" width="12" height="12" style="vertical-align:-2px;margin-right:5px;"></a><a href="#" onclick="showManageForm('tacit');return false;" style="color:inherit;">Get paid privately at ${escapeHtml(name)}.wei on Bitcoin, Ethereum &amp; L2s →</a></div>`;
+      infoHtml += `<div style="font-size:11px;opacity:0.55;margin:8px 0 0;"><a href="https://tacit.finance" target="_blank" rel="noopener"><img src="${TACIT_LOGO}" alt="Tacit" width="12" height="12" style="vertical-align:-2px;margin-right:5px;"></a><a href="#" onclick="showManageForm('tacit');return false;" style="color:inherit;">Get paid privately at ${escapeHtml(name)}.wei with Tacit →</a></div>`;
     }
     $('manageInfo').innerHTML = infoHtml;
 
@@ -3667,7 +3667,7 @@ function showManageForm(action) {
     case 'tacit':
       html = `
         <label style="display:flex;align-items:center;gap:6px;"><img src="${TACIT_LOGO}" alt="" width="14" height="14">Tacit Address</label>
-        <div style="font-size:11px;opacity:0.5;margin-bottom:8px;">Let anyone pay ${escapeHtml(currentTokenName)}.wei privately on Bitcoin, Ethereum and L2s with <a href="https://tacit.finance" target="_blank" rel="noopener" style="color:inherit;">Tacit</a>. Paste your address from tacit.finance/pay (Receive \u2192 Your Tacit address), or derive it from this wallet.</div>
+        <div style="font-size:11px;opacity:0.5;margin-bottom:8px;">Let anyone pay ${escapeHtml(currentTokenName)}.wei privately with <a href="https://tacit.finance" target="_blank" rel="noopener" style="color:inherit;">Tacit</a>. Paste your address from tacit.finance/pay (Receive \u2192 Your Tacit address), or derive it from this wallet.</div>
         <input type="text" id="tacitAddr" placeholder="tacit1..." spellcheck="false" autocomplete="off" style="font-family:monospace;font-size:11px;">
         <button onclick="doSetTacit()">Save</button>
         <button class="secondary" onclick="doTacitDerive()" title="Signs the Tacit identity message. The signature never leaves this page and is discarded once the address is computed.">Derive from wallet</button>
@@ -4039,6 +4039,11 @@ function tacitAddressFromPriv(priv) {
   }
 }
 
+// Derives the flags-0x03 address (Bitcoin lane + Ethereum-side key). Tacit's EVM
+// and L2 pools also need the pool lane (0x04), whose keys can't be derived from
+// public keys here; Tacit plans to ship a pinned helper for that. A pasted
+// unified address (0x07) already validates and is stored exactly as given.
+//
 // Derive the connected wallet's tacit1 address the way every Tacit app does:
 // personal_sign the identity message, priv = sha256(sig). The signature and key
 // stay in this function's memory only and are zeroed once the address is out.
