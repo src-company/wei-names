@@ -2864,6 +2864,11 @@ function revealWaitLeft() {
 
 async function doRevealSelected() {
   if (!isRevealing && revealWaitLeft() > 0) {
+    // Check the Tacit box now, not when the queued reveal fires unattended
+    if (!_revealArmed) {
+      try { tacitChoice(); }
+      catch (e) { showStatus('Tacit address: ' + e.message + '. Fix it or untick the box.', 'error'); return; }
+    }
     _revealArmed = !_revealArmed;
     updateTimer(pendingTimerId);
     return;
@@ -4066,8 +4071,13 @@ async function doSetAddr() {
 async function doSetText() {
   if (isProcessing || !contract || !currentTokenId) return;
   const key = $('textKey').value.trim();
-  const value = $('textValue').value;
+  let value = $('textValue').value;
   if (!key) { showStatus('Key required', 'error'); return; }
+  // The Tacit record is read by payment apps; hold it to the same check as its own form
+  if (key === TACIT_RECORD_KEY && value) {
+    try { value = decodeTacitAddress(value); }
+    catch (e) { showStatus('Invalid Tacit address: ' + e.message, 'error'); return; }
+  }
 
   isProcessing = true;
   const btn = (typeof event !== 'undefined' && event?.target) || null; if (btn) btn.disabled = true;
