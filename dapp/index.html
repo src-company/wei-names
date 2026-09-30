@@ -2773,7 +2773,7 @@ async function doReveal() {
     clearPending();
     showStatus(pending.name + '.wei registered' + (terms > 1 ? ' for ' + terms + ' years' : '') + '!',
       'success', txHash);
-    refreshAfterTx(pending.name, nameRegistered, receipt);
+    refreshAfterTx(pending.name, nameRegistered, receipt).then(ok => ok && offerTacitAfterRegister(pending.name));
   } catch (e) {
     handleError(e);
   }
@@ -2919,7 +2919,7 @@ async function doRevealWithToken(tk) {
 
     clearPending();
     showStatus(`${pending.name}.wei registered with ${tk.name}! (~${displayAmount} ${tk.name})`, 'success', txHash);
-    refreshAfterTx(pending.name, nameRegistered, receipt);
+    refreshAfterTx(pending.name, nameRegistered, receipt).then(ok => ok && offerTacitAfterRegister(pending.name));
   } catch (e) {
     handleError(e);
   }
@@ -3125,7 +3125,7 @@ async function updateTimer(timerId) {
         if (receipt.status === 1) {
           showStatus(pending.name + '.wei registered!', 'success', pending.revealTxHash);
           clearPending();
-          refreshAfterTx(pending.name, nameRegistered, receipt);
+          refreshAfterTx(pending.name, nameRegistered, receipt).then(ok => ok && offerTacitAfterRegister(pending.name));
           return;
         }
         // Reverted — the whole tx reverted so the commitment survives; allow retry.
@@ -3354,7 +3354,7 @@ async function showManage(tokenId, name) {
 
   try {
     // Common text record keys to display
-    const textKeys = ['url', 'email', 'description', 'com.twitter', 'com.github'];
+    const textKeys = ['url', 'email', 'description', 'com.twitter', 'com.github', TACIT_RECORD_KEY];
 
     // A subdomain's staleness check needs records(parent), and the parent's id is
     // the recursive namehash of the parent label chain — no chain read required to
@@ -3510,11 +3510,17 @@ async function showManage(tokenId, name) {
       } else if (key === 'com.twitter') {
         const handle = val.startsWith('@') ? val : '@' + val;
         infoHtml += `<div><span>${label}:</span><a href="https://x.com/${escapeHtml(val.replace('@',''))}" target="_blank" rel="noopener" style="color:inherit;">${escapeHtml(handle)}</a></div>`;
+      } else if (key === TACIT_RECORD_KEY) {
+        const short = val.length > 24 ? val.slice(0, 12) + '\u2026' + val.slice(-8) : val;
+        infoHtml += `<div data-tacit-set><span>Tacit:</span><a href="https://tacit.finance" target="_blank" rel="noopener" title="Paid privately via Tacit" style="color:inherit;"><img src="${TACIT_LOGO}" alt="" width="12" height="12" style="vertical-align:-2px;margin-right:4px;opacity:0.85;"></a><span title="${escaped}" style="font-family:monospace;font-size:11px;opacity:1;text-transform:none;letter-spacing:0;margin:0;">${escapeHtml(short)}</span></div>`;
       } else if (key === 'com.github') {
         infoHtml += `<div><span>${label}:</span><a href="https://github.com/${escaped}" target="_blank" rel="noopener" style="color:inherit;">${escaped}</a></div>`;
       } else {
         infoHtml += `<div><span>${label}:</span>${escaped}</div>`;
       }
+    }
+    if (isOwner && !isExpiredInGrace && !isSubInactive && !textRecords[TACIT_RECORD_KEY]) {
+      infoHtml += `<div style="font-size:11px;opacity:0.55;margin:8px 0 0;"><a href="https://tacit.finance" target="_blank" rel="noopener"><img src="${TACIT_LOGO}" alt="Tacit" width="12" height="12" style="vertical-align:-2px;margin-right:5px;"></a><a href="#" onclick="showManageForm('tacit');return false;" style="color:inherit;">Get paid privately at ${escapeHtml(name)}.wei on Bitcoin, Ethereum &amp; L2s →</a></div>`;
     }
     $('manageInfo').innerHTML = infoHtml;
 
@@ -3533,6 +3539,7 @@ async function showManage(tokenId, name) {
         <button onclick="showManageForm('setAddr')">Set Recipient</button>
         <button onclick="showManageForm('setContent')">Set Website</button>
         <button onclick="showManageForm('setText')">Set Text</button>
+        <button data-tacit onclick="showManageForm('tacit')">Tacit Address</button>
         <button onclick="showManageForm('subdomain')">Subdomain</button>
         <button onclick="showManageForm('subSales')">Subdomain Sales</button>
         ${unsetBtn || `<button onclick="doSetPrimary()">Set as Display Name</button>`}
@@ -3596,6 +3603,16 @@ function showManageForm(action) {
         <input type="text" id="contentHash" placeholder="bafy... / Qm... (IPFS) · ipns://k51... (IPNS) · 0x (raw)">
         <div style="font-size:11px;opacity:0.5;margin-top:4px;">Visit via: <a href="https://${escapeHtml(currentTokenName)}.${WEI_GATEWAY}" target="_blank" rel="noopener">${escapeHtml(currentTokenName)}.${WEI_GATEWAY}</a></div>
         <button onclick="doSetContent()">Set Website</button>
+        <button class="secondary" onclick="$('manageForm').classList.remove('show')">Cancel</button>
+      `;
+      break;
+    case 'tacit':
+      html = `
+        <label style="display:flex;align-items:center;gap:6px;"><img src="${TACIT_LOGO}" alt="" width="14" height="14">Tacit Address</label>
+        <div style="font-size:11px;opacity:0.5;margin-bottom:8px;">Let anyone pay ${escapeHtml(currentTokenName)}.wei privately on Bitcoin, Ethereum and L2s with <a href="https://tacit.finance" target="_blank" rel="noopener" style="color:inherit;">Tacit</a>. Paste your address from tacit.finance/pay (Receive \u2192 Your Tacit address), or derive it from this wallet.</div>
+        <input type="text" id="tacitAddr" placeholder="tacit1..." spellcheck="false" autocomplete="off" style="font-family:monospace;font-size:11px;">
+        <button onclick="doSetTacit()">Save</button>
+        <button class="secondary" onclick="doTacitDerive()" title="Signs the Tacit identity message. The signature never leaves this page and is discarded once the address is computed.">Derive from wallet</button>
         <button class="secondary" onclick="$('manageForm').classList.remove('show')">Cancel</button>
       `;
       break;
@@ -3837,6 +3854,219 @@ async function doSetText() {
     isProcessing = false;
     if (btn) btn.disabled = false;
   }
+}
+
+// ── Tacit (tacit.finance) ──────────────────────────────────────────────────
+// A name's `finance.tacit` text record holds its owner's tacit1… address, so
+// Tacit apps can pay alice.wei privately on Bitcoin, Ethereum and L2s. The
+// value is the bare lowercase bech32m string. Codec, validation and derivation
+// follow the Tacit repo (dapp/tacit-address.js, dapp/evm-wallet.js) byte for byte.
+const TACIT_RECORD_KEY = 'finance.tacit';
+const TACIT_LOGO = 'assets/tacit.svg';
+const TACIT_BECH32 = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
+const SECP_N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
+
+function tacitPolymod(values) {
+  const GEN = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
+  let chk = 1;
+  for (const v of values) {
+    const top = chk >>> 25;
+    chk = ((chk & 0x1ffffff) << 5) ^ v;
+    for (let i = 0; i < 5; i++) if ((top >>> i) & 1) chk ^= GEN[i];
+  }
+  return chk;
+}
+
+function tacitHrpExpand(hrp) {
+  const r = [];
+  for (let i = 0; i < hrp.length; i++) r.push(hrp.charCodeAt(i) >>> 5);
+  r.push(0);
+  for (let i = 0; i < hrp.length; i++) r.push(hrp.charCodeAt(i) & 31);
+  return r;
+}
+
+function tacitConvertBits(data, from, to, pad) {
+  let acc = 0, bits = 0;
+  const out = [], maxv = (1 << to) - 1;
+  for (const v of data) {
+    acc = (acc << from) | v;
+    bits += from;
+    while (bits >= to) { bits -= to; out.push((acc >>> bits) & maxv); }
+  }
+  if (pad) { if (bits > 0) out.push((acc << (to - bits)) & maxv); }
+  else if (bits >= from || ((acc << (to - bits)) & maxv)) throw new Error('bad padding');
+  return out;
+}
+
+// bech32m (BIP-350) with no 90-character cap — a tacit1 address is 174+.
+function tacitBech32mEncode(hrp, bytes) {
+  const d5 = tacitConvertBits(Array.from(bytes), 8, 5, true);
+  const pm = tacitPolymod(tacitHrpExpand(hrp).concat(d5, [0, 0, 0, 0, 0, 0])) ^ 0x2bc830a3;
+  const cs = [];
+  for (let i = 0; i < 6; i++) cs.push((pm >>> (5 * (5 - i))) & 31);
+  return hrp + '1' + d5.concat(cs).map(v => TACIT_BECH32[v]).join('');
+}
+
+function tacitIsPoint(u8) {
+  if (u8.length !== 33 || (u8[0] !== 2 && u8[0] !== 3)) return false;
+  try { ethers.SigningKey.computePublicKey(u8, true); return true; } catch (_) { return false; }
+}
+
+// Strict check of a pasted tacit1… address. Returns it lowercased (the form the
+// record stores) or throws with a reason a user can act on.
+function decodeTacitAddress(input) {
+  const raw = String(input ?? '').trim();
+  if (raw !== raw.toLowerCase() && raw !== raw.toUpperCase()) throw new Error('mixed case');
+  const s = raw.toLowerCase();
+  const sep = s.lastIndexOf('1');
+  if (sep < 1 || sep + 7 > s.length) throw new Error('not a bech32m address');
+  if (s.slice(0, sep) !== 'tacit') throw new Error('must start with tacit1');
+  const d5 = [];
+  for (const ch of s.slice(sep + 1)) {
+    const v = TACIT_BECH32.indexOf(ch);
+    if (v < 0) throw new Error(`invalid character "${ch}"`);
+    d5.push(v);
+  }
+  if (tacitPolymod(tacitHrpExpand('tacit').concat(d5)) !== 0x2bc830a3) throw new Error('checksum mismatch — check for a typo');
+  const p = tacitConvertBits(d5.slice(0, -6), 5, 8, false);
+  if (p.length < 2 || p[0] !== 0x00) throw new Error('unsupported version');
+  const flags = p[1];
+  if (!(flags & 0x01)) throw new Error('missing the Bitcoin lane');
+  // Tacit's name lookup pays through the Ethereum-side key, so an address
+  // without it would resolve to a record no Tacit app can pay.
+  if (!(flags & 0x02)) throw new Error('missing the Ethereum lane');
+  const want = 68 + 33 + ((flags & 0x04) ? 97 : 0);
+  if ((flags & ~0x07) ? p.length < want : p.length !== want) throw new Error(`payload is ${p.length} bytes, expected ${want}`);
+  const keys = [p.slice(2, 35), p.slice(35, 68), p.slice(68, 101)];
+  if (flags & 0x04) keys.push(p.slice(101, 134)); // pool view key V
+  if (!keys.every(k => tacitIsPoint(Uint8Array.from(k)))) throw new Error('contains an invalid key');
+  return s;
+}
+
+// The exact message every Tacit app signs; its signature IS the Tacit private key.
+function tacitIdentityMessage() {
+  return [
+    'Tacit identity',
+    '',
+    'Signing this creates your Tacit private key. Anyone who has this signature controls all of your Tacit funds.',
+    '',
+    'Sign it only in a Tacit app you trust. Every Tacit app asks for exactly this message.',
+    '',
+    'network: mainnet',
+    'version: 1',
+  ].join('\n');
+}
+
+// Tacit private key (32 bytes) → its public tacit1 address (flags 0x03). Fills
+// `priv` with zeros before returning, whatever happens.
+function tacitAddressFromPriv(priv) {
+  const toBig = u8 => u8.reduce((n, b) => (n << 8n) | BigInt(b), 0n);
+  let scan = null;
+  try {
+    let k = toBig(priv);
+    while (k === 0n || k >= SECP_N) {
+      const next = ethers.getBytes(ethers.sha256(ethers.concat([priv, ethers.toUtf8Bytes('tacit-prf-recovery')])));
+      priv.set(next); next.fill(0);
+      k = toBig(priv);
+    }
+    k = 0n;
+    const spendPub = ethers.getBytes(ethers.SigningKey.computePublicKey(priv, true));
+    const t = ethers.getBytes(ethers.sha256(ethers.toUtf8Bytes('BIP0352/ScanKey')));
+    const h = ethers.getBytes(ethers.sha256(ethers.concat([t, t, priv])));
+    const s = toBig(h) % SECP_N;
+    h.fill(0);
+    if (s === 0n) throw new Error('scan key derived as zero');
+    scan = ethers.getBytes(ethers.toBeHex(s, 32));
+    const scanPub = ethers.getBytes(ethers.SigningKey.computePublicKey(scan, true));
+    const payload = new Uint8Array(101);
+    payload.set([0x00, 0x03], 0);
+    payload.set(spendPub, 2);
+    payload.set(scanPub, 35);
+    payload.set(spendPub, 68);
+    return tacitBech32mEncode('tacit', payload);
+  } finally {
+    priv.fill(0);
+    if (scan) scan.fill(0);
+  }
+}
+
+// Derive the connected wallet's tacit1 address the way every Tacit app does:
+// personal_sign the identity message, priv = sha256(sig). The signature and key
+// stay in this function's memory only and are zeroed once the address is out.
+async function deriveTacitAddress() {
+  if (!_signer || !_connectedAddress) throw new Error('Connect a wallet first');
+  const code = await withRpc(p => p.getCode(_connectedAddress));
+  // A contract wallet's signatures aren't deterministic; an EIP-7702 delegated EOA is fine.
+  if (code && code !== '0x' && !/^0xef0100[0-9a-f]{40}$/i.test(code)) {
+    throw new Error('Contract wallets can’t derive a stable Tacit address — paste it from tacit.finance instead');
+  }
+  const msg = tacitIdentityMessage();
+  let sigHex = await wcTransaction(_signer.signMessage(msg), 'Sign the Tacit identity message');
+  const sig = /^0x[0-9a-fA-F]{130}$/.test(String(sigHex)) ? ethers.getBytes(sigHex) : null;
+  sigHex = null;
+  if (!sig) throw new Error('Wallet returned a malformed signature');
+  let digest = null;
+  try {
+    if (sig[64] === 0 || sig[64] === 1) sig[64] += 27;
+    const sVal = sig.slice(32, 64).reduce((n, b) => (n << 8n) | BigInt(b), 0n);
+    // Refuse, never normalise: a high-s signature would derive a different key
+    // than every other Tacit app derives for this wallet.
+    if (sVal > SECP_N / 2n) throw new Error('Wallet returned a non-canonical (high-s) signature — nothing was derived');
+    if (ethers.verifyMessage(msg, ethers.hexlify(sig)).toLowerCase() !== _connectedAddress.toLowerCase()) {
+      throw new Error('Signature is not from the connected account — switch accounts and retry');
+    }
+    digest = ethers.getBytes(ethers.sha256(sig));
+    return tacitAddressFromPriv(digest);
+  } finally {
+    sig.fill(0);
+    if (digest) digest.fill(0);
+  }
+}
+
+async function doTacitDerive() {
+  if (isProcessing) return;
+  isProcessing = true;
+  try {
+    showStatus('Sign the Tacit identity message in your wallet...', '');
+    const addr = await deriveTacitAddress();
+    if ($('tacitAddr')) $('tacitAddr').value = addr;
+    showStatus('Tacit address derived — review it, then Save', 'success');
+  } catch (e) {
+    handleError(e);
+  } finally {
+    isProcessing = false;
+  }
+}
+
+async function doSetTacit() {
+  if (isProcessing || !contract || !currentTokenId) return;
+  let value;
+  try { value = decodeTacitAddress($('tacitAddr').value); }
+  catch (e) { showStatus('Invalid Tacit address: ' + e.message, 'error'); return; }
+
+  isProcessing = true;
+  const btn = (typeof event !== 'undefined' && event?.target) || null; if (btn) btn.disabled = true;
+  try {
+    showStatus('Setting Tacit address...', '');
+    const tx = await wcTransaction(contract.setText(currentTokenId, TACIT_RECORD_KEY, value), 'Approve Tacit address');
+    showStatus('Waiting for confirmation...', '', tx.hash);
+    const receipt = await waitForTx(tx);
+    showStatus(currentTokenName + '.wei can now be paid privately on Tacit', 'success', tx.hash);
+    refreshAfterTx(currentTokenName, panelRepainted, receipt);
+  } catch (e) {
+    handleError(e);
+  } finally {
+    isProcessing = false;
+    if (btn) btn.disabled = false;
+  }
+}
+
+// Right after a registration confirms and the panel repaints as ours, open the
+// Tacit form — the one follow-up write that makes the new name payable privately.
+function offerTacitAfterRegister(name) {
+  if (currentTokenName !== name || !$('manageActions')?.querySelector('[data-tacit]')) return;
+  if ($('manageInfo')?.querySelector('[data-tacit-set]')) return;
+  showManageForm('tacit');
 }
 
 // Base58 alphabet (Bitcoin style)
