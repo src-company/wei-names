@@ -137,11 +137,38 @@ eq('current form with an unknown lane beside it', fn('tacitIsCurrent')(markedUnk
 eq('invalid: not current', fn('tacitIsCurrent')('tacit1nope'), false);
 
 // ── derive from wallet: the shipping deriveTacitAddress, with the kit ─────────
-async function derive({ wallet, connected = wallet.address, code = '0x', v01 = false }) {
+// An EIP-191 signature by `wallet` over `m` with a random nonce: valid, low-s, and
+// (almost surely) not the RFC 6979 bytes a deterministic wallet returns.
+function signWithEntropy(wallet, m) {
+  const N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
+  const mod = (a) => ((a % N) + N) % N;
+  const inv = (a) => { let [r0, r1, s0, s1] = [mod(a), N, 1n, 0n]; while (r1) { const q = r0 / r1; [r0, r1] = [r1, r0 - q * r1]; [s0, s1] = [s1, s0 - q * s1]; } return mod(s0); };
+  const z = BigInt(ethers.hashMessage(m)), d = BigInt(wallet.privateKey);
+  for (;;) {
+    const k = mod(BigInt(ethers.hexlify(ethers.randomBytes(32))));
+    if (!k) continue;
+    const R = ethers.getBytes(ethers.SigningKey.computePublicKey(ethers.toBeHex(k, 32), false));
+    const r = mod(BigInt(ethers.hexlify(R.slice(1, 33))));
+    let s = mod(inv(k) * (z + r * d)), odd = R[64] & 1;
+    if (!r || !s) continue;
+    if (s > N / 2n) { s = N - s; odd ^= 1; }
+    return ethers.concat([ethers.toBeHex(r, 32), ethers.toBeHex(s, 32), new Uint8Array([27 + odd])]);
+  }
+}
+
+// `second` shapes the second signature: 'same' (a deterministic wallet), 'v01' (same
+// signature, v as 0/1), 'entropy' (valid for the same message and signer, other bytes —
+// what a non-deterministic wallet produces), 'malformed', or 'reject'.
+async function derive({ wallet, connected = wallet.address, code = '0x', v01 = false, second = 'same', calls = [] }) {
   const signer = {
     signMessage: async (m) => {
+      calls.push(m);
       const sig = ethers.getBytes(await wallet.signMessage(m));
-      if (v01) sig[64] -= 27;
+      if (calls.length === 1) { if (v01) sig[64] -= 27; return ethers.hexlify(sig); }
+      if (second === 'v01') sig[64] -= 27;
+      if (second === 'entropy') return signWithEntropy(wallet, m);
+      if (second === 'malformed') return '0x1234';
+      if (second === 'reject') throw new Error('user rejected');
       return ethers.hexlify(sig);
     },
   };
@@ -166,6 +193,45 @@ for (let i = 0; i < 6; i++) {
     eq('derive: result validates and is the current form', fn('tacitIsCurrent')(fn('decodeTacitAddress')(a)), true);
   }
 }
+// ── sign twice: only a wallet that repeats itself gets a key ────────────────
+{
+  const w = ethers.Wallet.createRandom(), calls = [];
+  const a = await derive({ wallet: w, calls });
+  eq('sign twice: asks the wallet twice, for the same message', calls.length === 2 && calls[0] === msg && calls[1] === msg, true);
+  eq('sign twice: same address as a single signature gives', a, await expectFor(w));
+  eq('sign twice: v as 0/1 on one and 27/28 on the other still matches', await derive({ wallet: w, second: 'v01' }), a);
+  for (const [label, second] of [['valid but different second signature', 'entropy'],
+                                 ['malformed second signature', 'malformed']]) {
+    let err = null;
+    try { await derive({ wallet: w, second }); } catch (e) { err = e.message; }
+    eq(`sign twice: ${label} is refused`, /signed the Tacit message differently/.test(err || ''), true);
+  }
+  let err = null;
+  try { await derive({ wallet: w, second: 'reject' }); } catch (e) { err = e.message; }
+  eq('sign twice: declining the second signature derives nothing', err, 'user rejected');
+}
+{
+  // A refusal must never reach the record.
+  const writes = [];
+  const c = vm.createContext({
+    isProcessing: false, contract: {}, currentTokenId: 1n, currentTokenName: 'alice', currentTacitRecord: null,
+    $: () => null, tacitNote: () => {}, handleError: () => {}, showStatus: () => {},
+    deriveTacitAddress: async () => { throw new Error('This wallet signed the Tacit message differently the second time'); },
+    writeTacitRecord: async () => writes.push(1),
+  });
+  vm.runInContext(lift('doTacitDeriveAndSave'), c);
+  await vm.runInContext('doTacitDeriveAndSave()', c);
+  eq('sign twice: derive & save writes nothing when the signatures differ', writes.length, 0);
+}
+{
+  // The stand-in for a non-deterministic wallet is real: a valid signature by the same
+  // account over the same message, and different bytes from the deterministic one.
+  const w = ethers.Wallet.createRandom();
+  const e = signWithEntropy(w, msg);
+  eq('test vector: random-nonce signature recovers the same account', ethers.verifyMessage(msg, e), w.address);
+  eq('test vector: and differs from the deterministic signature', e !== await w.signMessage(msg), true);
+}
+
 const w0 = ethers.Wallet.createRandom();
 let refused = null;
 try { await derive({ wallet: w0, code: '0x6080604052' }); } catch (e) { refused = e.message; }

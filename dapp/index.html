@@ -1014,7 +1014,7 @@ try{if(localStorage.getItem('wns_dao_banner')==='1'){var _db=document.getElement
     <div class="tacit-fields">
       <input type="text" id="regTacitAddr" placeholder="tacit1…" spellcheck="false" autocomplete="off" autocapitalize="none" oninput="tacitNote(this.value, 'regTacitNote')">
       <div id="regTacitNote" class="tacit-note"></div>
-      <div>On Bitcoin, Ethereum &amp; L2s. Paste your address from tacit.finance/pay, or <a href="#" onclick="doTacitDerive('regTacitAddr');return false;">derive it from this wallet</a>. One more confirmation after registering.</div>
+      <div>On Bitcoin, Ethereum &amp; L2s. Paste your address from tacit.finance/pay, or <a href="#" onclick="doTacitDerive('regTacitAddr');return false;">derive the one this wallet opens there</a> (you'll sign twice, to check the wallet signs the same way each time). The address is public and tied to the name; the payments it receives aren't. One more confirmation after registering.</div>
     </div>
   </div>
   <div class="pay-method" id="payMethod">
@@ -3843,7 +3843,7 @@ function showManageForm(action) {
         <label>Recipient</label>
         <input type="text" id="transferTo" placeholder="0x... or name.wei" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" oninput="previewTransferRecipient()">
         <div id="transferPreview" style="font-size:12px;margin-bottom:12px;display:none;"></div>
-        ${currentTacitRecord ? `<label class="tacit-check" style="margin-bottom:12px;"><input type="checkbox" id="transferClearTacit" checked><img src="${TACIT_LOGO}" width="14" height="14" alt=""><span>Clear the Tacit address first — Tacit apps pay whatever it holds, even after a transfer</span></label>` : ''}
+        ${currentTacitRecord ? `<label class="tacit-check" style="margin-bottom:12px;"><input type="checkbox" id="transferClearTacit" checked><img src="${TACIT_LOGO}" width="14" height="14" alt=""><span>Clear the Tacit address first. If you keep it, it stays on the name and Tacit apps keep paying it until the new owner replaces it.</span></label>` : ''}
         <button onclick="doTransfer()">Transfer</button>
         <button class="secondary" onclick="$('manageForm').classList.remove('show')">Cancel</button>
       `;
@@ -3870,10 +3870,10 @@ function showManageForm(action) {
     case 'tacit':
       html = `
         <label style="display:flex;align-items:center;gap:6px;"><img src="${TACIT_LOGO}" alt="" width="14" height="14">Tacit Address</label>
-        <div style="font-size:11px;opacity:0.5;margin-bottom:8px;">Let anyone pay ${escapeHtml(currentTokenName)}.wei privately on Bitcoin, Ethereum and L2s with <a href="https://tacit.finance" target="_blank" rel="noopener" style="color:inherit;">Tacit</a>. Paste your address from tacit.finance/pay (Receive \u2192 Your Tacit address), or derive it from this wallet.</div>
+        <div style="font-size:11px;opacity:0.5;margin-bottom:8px;">Let anyone pay ${escapeHtml(currentTokenName)}.wei privately on Bitcoin, Ethereum and L2s with <a href="https://tacit.finance" target="_blank" rel="noopener" style="color:inherit;">Tacit</a>. Paste your address from tacit.finance/pay (Receive \u2192 Your Tacit address), or derive the one this wallet opens there \u2014 you'll sign twice, to check the wallet signs the same way each time. The address is public and tied to the name; the payments it receives aren't.</div>
         <input type="text" id="tacitAddr" placeholder="tacit1..." spellcheck="false" autocomplete="off" style="font-family:monospace;font-size:11px;" oninput="tacitNote(this.value, 'tacitNote')">
         <div id="tacitNote" class="tacit-note"></div>
-        <button onclick="doTacitDeriveAndSave()" title="Signs the Tacit identity message, then saves the address. The signature never leaves this page and is discarded once the address is computed.">Derive &amp; save</button>
+        <button onclick="doTacitDeriveAndSave()" title="Signs the Tacit identity message twice, then saves the address. The signature never leaves this page and is discarded once the address is computed.">Derive &amp; save</button>
         <button class="secondary" onclick="doSetTacit()">Save pasted</button>
         <button class="secondary" onclick="$('manageForm').classList.remove('show')">Cancel</button>
       `;
@@ -4237,10 +4237,28 @@ async function deriveTacitAddress() {
     throw new Error('Contract wallets can\u2019t derive a stable Tacit address — paste it from tacit.finance instead');
   }
   const kit = await loadTacitKit(); // before signing, so a failed load never costs a signature
-  let sigHex = await wcTransaction(_signer.signMessage(kit.identityMessage()), 'Sign the Tacit identity message');
-  const sig = /^0x[0-9a-fA-F]{130}$/.test(String(sigHex)) ? ethers.getBytes(sigHex) : null;
+  const msg = kit.identityMessage();
+  const bytes = h => /^0x[0-9a-fA-F]{130}$/.test(String(h)) ? ethers.getBytes(h) : null;
+  let sigHex = await wcTransaction(_signer.signMessage(msg), 'Sign the Tacit identity message');
+  const sig = bytes(sigHex);
   sigHex = null;
   if (!sig) throw new Error('Wallet returned a malformed signature');
+  // Sign again and require the same bytes: some MPC/embedded wallets sign differently
+  // each time, and a key they can't reproduce would strand anything paid to it. The
+  // key still comes from the first signature alone; the second is only compared.
+  let again = null;
+  try {
+    let h2 = await wcTransaction(_signer.signMessage(msg), 'Confirm the Tacit identity message');
+    again = bytes(h2);
+    h2 = null;
+  } catch (e) { sig.fill(0); throw e; }
+  for (const b of [sig, again]) if (b && (b[64] === 0 || b[64] === 1)) b[64] += 27;
+  const same = !!again && again.every((x, i) => x === sig[i]);
+  if (again) again.fill(0);
+  if (!same) {
+    sig.fill(0);
+    throw new Error('This wallet signed the Tacit message differently the second time, so it can\u2019t hold a stable Tacit key: anything sent to it could not be opened again. Nothing was derived. Use a passkey or another wallet.');
+  }
   let key = null;
   try {
     // Recovers and checks the signer, reads v as 0/1 or 27/28, refuses high-s.
@@ -4256,7 +4274,7 @@ async function doTacitDerive(inputId = 'tacitAddr') {
   if (isProcessing) return;
   isProcessing = true;
   try {
-    showStatus('Sign the Tacit identity message in your wallet...', '');
+    showStatus('Sign the Tacit identity message in your wallet (twice)...', '');
     const addr = await deriveTacitAddress();
     if ($(inputId)) $(inputId).value = addr;
     tacitNote(addr, inputId === 'regTacitAddr' ? 'regTacitNote' : 'tacitNote');
@@ -4287,7 +4305,7 @@ async function doTacitDeriveAndSave() {
   isProcessing = true;
   const btn = (typeof event !== 'undefined' && event?.target) || null; if (btn) btn.disabled = true;
   try {
-    showStatus('Sign the Tacit identity message in your wallet...', '');
+    showStatus('Sign the Tacit identity message in your wallet (twice)...', '');
     const addr = await deriveTacitAddress();
     if ($('tacitAddr')) { $('tacitAddr').value = addr; tacitNote(addr, 'tacitNote'); }
     const existing = currentTokenName === name ? currentTacitRecord : null;
