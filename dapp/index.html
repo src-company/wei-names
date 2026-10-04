@@ -1807,6 +1807,9 @@ function handleError(e) {
   if (cleanMsg.includes('could not coalesce')) {
     cleanMsg = 'Transaction failed';
   }
+  if (e.code === 'INSUFFICIENT_FUNDS' || /insufficient funds/i.test(cleanMsg)) {
+    cleanMsg = 'Not enough ETH in this wallet to cover the cost plus gas';
+  }
   showStatus(cleanMsg, 'error');
 }
 
@@ -3816,10 +3819,14 @@ async function showManage(tokenId, name) {
       // plainly connected, when the real answer is that this name is held by a
       // different address (another account in the same wallet, a Safe, or the
       // subdomain registrar while the name is escrowed).
+      // renew() is permissionless and only ever extends the expiry, so any wallet can
+      // keep a top-level name alive: the owner's other account, a Safe's signer, a friend.
+      const renewBtn = _connectedAddress && isTopLevel ? `<button onclick="showManageForm('renew')">Renew</button>` : '';
       const hint = _connectedAddress
-        ? 'Connected as ' + _connectedAddress.slice(0, 6) + '...' + _connectedAddress.slice(-4) + ' — not this name\'s owner'
-        : 'Connect as owner to manage';
-      $('manageActions').innerHTML = unsetBtn +
+        ? 'Connected as ' + _connectedAddress.slice(0, 6) + '...' + _connectedAddress.slice(-4) + ' — not this name\'s owner' +
+          (renewBtn ? '. Anyone can renew it.' : '')
+        : isTopLevel ? 'Connect as owner to manage, or any wallet to renew' : 'Connect as owner to manage';
+      $('manageActions').innerHTML = renewBtn + unsetBtn +
         '<span style="font-size:12px;opacity:0.5;">' + escapeHtml(hint) + '</span>';
     }
 
@@ -5477,6 +5484,16 @@ async function doOwnerRegisterSubdomain() {
   }
 }
 
+// A wallet's "insufficient funds" names neither the cost nor the balance; say both first.
+// If the balance can't be read, let the wallet decide.
+async function enoughEth(value) {
+  let bal;
+  try { bal = await withRpc(p => p.getBalance(_connectedAddress)); } catch (_) { return true; }
+  if (bal >= value) return true;
+  showStatus('Not enough ETH: this costs ' + fmtEth(value, 6) + ' ETH plus gas, and the wallet holds ' + fmtEth(bal, 6) + ' ETH.', 'error');
+  return false;
+}
+
 async function doRenew() {
   if (isProcessing || !contract || !currentTokenId) return;
 
@@ -5499,6 +5516,7 @@ async function doRenew() {
       return;
     }
 
+    if (!(await enoughEth(fee * BigInt(terms)))) return;
     showStatus('Renewing...', '');
     // One year goes straight to the registry — no reason to route it through anything. More than
     // one goes through WeiTerms, which pays exactly the quote per year and returns the change.
@@ -7324,6 +7342,7 @@ async function doRenewAll() {
   isProcessing = true;
   namesBulkPaint();
   try {
+    if (!(await enoughEth(quote.total))) return;
     showStatus('Renewing ' + picked.length + ' name' + (picked.length === 1 ? '' : 's') + '…', '');
     const helper = new ethers.Contract(WEI_TERMS, WEI_TERMS_ABI, _signer);
     const tx = await wcTransaction(

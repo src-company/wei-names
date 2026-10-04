@@ -97,5 +97,45 @@ eq('a top-level name derives no parent', derivedParentId('vitalik'), null);
 eq('a different parent is a different id',
    derivedParentId('blog.vitalik') === derivedParentId('blog.someone'), false);
 
+
+// ── renewal: say why before the wallet does ─────────────────────────────────
+// A wallet's "insufficient funds" names neither the cost nor the balance.
+{
+  const seen = [];
+  const rc = vm.createContext({
+    ethers, String, Error, BigInt, parseFloat,
+    _connectedAddress: '0x' + '11'.repeat(20),
+    showStatus: (m, t) => seen.push(t + ':' + m),
+    withRpc: async f => f({ getBalance: async () => rc.__bal }),
+  });
+  vm.runInContext(lift('fmtEth') + '\n' + lift('enoughEth'), rc);
+  const enough = (v) => vm.runInContext('enoughEth', rc)(v);
+  rc.__bal = ethers.parseEther('0.02');
+  eq('enoughEth: short balance is refused', await enough(ethers.parseEther('0.03')), false);
+  eq('enoughEth: and says cost and balance', seen.pop(), 'error:Not enough ETH: this costs 0.03 ETH plus gas, and the wallet holds 0.02 ETH.');
+  eq('enoughEth: enough balance passes silently', await enough(ethers.parseEther('0.02')), true);
+  eq('enoughEth: nothing shown when it passes', seen.length, 0);
+  rc.withRpc = async () => { throw new Error('rpc down'); };
+  eq('enoughEth: an unreadable balance leaves it to the wallet', await enough(ethers.parseEther('1')), true);
+}
+{
+  const seen = [];
+  const hc = vm.createContext({ showStatus: (m, t) => seen.push(t + ':' + m), $: () => ({ classList: { remove() {} } }), String });
+  vm.runInContext(lift('handleError'), hc);
+  const he = vm.runInContext('handleError', hc);
+  he(Object.assign(new Error('insufficient funds for intrinsic transaction cost'), { code: 'INSUFFICIENT_FUNDS', shortMessage: 'insufficient funds' }));
+  eq('handleError: insufficient funds in plain words', seen.pop(), 'error:Not enough ETH in this wallet to cover the cost plus gas');
+  he({ message: 'execution reverted', shortMessage: 'execution reverted' });
+  eq('handleError: other errors unchanged', seen.pop(), 'error:execution reverted');
+}
+
+// ── renewal is offered to any connected wallet, not just the owner ───────────
+{
+  const src = lift('showManage');
+  eq('showManage: non-owner branch offers Renew for a top-level name',
+     /renewBtn = _connectedAddress && isTopLevel \? `<button onclick="showManageForm\('renew'\)">Renew<\/button>`/.test(src), true);
+  eq('showManage: and puts it in the actions', /innerHTML = renewBtn \+ unsetBtn/.test(src), true);
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
