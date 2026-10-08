@@ -37,6 +37,11 @@ try{var d=localStorage.getItem('dark');if(d==='1'||(d===null&&matchMedia('(prefe
     window.ens_normalize = mod.ens_normalize;
     window.ens_beautify = mod.ens_beautify;
     window.ensNormalizeReady = true;
+    // The normalizer builds its tables on first call (~200ms desktop, ~1s on a
+    // phone). Pay that while idle, not on the first keystroke.
+    const warm = () => { try { mod.ens_normalize('wei'); } catch (_) {} };
+    if (window.requestIdleCallback) requestIdleCallback(warm, { timeout: 4000 });
+    else setTimeout(warm, 1500);
   } catch (e) {
     console.error('Failed to load ens-normalize:', e);
     // Fallback: contract-compatible normalization only
@@ -1718,9 +1723,11 @@ const erc20BalNonceIface = new ethers.Interface([
 // Uses namehash: keccak256(WEI_NODE || keccak256(label))
 // WEI_NODE = namehash('wei') - use constant with sanity check for reliability
 const WEI_NODE = '0xa82820059d5df798546bcc2985157a77c3eef25eba9ba01899927333efacbd6f';
-// Sanity check if ethers is available
-if (typeof ethers !== 'undefined' && ethers.namehash) {
-  const computed = ethers.namehash('wei');
+// Sanity check if ethers is available. Hashed directly rather than via
+// ethers.namehash, which builds ethers' whole ENS normalizer (~1s of main thread
+// on a phone) just to confirm one ASCII label.
+if (typeof ethers !== 'undefined' && ethers.keccak256) {
+  const computed = ethers.keccak256(ethers.concat(['0x' + '00'.repeat(32), ethers.id('wei')]));
   if (computed !== WEI_NODE) {
     console.error('WEI_NODE mismatch! Expected', WEI_NODE, 'got', computed);
   }
