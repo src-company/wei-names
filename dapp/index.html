@@ -686,6 +686,12 @@ body.modal-open { overflow: hidden; }
     border: 1px solid var(--fg);
   }
   .dark-toggle:hover, .dark-toggle:focus-visible { opacity: 1; }
+  /* On phones the column is the full width, so fixed chips would sit on top of
+     forms and rows while scrolling. Park them at the foot of the page instead. */
+  @media (max-width: 700px) {
+    body { position: relative; }
+    .rpc-gear, .dark-toggle { position: absolute; bottom: 32px; }
+  }
   .rpc-label { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; opacity: 0.7; margin-bottom: 8px; }
   .rpc-input {
     font-size: 16px; padding: 10px 12px; width: 100%; /* 16px: avoids iOS Safari auto-zoom on focus */
@@ -1037,7 +1043,7 @@ try{if(localStorage.getItem('wns_dao_banner')==='1'){var _db=document.getElement
 
 <!-- Your names -->
 <div id="namesSection" class="send-section" style="display:none;">
-  <a href="#" onclick="toggleNames(event)" class="send-toggle" id="namesToggle">your names →</a>
+  <a href="#" onclick="toggleNames(event)" class="send-toggle" id="namesToggle" role="button" aria-expanded="false">your names →</a>
   <div id="namesPanel" class="names-panel">
     <div id="namesBody"></div>
   </div>
@@ -1045,7 +1051,7 @@ try{if(localStorage.getItem('wns_dao_banner')==='1'){var _db=document.getElement
 
 <!-- Send ETH -->
 <div id="sendSection" class="send-section">
-  <a href="#" onclick="toggleSend(event)" class="send-toggle" id="sendToggle">send eth →</a>
+  <a href="#" onclick="toggleSend(event)" class="send-toggle" id="sendToggle" role="button" aria-expanded="false">send eth →</a>
   <div id="sendForm" class="send-form">
     <div class="net-switch" role="group" aria-label="Network">
       <button type="button" id="netMainnet" class="net-btn active" aria-pressed="true" onclick="setNetwork('mainnet')"><svg viewBox="0 0 32 32" aria-hidden="true"><circle fill="#627EEA" cx="16" cy="16" r="16"/><g fill="#FFF"><path fill-opacity=".6" d="M16.498 4v8.87l7.497 3.35z"/><path d="M16.498 4L9 16.22l7.498-3.35z"/><path fill-opacity=".6" d="M16.498 21.968v6.027L24 17.616z"/><path d="M16.498 27.995v-6.028L9 17.616z"/><path fill-opacity=".2" d="M16.498 20.573l7.497-4.353-7.497-3.348z"/><path fill-opacity=".6" d="M9 16.22l7.498 4.353v-7.701z"/></g></svg>Ethereum</button>
@@ -1069,7 +1075,7 @@ try{if(localStorage.getItem('wns_dao_banner')==='1'){var _db=document.getElement
 
 <!-- Verify Name (anti-spoof) -->
 <div id="verifySection" class="send-section">
-  <a href="#" onclick="toggleVerify(event)" class="send-toggle" id="verifyToggle">verify name →</a>
+  <a href="#" onclick="toggleVerify(event)" class="send-toggle" id="verifyToggle" role="button" aria-expanded="false">verify name →</a>
   <div id="verifyForm" class="send-form">
     <div style="font-size:11px;opacity:0.5;margin-bottom:12px;">Check if a tokenId matches the name you expect. Protects against lookalike spoofs using invisible characters.</div>
     <label for="verifyTokenId">Token ID</label>
@@ -1083,7 +1089,7 @@ try{if(localStorage.getItem('wns_dao_banner')==='1'){var _db=document.getElement
 
 <!-- roll.wei lottery -->
 <div id="rollSection" class="send-section">
-  <a href="#" onclick="toggleRoll(event)" class="send-toggle" id="rollToggle">🎲 roll.wei →</a>
+  <a href="#" onclick="toggleRoll(event)" class="send-toggle" id="rollToggle" role="button" aria-expanded="false">🎲 roll.wei →</a>
   <div id="rollPanel" class="roll-panel">
     <div style="font-size:11px;opacity:0.5;margin-bottom:12px;line-height:1.5;"><a href="https://etherscan.io/address/0x0000C82AA4D72871568eF3859D2b0E7CF37e45f2" target="_blank" rel="noopener" class="roll-name-link">roll.wei</a> is an ownerless on-chain lottery for .wei holders, funded by WeiDAO. The pot earns in Lido while it waits, then goes to one random holder — odds weighted by what each name costs to hold. Entries freeze when the round closes and <a href="https://docs.chain.link/vrf" target="_blank" rel="noopener" class="roll-name-link">Chainlink VRF</a> picks the winner, so the draw can’t be predicted or gamed.</div>
     <div id="rollBody"></div>
@@ -5546,9 +5552,11 @@ function toggleSend(event) {
   if (form.classList.contains('show')) {
     form.classList.remove('show');
     toggle.textContent = 'send eth →';
+    toggle.setAttribute('aria-expanded', 'false');
   } else {
     form.classList.add('show');
-    toggle.textContent = '← hide';
+    toggle.textContent = 'send eth · hide';
+    toggle.setAttribute('aria-expanded', 'true');
     _sendBal = null;
     sendAmountChanged();
     if (_connectedAddress) {
@@ -5682,9 +5690,11 @@ function toggleVerify(event) {
   if (form.classList.contains('show')) {
     form.classList.remove('show');
     toggle.textContent = 'verify name →';
+    toggle.setAttribute('aria-expanded', 'false');
   } else {
     form.classList.add('show');
-    toggle.textContent = '← hide';
+    toggle.textContent = 'verify name · hide';
+    toggle.setAttribute('aria-expanded', 'true');
   }
 }
 
@@ -6028,7 +6038,7 @@ function openRoll(scroll) {
   if (!panel) return;
   if (!panel.classList.contains('show')) {
     panel.classList.add('show');
-    if (toggle) toggle.textContent = '← hide';
+    if (toggle) { toggle.textContent = '🎲 roll.wei · hide'; toggle.setAttribute('aria-expanded', 'true'); }
     refreshRoll();
     if (!_rollTimer) _rollTimer = setInterval(rollTick, 1000);
   }
@@ -6044,7 +6054,7 @@ function closeRoll() {
   const panel = $('rollPanel');
   const toggle = $('rollToggle');
   if (panel) panel.classList.remove('show');
-  if (toggle) toggle.textContent = '🎲 roll.wei →';
+  if (toggle) { toggle.textContent = '🎲 roll.wei →'; toggle.setAttribute('aria-expanded', 'false'); }
   if (_rollTimer) { clearInterval(_rollTimer); _rollTimer = null; }
   // Only clear the hash if it is ours, so closing the panel never clobbers a name deeplink.
   const h = window.location.hash.slice(1).toLowerCase().replace(/\.wei$/, '');
@@ -7590,8 +7600,10 @@ function namesPanelOpen() {
 function namesSetToggle() {
   const t = $('namesToggle');
   if (!t) return;
-  t.textContent = namesPanelOpen() ? '← hide'
+  const open = namesPanelOpen();
+  t.textContent = open ? 'your names · hide'
     : 'your names' + (_namesCount ? ' · ' + _namesCount : '') + ' →';
+  if (t.setAttribute) t.setAttribute('aria-expanded', open ? 'true' : 'false');
 }
 
 function toggleNames(event) {

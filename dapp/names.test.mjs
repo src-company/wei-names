@@ -645,7 +645,7 @@ const classified = (over = {}) => Object.assign(
   s.run('toggleNames(null)');
   ok('toggle: opening shows the panel', s.els.get('namesPanel')._classes.has('show'));
   eq('toggle: and starts a scan', scans, 1);
-  eq('toggle: the link becomes a way back', s.els.get('namesToggle').textContent, '← hide');
+  eq('toggle: the link becomes a way back', s.els.get('namesToggle').textContent, 'your names · hide');
   s.run('toggleNames(null)');
   ok('toggle: closing hides it', !s.els.get('namesPanel')._classes.has('show'));
   eq('toggle: no second scan on the way out', scans, 1);
