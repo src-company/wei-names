@@ -31,6 +31,21 @@ services:
       - path: /*
         name: Referrer-Policy
         value: strict-origin-when-cross-origin
+      # Bundles that don't change between releases: let repeat visits skip the
+      # revalidation round trip. Pages, wallet.js and the tacit kit (re-vendored
+      # alongside page changes) keep the default, always-revalidated cache.
+      - path: /assets/*
+        name: Cache-Control
+        value: "public, max-age=604800"
+      - path: /vendor/ethers.min.js
+        name: Cache-Control
+        value: "public, max-age=86400, stale-while-revalidate=604800"
+      - path: /vendor/ens-normalize.min.js
+        name: Cache-Control
+        value: "public, max-age=86400, stale-while-revalidate=604800"
+      - path: /vendor/walletconnect.min.js
+        name: Cache-Control
+        value: "public, max-age=86400, stale-while-revalidate=604800"
     routes:
       # Stray deep links go to the app (WNS uses #hash routing). A redirect, not
       # a rewrite: the page loads its scripts by relative path, so serving it at
