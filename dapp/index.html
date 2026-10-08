@@ -38,10 +38,16 @@ try{var d=localStorage.getItem('dark');if(d==='1'||(d===null&&matchMedia('(prefe
     window.ens_beautify = mod.ens_beautify;
     window.ensNormalizeReady = true;
     // The normalizer builds its tables on first call (~200ms desktop, ~1s on a
-    // phone). Pay that while idle, not on the first keystroke.
-    const warm = () => { try { mod.ens_normalize('wei'); } catch (_) {} };
-    if (window.requestIdleCallback) requestIdleCallback(warm, { timeout: 4000 });
-    else setTimeout(warm, 1500);
+    // phone). Pay that while idle, not on the first keystroke — but not on a #link,
+    // where "idle" is the wait for the lookup's answer it would then hold up.
+    // Focusing the name box warms it too.
+    let warmed = false;
+    const warm = () => { if (warmed) return; warmed = true; try { mod.ens_normalize('wei'); } catch (_) {} };
+    if (!location.hash.slice(1)) {
+      if (window.requestIdleCallback) requestIdleCallback(warm, { timeout: 4000 });
+      else setTimeout(warm, 1500);
+    }
+    document.addEventListener('focusin', e => { if (e.target && e.target.id === 'nameInput') warm(); });
   } catch (e) {
     console.error('Failed to load ens-normalize:', e);
     // Fallback: contract-compatible normalization only
@@ -1877,10 +1883,14 @@ function normalizeLabelContract(s) {
 
 // Normalize label using ENSIP-15 standard (via @adraffy/ens-normalize)
 // This handles: Unicode NFC, confusables, zero-width chars, emoji, bidirectional text
+// ENSIP-15 maps an ASCII letters-and-digits label to its lowercase self, so those
+// (most lookups) skip ens_normalize, whose first call builds its tables (~200ms
+// desktop, ~1s on a phone). Hyphens and underscores have rules: full path.
 // Falls back to contract-compatible normalization for edge cases
 function normalizeLabel(label) {
   const s = label.trim();
   if (!s || s.length > 255) return null;
+  if (/^[A-Za-z0-9]+$/.test(s)) return s.toLowerCase();
 
   try {
     // Use ENSIP-15 normalization - this is the industry standard
@@ -1954,6 +1964,7 @@ function getNormalizationError(label) {
   const s = label.trim();
   if (!s) return 'Name cannot be empty';
   if (s.length > 255) return 'Name too long (max 255 bytes)';
+  if (/^[A-Za-z0-9]+$/.test(s)) return null;
 
   try {
     if (typeof ens_normalize !== 'function') {
@@ -2482,13 +2493,16 @@ async function doCheckName() {
     availEl.innerHTML = '<span style="opacity:0.5;">' + spinnerSVG(15) + 'Checking ' + escapeHtml(name) + '.wei…</span>';
     availEl.classList.add('show');
 
-    // Compute tokenId locally to batch all 4 calls into 1 RPC call
+    // Compute tokenId locally so availability and the manage panel's reads go
+    // out as one RPC call.
     const tokenId = localComputeId(name);
-    const results = await multicall([
+    const batch = await multicall([
       { fn: 'isAvailable', args: [name, 0] },
       { fn: 'getFee', args: [byteLength(name)] },
-      { fn: 'getPremium', args: [tokenId] }
+      { fn: 'getPremium', args: [tokenId] },
+      ...manageReadCalls(tokenId, name).calls
     ]);
+    const results = batch.slice(0, 3);
     if (!results[0] || !results[1] || !results[2]) {
       throw new Error('Failed to fetch name data');
     }
@@ -2537,7 +2551,7 @@ async function doCheckName() {
 
       // Show manage section with owner info
       globalThis.__wnsOwned = false;
-      managed = await showManage(tokenId, name);
+      managed = await showManage(tokenId, name, batch.slice(3));
       if (thisVersion !== checkVersion) return; // superseded by a newer search
       if (managed && globalThis.__wnsOwned) {
         const tk = availEl.querySelector && availEl.querySelector('.taken');
@@ -3636,7 +3650,39 @@ function hideManage() {
 
 let manageVersion = 0;
 
-async function showManage(tokenId, name) {
+// The reads behind the manage panel. Built separately so a top-level lookup can
+// append them to its own availability batch: a taken name then costs one round
+// trip instead of two (for an available one they are a few allowFailure slots in
+// the same request).
+function manageReadCalls(tokenId, name) {
+  // Common text record keys to display
+  const textKeys = ['url', 'email', 'description', 'com.twitter', 'com.github', TACIT_RECORD_KEY];
+  // A subdomain's staleness check needs records(parent), and the parent's id is
+  // the recursive namehash of the parent label chain — no chain read required to
+  // derive it (showManage is always called with tokenId === computeIdFull(name)).
+  // So it rides along in the batch below instead of costing a second serial
+  // round-trip after it: a taken subdomain used to cost three chained public-RPC
+  // calls (availability -> this batch -> parent records). It is only *used* once
+  // the chain confirms it really is this token's parent, so a mismatch falls back
+  // to the extra call rather than trusting a locally derived id.
+  const parentIdGuess = name.includes('.') ? computeIdFull(name.split('.').slice(1).join('.')) : null;
+  const calls = [
+    { fn: 'ownerOf', args: [tokenId], allowFailure: true },
+    { fn: 'resolve', args: [tokenId], allowFailure: true },
+    { fn: 'records', args: [tokenId], allowFailure: true },
+    { fn: 'contenthash', args: [tokenId], allowFailure: true },
+    ...textKeys.map(key => ({ fn: 'text', args: [tokenId, key], allowFailure: true })),
+    ...(parentIdGuess !== null ? [{ fn: 'records', args: [parentIdGuess], allowFailure: true }] : []),
+    // Rides along so the actions can offer "Unset Display Name" on the one name
+    // that currently is it. Appended last, after the optional parent slot.
+    ...(_connectedAddress ? [{ fn: 'primaryName', args: [_connectedAddress], allowFailure: true }] : [])
+  ];
+  return { calls, textKeys, parentIdGuess };
+}
+
+// `prefetched`: results of manageReadCalls(tokenId, name), already fetched by the
+// caller's batch. Used for the first attempt; a retry still reads afresh.
+async function showManage(tokenId, name, prefetched) {
   currentTokenId = tokenId;
   currentTokenName = name;
   currentExpiresAt = null;
@@ -3650,22 +3696,8 @@ async function showManage(tokenId, name) {
   if (!rpcProvider && !readContract) { if (!stale()) hideManage(); return false; }
 
   try {
-    // Common text record keys to display
-    const textKeys = ['url', 'email', 'description', 'com.twitter', 'com.github', TACIT_RECORD_KEY];
-
-    // A subdomain's staleness check needs records(parent), and the parent's id is
-    // the recursive namehash of the parent label chain — no chain read required to
-    // derive it (showManage is always called with tokenId === computeIdFull(name)).
-    // So it rides along in the batch below instead of costing a second serial
-    // round-trip after it: a taken subdomain used to cost three chained public-RPC
-    // calls (availability -> this batch -> parent records). It is only *used* once
-    // the chain confirms it really is this token's parent, so a mismatch falls back
-    // to the extra call rather than trusting a locally derived id.
-    const parentIdGuess = name.includes('.') ? computeIdFull(name.split('.').slice(1).join('.')) : null;
+    const { calls, textKeys, parentIdGuess } = manageReadCalls(tokenId, name);
     const parentSlot = 4 + textKeys.length;
-    // Rides along so the actions can offer "Unset Display Name" on the one name
-    // that currently is it. Appended last, after the optional parent slot, so the
-    // index arithmetic above stays put.
     const primarySlot = parentSlot + (parentIdGuess !== null ? 1 : 0);
 
     // Batch all reads into one RPC call (including text records). Retry once:
@@ -3675,15 +3707,9 @@ async function showManage(tokenId, name) {
     let results = null, owner = null;
     for (let attempt = 0; attempt < 2 && !owner; attempt++) {
       try {
-        results = await multicall([
-          { fn: 'ownerOf', args: [tokenId], allowFailure: true },
-          { fn: 'resolve', args: [tokenId], allowFailure: true },
-          { fn: 'records', args: [tokenId], allowFailure: true },
-          { fn: 'contenthash', args: [tokenId], allowFailure: true },
-          ...textKeys.map(key => ({ fn: 'text', args: [tokenId, key], allowFailure: true })),
-          ...(parentIdGuess !== null ? [{ fn: 'records', args: [parentIdGuess], allowFailure: true }] : []),
-          ...(_connectedAddress ? [{ fn: 'primaryName', args: [_connectedAddress], allowFailure: true }] : [])
-        ]);
+        results = attempt === 0 && prefetched && prefetched.length === calls.length
+          ? prefetched
+          : await multicall(calls);
       } catch (_) {
         results = null;
       }
