@@ -870,6 +870,37 @@ body.modal-open { overflow: hidden; }
 .names-more:hover { opacity:1; }
 .names-more:disabled { cursor:default; opacity:0.3; }
 
+/* ── design pass ─────────────────────────────────────── */
+h1 { margin-bottom: 6px; }
+.tagline { font-size: 11px; letter-spacing: 0.05em; color: var(--fg-muted); margin: 0 0 28px; }
+/* Nothing typed yet: no point showing a dashed, disabled Commit. */
+body:has(#nameInput:placeholder-shown) #commitBtn:disabled { display: none; }
+.availability .yours { color: var(--fg); }
+.availability .yours::before { content: ''; display: inline-block; width: 8px; height: 8px; background: var(--fg); margin-right: 10px; vertical-align: 2px; }
+/* The manage panel now follows the lookup directly. */
+.manage { margin: 0 0 32px; }
+.manage-actions button:last-of-type:nth-of-type(odd) { grid-column: 1 / -1; }
+.manage-hint { grid-column: 1 / -1; font-size: 12px; color: var(--fg-muted); line-height: 1.5; }
+.manage-actions > :only-child.manage-hint { margin-top: -4px; }
+.panel-intro { font-size: 12px; line-height: 1.5; color: var(--fg-muted); margin-bottom: 14px; }
+/* Small print that informs (not decoration): use the muted ink, not opacity,
+   so it keeps readable contrast in both themes. */
+.featured-label, .integrations-label, .roll-pot-label, .roll-meta-k, .roll-pot-sub,
+.roll-note, .roll-forever, .roll-field h4, .roll-winners h4, .names-sum, .names-note {
+  opacity: 1; color: var(--fg-muted);
+}
+/* "renew / roll" column heads: wide enough for their words */
+.names-line .names-check:first-child { margin-right: 22px; }
+.names-head span:first-child { width: 37px; }
+.names-head span { letter-spacing: 0.04em; }
+@media (max-width: 700px) {
+  /* These two were declared earlier in the phone block and silently lost to the
+     base rules that follow it. */
+  .integrations-row { grid-template-columns: repeat(2, auto); gap: 16px 28px; }
+  .send-form { padding: 14px; }
+  .tagline { margin-bottom: 24px; }
+}
+
 </style>
 </head>
 <body>
@@ -977,6 +1008,7 @@ try{if(localStorage.getItem('wns_dao_banner')==='1'){var _db=document.getElement
 </script>
 
 <h1>wei name service</h1>
+<p class="tagline">a simple namespace on ethereum named after the smallest unit of ether</p>
 
 <div class="section name-section">
   <div class="label-row">
@@ -1038,8 +1070,16 @@ try{if(localStorage.getItem('wns_dao_banner')==='1'){var _db=document.getElement
 
 <div class="section commit-section">
   <button id="commitBtn" onclick="doCommit()" disabled>Commit</button>
-  <div style="font-size:11px;opacity:0.4;margin-top:16px;letter-spacing:0.05em;">a simple namespace on ethereum named after the smallest unit of ether</div>
 </div>
+
+<div id="manage" class="manage">
+  <h3>Manage Name</h3>
+  <div class="manage-info" id="manageInfo"></div>
+  <div class="manage-actions" id="manageActions"></div>
+  <div class="manage-form" id="manageForm"></div>
+</div>
+
+<div id="status" class="status" role="status" aria-live="polite"></div>
 
 <!-- Your names -->
 <div id="namesSection" class="send-section" style="display:none;">
@@ -1077,13 +1117,12 @@ try{if(localStorage.getItem('wns_dao_banner')==='1'){var _db=document.getElement
 <div id="verifySection" class="send-section">
   <a href="#" onclick="toggleVerify(event)" class="send-toggle" id="verifyToggle" role="button" aria-expanded="false">verify name →</a>
   <div id="verifyForm" class="send-form">
-    <div style="font-size:11px;opacity:0.5;margin-bottom:12px;">Check if a tokenId matches the name you expect. Protects against lookalike spoofs using invisible characters.</div>
+    <div class="panel-intro">Check if a tokenId matches the name you expect. Protects against lookalike spoofs using invisible characters.</div>
     <label for="verifyTokenId">Token ID</label>
     <input type="text" id="verifyTokenId" placeholder="From OpenSea URL or NFT" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" oninput="doVerify()">
     <label for="verifyExpected">Expected Name (optional)</label>
     <input type="text" id="verifyExpected" placeholder="e.g. vitalik" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" oninput="doVerify()">
     <div id="verifyResult" aria-live="polite" style="margin-top:12px;display:none;"></div>
-    <button class="secondary" onclick="toggleVerify(event)" style="margin-top:12px;">Close</button>
   </div>
 </div>
 
@@ -1091,19 +1130,10 @@ try{if(localStorage.getItem('wns_dao_banner')==='1'){var _db=document.getElement
 <div id="rollSection" class="send-section">
   <a href="#" onclick="toggleRoll(event)" class="send-toggle" id="rollToggle" role="button" aria-expanded="false">🎲 roll.wei →</a>
   <div id="rollPanel" class="roll-panel">
-    <div style="font-size:11px;opacity:0.5;margin-bottom:12px;line-height:1.5;"><a href="https://etherscan.io/address/0x0000C82AA4D72871568eF3859D2b0E7CF37e45f2" target="_blank" rel="noopener" class="roll-name-link">roll.wei</a> is an ownerless on-chain lottery for .wei holders, funded by WeiDAO. The pot earns in Lido while it waits, then goes to one random holder — odds weighted by what each name costs to hold. Entries freeze when the round closes and <a href="https://docs.chain.link/vrf" target="_blank" rel="noopener" class="roll-name-link">Chainlink VRF</a> picks the winner, so the draw can’t be predicted or gamed.</div>
+    <div class="panel-intro"><a href="https://etherscan.io/address/0x0000C82AA4D72871568eF3859D2b0E7CF37e45f2" target="_blank" rel="noopener" class="roll-name-link">roll.wei</a> is an ownerless on-chain lottery for .wei holders, funded by WeiDAO. The pot earns in Lido while it waits, then goes to one random holder — odds weighted by what each name costs to hold. Entries freeze when the round closes and <a href="https://docs.chain.link/vrf" target="_blank" rel="noopener" class="roll-name-link">Chainlink VRF</a> picks the winner, so the draw can’t be predicted or gamed.</div>
     <div id="rollBody"></div>
   </div>
 </div>
-
-<div id="manage" class="manage">
-  <h3>Manage Name</h3>
-  <div class="manage-info" id="manageInfo"></div>
-  <div class="manage-actions" id="manageActions"></div>
-  <div class="manage-form" id="manageForm"></div>
-</div>
-
-<div id="status" class="status" role="status" aria-live="polite"></div>
 
 <div class="featured">
   <span class="featured-label">featured on</span>
@@ -2499,8 +2529,13 @@ async function doCheckName() {
       hideTermRow();
 
       // Show manage section with owner info
+      globalThis.__wnsOwned = false;
       managed = await showManage(tokenId, name);
       if (thisVersion !== checkVersion) return; // superseded by a newer search
+      if (managed && globalThis.__wnsOwned) {
+        const tk = availEl.querySelector && availEl.querySelector('.taken');
+        if (tk) { tk.className = 'yours'; tk.textContent = name + '.wei is yours'; }
+      }
     }
     availEl.classList.add('show');
     updateHash(name);
@@ -3833,10 +3868,11 @@ async function showManage(tokenId, name) {
           (renewBtn ? '. Anyone can renew it.' : '')
         : isTopLevel ? 'Connect as owner to manage, or any wallet to renew' : 'Connect as owner to manage';
       $('manageActions').innerHTML = renewBtn + unsetBtn +
-        '<span style="font-size:12px;opacity:0.5;">' + escapeHtml(hint) + '</span>';
+        '<span class="manage-hint">' + escapeHtml(hint) + '</span>';
     }
 
     if (stale()) return false;
+    globalThis.__wnsOwned = !!isOwner;
     $('manage').classList.add('show');
     $('manageForm').classList.remove('show');
     return true;
