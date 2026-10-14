@@ -136,47 +136,41 @@ services:
       # bar) or 'redirect' (302, bandwidth-light, per-CID origin isolation).
       - key: GATEWAY_MODE
         value: proxy
-      # Subdomain gateways, comma-separated and tried in order. Must be
-      # subdomain (not path) form so the site's _redirects/SPA fallback applies
-      # — deep paths like /docs 404 on a path gateway (ipfs.io/ipfs/<cid>/docs)
-      # even when / works.
+      # Subdomain gateways (`<cid>.ipfs.<gw>`), comma-separated and tried in
+      # order before the path gateways below. `off` (or unset): none.
       #
-      # In `proxy` mode the list is a failover chain: a 429 or 5xx from one
-      # entry moves to the next, and only the last entry's answer is passed to
-      # the visitor. In `redirect` mode only the first entry is used — a 302 is
-      # handed out once and cannot be taken back.
+      # None today. The Protocol Labs public fleet (ipfs.io, dweb.link, and
+      # w3s.link / nftstorage.link, which redirect onto it) was retired on
+      # 2026-09-21 and answers 429, and no other public subdomain gateway checked
+      # on 2026-10-14 served content pinned only on Filebase. An entry here would
+      # only add a failed round trip in front of every request. Set explicitly,
+      # not removed: deleting a key from the blueprint leaves the old value on
+      # the running service.
       #
-      # This is not hypothetical redundancy. The Protocol Labs public fleet
-      # (ipfs.io, dweb.link, and w3s.link / nftstorage.link, which 301 onto
-      # dweb.link) is being retired: since 2026-09-01 it answers 429 for a
-      # growing slice of each hour, and it stops entirely on 2026-09-21 UTC.
-      # A one-entry list is that shutdown, inherited, for every .wei name at
-      # once. Keep at least one entry here that is NOT part of that fleet.
-      #
-      # When every entry fails, or only a path gateway answers and it doesn't
-      # hold the CID (a NoFetch node 404s on anything unpinned), a page load is
-      # 302'd to IPFS_BROWSER_GATEWAY (default inbrowser.link, `off` to disable),
-      # which fetches and verifies in the visitor's browser. Subresources are
-      # never redirected; they get the upstream's own answer.
+      # When every upstream fails, or the path gateway doesn't hold the CID
+      # (404), a page load is 302'd to IPFS_BROWSER_GATEWAY (default
+      # inbrowser.link, `off` to disable), which fetches and verifies in the
+      # visitor's browser. Subresources are never redirected; they get the
+      # upstream's own answer.
       - key: IPFS_SUBDOMAIN_GATEWAY
-        value: dweb.link
-      # Last-resort path gateways (`<origin>/ipfs/<cid>/<path>`), comma-
-      # separated, tried after every subdomain entry and only in `proxy` mode.
+        value: "off"
+      # Path gateways (`<origin>/ipfs/<cid>/<path>`), comma-separated, tried
+      # after any subdomain entry and only in `proxy` mode. Also the handler.js
+      # default.
       #
-      # A path gateway serves every CID from one origin, so the site's
-      # own routing is not applied by the upstream. The gateway reads the
-      # site's _redirects itself when a path target 404s (exact rules only), so
-      # /docs -> /docs.html works here too; a splat or SPA catch-all still needs
-      # a subdomain gateway, which is why this sits last. In proxy mode the
-      # bytes reach the visitor under <name>.wei.limo either way, so origin
+      # Filebase, where .wei sites are pinned. Path style only: its subdomain
+      # style (<cid>.ipfs.filebase.io) does not resolve, so it can never go in
+      # IPFS_SUBDOMAIN_GATEWAY. Content pinned there answers in about a second;
+      # content that isn't may be slow or time out (PROXY_TIMEOUT_MS), and a page
+      # load then falls to the browser gateway. Owners should pin on Filebase.
+      #
+      # A path gateway applies none of the site's own routing, so the gateway
+      # reads the site's _redirects itself when a path target 404s (exact rules
+      # only): /docs -> /docs.html works, a splat or SPA catch-all does not. In
+      # proxy mode the bytes reach the visitor under <name>.wei.limo, so origin
       # isolation is unchanged.
-      #
-      # Set in the dashboard rather than here: this is the natural place for a
-      # self-hosted kubo that already holds the pins, and publishing an open
-      # gateway's URL in a public repo invites strangers to pull arbitrary CIDs
-      # through its bandwidth.
       - key: IPFS_PATH_GATEWAY
-        sync: false
+        value: https://ipfs.filebase.io
       # How long an upstream IPFS gateway gets to return HEADERS in proxy mode
       # (bodies stream uncapped). A gateway that accepts the connection and then
       # hangs otherwise holds an outbound slot until Node's own default gives

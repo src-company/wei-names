@@ -417,6 +417,13 @@ function shouldFailover(status) {
 // ever a redirect target for a page load, never something this gateway fetches.
 const BROWSER_GATEWAY = 'inbrowser.link'
 
+// Default path gateway for proxy mode. Filebase answers path style only
+// (`<origin>/ipfs/<cid>/<path>`); its `<cid>.ipfs.filebase.io` subdomain style
+// does not resolve, so it can never be an IPFS_SUBDOMAIN_GATEWAY entry. Content
+// pinned on Filebase answers in about a second; anything else may be slow or
+// time out there, and then falls to the browser gateway like any other miss.
+const PATH_GATEWAY = 'https://ipfs.filebase.io'
+
 function browserGateway(env) {
   const v = String(readEnv(env, 'IPFS_BROWSER_GATEWAY', BROWSER_GATEWAY)).trim()
   return v === 'off' ? '' : v
@@ -872,11 +879,11 @@ export async function handleRequest(request, env, { clientIp = 'unknown' } = {})
 
   // Build the upstream target + the id header that records what we served.
   //   web3 -> a web3:// HTTP gateway: `https://<addr>.<chainId>.<gw>/<path>`.
-  //   ipfs/ipns -> a SUBDOMAIN gateway (`<id>.ipfs.<gw>`), NOT a path gateway
-  //     (`<gw>/ipfs/<id>`): path gateways don't apply the site's `_redirects` /
-  //     SPA fallback, so deep paths 404 even when `/` works. Subdomain gateways
-  //     serve each id as its own origin and honour `_redirects`. Needs a base32
-  //     CIDv1 / base36 IPNS name (fits a DNS label) — decodeContenthash emits it.
+  //   ipfs/ipns -> any configured SUBDOMAIN gateways (`<id>.ipfs.<gw>`) first:
+  //     they serve each id as its own origin and honour `_redirects`. Needs a
+  //     base32 CIDv1 / base36 IPNS name (fits a DNS label) — decodeContenthash
+  //     emits it. Then, in proxy mode, the PATH gateways (`<gw>/ipfs/<id>`) —
+  //     by default Filebase, and today the only upstream in production.
   // `targets` is an ordered list, not one URL: in proxy mode each is tried
   // until one answers something that isn't shouldFailover(). One entry — the
   // historical setting — behaves exactly as before, so a single gateway's
@@ -894,7 +901,12 @@ export async function handleRequest(request, env, { clientIp = 'unknown' } = {})
     // Only the parameters the gateway honours reach it; see ipfsQuery.
     const query = ipfsQuery(url.search)
     const browserGw = browserGateway(env)
-    targets = envList(env, 'IPFS_SUBDOMAIN_GATEWAY', 'dweb.link')
+    // No default: the public subdomain fleet (dweb.link) is retired, and no
+    // replacement serves content pinned only on Filebase. Unset or `off`, proxy
+    // mode goes straight to the path gateway, and redirect mode to the browser
+    // gateway.
+    targets = envList(env, 'IPFS_SUBDOMAIN_GATEWAY', '')
+      .filter((gw) => gw !== 'off')
       // The browser gateway only works as a redirect; fetched, it is a loader page
       .filter((gw) => mode !== 'proxy' || gw !== browserGw)
       .map((gw) => ({
@@ -910,7 +922,7 @@ export async function handleRequest(request, env, { clientIp = 'unknown' } = {})
     // a subdomain gateway. In proxy mode the bytes arrive under <label>.<zone>
     // either way, so nothing about origin isolation changes for the visitor.
     if (mode === 'proxy') {
-      for (const origin of envList(env, 'IPFS_PATH_GATEWAY', '')) {
+      for (const origin of envList(env, 'IPFS_PATH_GATEWAY', PATH_GATEWAY).filter((o) => o !== 'off')) {
         const base = origin.replace(/\/+$/, '')
         let host = base
         try {

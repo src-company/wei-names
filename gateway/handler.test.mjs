@@ -231,7 +231,7 @@ eq('not a page, but a contenthash is set: falls back to ipfs', res.status, 302)
 eq(
   'not a page, but a contenthash is set: redirects to the cid',
   res.headers.get('location'),
-  'https://bafybeibj6lixxzqtsb45ysdjnupvqkufgdvzqbnvmhw2kf7cfkesy7r7d4.ipfs.dweb.link/',
+  'https://bafybeibj6lixxzqtsb45ysdjnupvqkufgdvzqbnvmhw2kf7cfkesy7r7d4.ipfs.inbrowser.link/',
 )
 
 // --- 8. Rule 3 corollary: RPC failure is a 502, never something cached ------
@@ -768,7 +768,9 @@ async function proxyGetEnv(hostAndPath, extra, { method = 'GET', keepHealth = fa
   })
 }
 
-const TWO_GW = { IPFS_SUBDOMAIN_GATEWAY: 'brown.out,healthy.gw' }
+// The default path gateway would otherwise sit behind every list; these cases
+// are about the subdomain list alone.
+const TWO_GW = { IPFS_SUBDOMAIN_GATEWAY: 'brown.out,healthy.gw', IPFS_PATH_GATEWAY: 'off' }
 let seen = []
 const byHost = (answers) => async (u) => {
   const host = new URL(u).host
@@ -794,7 +796,7 @@ eq('failover: both were tried, in order', seen.length, 2)
 routes = ipfsName(71)
 seen = []
 proxyResponse = byHost([['brown.out', () => new Response('gateway is retiring', { status: 429 })]])
-res = await proxyGetEnv('f71.wei.limo/alone', { IPFS_SUBDOMAIN_GATEWAY: 'brown.out' })
+res = await proxyGetEnv('f71.wei.limo/alone', { IPFS_SUBDOMAIN_GATEWAY: 'brown.out', IPFS_PATH_GATEWAY: 'off' })
 eq('failover: one gateway still passes its status through', res.status, 429)
 eq('failover: and is not retried', seen.length, 1)
 eq('failover: a failing upstream is never cached', res.headers.get('cache-control'), 'no-store')
@@ -877,10 +879,76 @@ eq('redirect: and says which', res.headers.get('x-wns-upstream'), 'first.gw')
 // A list of nothing but separators must not leave the gateway with no upstream.
 routes = ipfsName(78)
 seen = []
-proxyResponse = byHost([['dweb.link', () => new Response('default', { status: 200 })]])
+proxyResponse = byHost([['ipfs.filebase.io', () => new Response('default', { status: 200 })]])
 res = await proxyGetEnv('f78.wei.limo/empty-list', { IPFS_SUBDOMAIN_GATEWAY: ' , , ' })
-eq('failover: an empty list falls back to the default gateway', res.status, 200)
-eq('failover: which is dweb.link', res.headers.get('x-wns-upstream'), 'dweb.link')
+eq('failover: an empty list falls back to the default path gateway', res.status, 200)
+eq('failover: which is Filebase', res.headers.get('x-wns-upstream'), 'ipfs.filebase.io')
+
+// --- Filebase: the default upstream --------------------------------------------
+//
+// dweb.link is retired and the self-hosted node is gone, so with nothing set,
+// proxy mode fetches Filebase by path. Its subdomain style does not resolve, so
+// it is never addressed as <cid>.ipfs.filebase.io.
+routes = ipfsName(79)
+seen = []
+proxyResponse = byHost([
+  ['ipfs.filebase.io', () => new Response('<h1>docs</h1>', { status: 200, headers: { 'content-type': 'text/html' } })],
+])
+res = await handleRequest(
+  new Request('https://f79.wei.limo/guide/intro.html', { headers: { 'sec-fetch-mode': 'navigate' } }),
+  PROXY_ENV,
+)
+eq('filebase: an unset env fetches the path gateway', seen.length, 1)
+eq(
+  'filebase: as <origin>/ipfs/<cid>/<path>',
+  /^https:\/\/ipfs\.filebase\.io\/ipfs\/bafy[a-z0-9]+\/guide\/intro\.html$/.test(seen[0]),
+  true,
+)
+eq('filebase: a page load is served, not redirected', res.status, 200)
+eq('filebase: no location', res.headers.get('location'), null)
+eq('filebase: no fallback', res.headers.get('x-wns-fallback'), null)
+eq('filebase: the bytes stream under the name', await res.text(), '<h1>docs</h1>')
+eq('filebase: content type kept', res.headers.get('content-type'), 'text/html')
+eq('filebase: named as the upstream', res.headers.get('x-wns-upstream'), 'ipfs.filebase.io')
+eq('filebase: and the CID it served', /^bafy/.test(res.headers.get('x-ipfs-cid')), true)
+
+// `off` empties a list, so an operator can still opt out of the default.
+routes = ipfsName(79)
+seen = []
+res = await handleRequest(
+  new Request('https://f79.wei.limo/off', { headers: { 'sec-fetch-mode': 'navigate' } }),
+  { ...PROXY_ENV, IPFS_PATH_GATEWAY: 'off' },
+)
+eq('filebase: off means no upstream is fetched', seen.length, 0)
+eq('filebase: and a page load goes to the browser gateway', res.headers.get('x-wns-fallback'), 'no-upstream')
+
+// The address record still wins over the contenthash. A name that points at a
+// page contract AND carries a contenthash is served from chain, and Filebase is
+// never asked — the default upstream changes nothing about resolution order.
+seen = []
+proxyResponse = async (u) => { seen.push(u); throw new Error('ipfs fetched for a contract page: ' + u) }
+routes = nameRoutes(171, addr(0xc0de171), {
+  [`${addr(0xc0de171)}:${RESOLVE_MODE}`]: '0x',
+  [`${addr(0xc0de171)}:${HTML}`]: RET_HTML,
+  [`${WNS}:${CONTENTHASH}`]: IPFS_CH,
+})
+upstreamHealth.clear()
+res = await handleRequest(
+  new Request('https://both8244.wei.limo/', { headers: { 'sec-fetch-mode': 'navigate' } }),
+  PROXY_ENV,
+)
+eq('precedence: an 8244 address beats the contenthash', res.headers.get('x-wns-mode'), 'html')
+eq('precedence: and serves the contract document', await res.text(), '<html>ok</html>')
+eq('precedence: without touching an IPFS upstream', seen.length, 0)
+routes = nameRoutes(172, addr(0xc0de172), {
+  [`${addr(0xc0de172)}:${RESOLVE_MODE}`]: mode('5219'),
+  [`${addr(0xc0de172)}:${REQUEST}`]: RET_IMMUTABLE,
+  [`${WNS}:${CONTENTHASH}`]: IPFS_CH,
+})
+res = await handleRequest(new Request('https://both5219.wei.limo/'), PROXY_ENV)
+eq('precedence: a 5219 address beats the contenthash too', res.headers.get('x-wns-mode'), '5219')
+eq('precedence: still no IPFS upstream', seen.length, 0)
+proxyResponse = null
 proxyResponse = null
 
 // --- upstream benching -------------------------------------------------------
@@ -984,14 +1052,14 @@ const LIVE_IPNS = 'k51qzi5uqu5dlvj2baxnqndepeb86cbk3ng7n3i46uzyxzyqj2xjonzllnv0v
 routes = {}
 upstreamHealth.clear()
 seen = []
-proxyResponse = byHost([['dweb.link', () => new Response('the pinned bytes', { status: 200 })]])
+proxyResponse = byHost([['ipfs.filebase.io', () => new Response('the pinned bytes', { status: 200 })]])
 res = await proxyGetEnv(`${LIVE_CID}.wei.limo/paper.pdf`, {}, { keepHealth: true })
 eq('cid label: serves the content', res.status, 200)
 eq('cid label: the bytes are the CID’s', await res.text(), 'the pinned bytes')
 eq('cid label: costs no eth_call whatsoever', calls.length, 0)
 eq('cid label: reported as ipfs', res.headers.get('x-wns-mode'), 'ipfs')
 eq('cid label: and names the CID it served', res.headers.get('x-ipfs-cid'), LIVE_CID)
-eq('cid label: addressed as a subdomain upstream', seen[0].startsWith(`https://${LIVE_CID}.ipfs.dweb.link/paper.pdf`), true)
+eq('cid label: addressed on the path gateway', seen[0].startsWith(`https://ipfs.filebase.io/ipfs/${LIVE_CID}/paper.pdf`), true)
 
 // An IPNS key label is the mutable sibling: same surface, resolved fresh.
 routes = {}
@@ -1005,12 +1073,12 @@ proxyResponse = null
 
 // Redirect mode hands out the subdomain gateway URL for the CID directly.
 routes = {}
-res = await handleRequest(new Request(`https://${LIVE_CID}.wei.limo/`), ENV)
+res = await handleRequest(new Request(`https://${LIVE_CID}.wei.limo/`), { ...ENV, IPFS_SUBDOMAIN_GATEWAY: 'sub.gw' })
 eq('cid label: redirects like any other ipfs target', res.status, 302)
 eq(
   'cid label: to the subdomain gateway',
   res.headers.get('location'),
-  `https://${LIVE_CID}.ipfs.dweb.link/`,
+  `https://${LIVE_CID}.ipfs.sub.gw/`,
 )
 
 // The floor exists so ordinary names are untouched. `bafkreib` is base32 and

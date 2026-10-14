@@ -16,7 +16,9 @@ GET alice.wei.limo/some/path
   └─ else eth_call WNS.contenthash(tokenId)   -> 0xe301…/0xe501…  (EIP-1577)
        ├─ decode contenthash                   -> bafy… (IPFS) or k51… (IPNS)
        ├─ redirect mode: 302  https://bafy….ipfs.<IPFS_SUBDOMAIN_GATEWAY>/
-       └─ proxy mode: stream from the subdomain, then path gateways in turn;
+       │    (none set: straight to the browser gateway below)
+       └─ proxy mode: stream from any subdomain gateways, then the path
+             gateways (default https://ipfs.filebase.io/ipfs/bafy…/path);
              if none holds it, a page load is 302'd to
              https://bafy….ipfs.inbrowser.link/  (verified in the browser)
              (IPNS keys go to the .ipns. form of the same gateways)
@@ -175,10 +177,10 @@ The gateway also keeps a `RESERVED_LABELS` guard as defense-in-depth.
 
 | Var | Default | Notes |
 |-----|---------|-------|
-| `GATEWAY_MODE` | `redirect` | `redirect` (302 to a subdomain IPFS gateway, bandwidth-light) or `proxy` (stream through the gateway, keeps `<name>.wei.limo` in the URL bar). Does **not** apply to ERC-5219 / ERC-8244 contract pages, which are always read and written here |
-| `IPFS_SUBDOMAIN_GATEWAY` | `dweb.link` | Subdomain gateways used in **both** modes → `https://<id>.<ipfs\|ipns>.<gw>`. Comma-separated and tried in order — see [Upstream failover](#upstream-failover). Subdomain (not path) form so the site's `_redirects`/SPA fallback applies and deep paths like `/docs` resolve. |
+| `GATEWAY_MODE` | `redirect` | `redirect` (302 to a subdomain IPFS gateway, or the browser gateway when none is set; bandwidth-light) or `proxy` (stream through the gateway, keeps `<name>.wei.limo` in the URL bar). Does **not** apply to ERC-5219 / ERC-8244 contract pages, which are always read and written here |
+| `IPFS_SUBDOMAIN_GATEWAY` | — | Subdomain gateways used in **both** modes → `https://<id>.<ipfs\|ipns>.<gw>`. Comma-separated and tried in order, before the path gateways — see [Upstream failover](#upstream-failover). Subdomain form applies the site's `_redirects`/SPA fallback upstream. No default and `off` in production: the old default `dweb.link` is retired (see [Why this exists](#why-this-exists)). |
 | `IPFS_BROWSER_GATEWAY` | `inbrowser.link` | Page-load fallback for IPFS/IPNS in **`proxy`** mode: when every upstream fails, or only a path gateway answers and 404s (a NoFetch node that doesn't hold the CID), a navigation is 302'd to `https://<id>.<ipfs\|ipns>.<gw>/<path>`, which fetches and verifies in the visitor's browser. Never fetched by the gateway itself (it serves a loader page). `off` disables. |
-| `IPFS_PATH_GATEWAY` | — | Last-resort path gateways → `<origin>/ipfs/<cid>/<path>`. Comma-separated, tried after every subdomain entry, **`proxy` mode only**. The gateway reads the site's `_redirects` itself here (exact rules only) — see [`_redirects` on a path gateway](#_redirects-on-a-path-gateway). The natural place for a self-hosted kubo. |
+| `IPFS_PATH_GATEWAY` | `https://ipfs.filebase.io` | Path gateways → `<origin>/ipfs/<cid>/<path>`. Comma-separated, tried after every subdomain entry, **`proxy` mode only**; `off` for none. Filebase is path style only — `<cid>.ipfs.filebase.io` does not resolve. The gateway reads the site's `_redirects` itself here (exact rules only) — see [`_redirects` on a path gateway](#_redirects-on-a-path-gateway). |
 | `WEB3_GATEWAY` | `w3link.io` | web3:// HTTP gateways for on-chain (ERC-4804) dapps → `https://<addr>.<chainId>.<gw>`. Comma-separated, same failover rules |
 | `WEB3_CHAIN_ID` | `1` | Chain id used in the web3:// gateway host (mainnet) |
 | `RPC_URLS` | built-in list | Comma-separated mainnet RPCs. **Set a dedicated authenticated endpoint in production** — see [Load behaviour](#load-behaviour) |
@@ -301,13 +303,20 @@ That is why a name can be correctly pinned, reachable from its own node, and
 still dark from `<name>.wei.limo` on a schedule: the pin was never the problem,
 the single upstream was.
 
-The durable answer is an entry in these lists that is not part of that fleet —
-in practice a kubo node that already holds the pins. Point `IPFS_PATH_GATEWAY`
-at it (set in the host's dashboard, not in this repo: an open gateway's URL in
-a public repo invites strangers to pull arbitrary CIDs through its bandwidth),
-or give it a hostname with wildcard TLS and `Gateway.PublicGateways` in
-subdomain mode and put it in `IPFS_SUBDOMAIN_GATEWAY`, where it also works for
-`redirect` mode and applies `_redirects` upstream, splats included.
+The durable answer is an entry in these lists that is not part of that fleet.
+Today that is **Filebase**, the default `IPFS_PATH_GATEWAY`, where `.wei` sites
+are pinned. It answers path style only (`https://ipfs.filebase.io/ipfs/<cid>/`):
+its subdomain style (`<cid>.ipfs.filebase.io`) does not resolve, so it cannot
+be a subdomain entry or a `redirect`-mode target. Content pinned there answers
+in about a second; content that isn't may be slow or time out, and a page load
+then falls to the browser gateway. **A site that doesn't load should be pinned
+on Filebase.** No other public subdomain gateway checked (2026-10-14) served
+Filebase-only content, so `IPFS_SUBDOMAIN_GATEWAY` is `off` in production.
+
+The self-hosted path gateway that previously filled this slot (set in the
+dashboard only) is retired: it answered 404 for every CID, which sent every page
+load to the browser gateway. Its value is overwritten by the blueprint's
+`IPFS_PATH_GATEWAY`.
 
 ## Load behaviour
 
