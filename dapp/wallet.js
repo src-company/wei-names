@@ -476,6 +476,8 @@ window.connectWallet = async function() {
 };
 
 let _rpcProvider = null;
+// The page drops this when RPC settings are saved or reset (invalidateRpc).
+window._resetWalletRpc = () => { _rpcProvider = null; };
 function getRpcProvider() {
   if (_rpcProvider) return _rpcProvider;
   // Honor the same explicitly saved RPC as the main app (wns_rpc) and
@@ -486,7 +488,7 @@ function getRpcProvider() {
     const custom = [];
     const ls = localStorage.getItem('wns_rpc');
     if (ls) custom.push(...ls.split(','));
-    const cleaned = custom.map(s => s.trim()).filter(u => /^https?:\/\//i.test(u));
+    const cleaned = custom.map(s => s.trim()).filter(u => /^https:\/\//i.test(u) || /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/i.test(u));
     if (cleaned.length) urls = cleaned;
   } catch (e) {}
   try {
@@ -565,9 +567,9 @@ function resolveWeiName(addr, opts) {
     // Gentle cross-fade only when the visible label actually changes.
     btn.style.opacity = '0';
     setTimeout(() => {
+      btn.style.opacity = ''; // even when superseded — nothing else restores it
       if (!live()) return;
       btn.textContent = target;
-      btn.style.opacity = '';
     }, 130);
   };
 

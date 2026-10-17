@@ -54,13 +54,15 @@ try{var d=localStorage.getItem('dark');if(d==='1'||(d===null&&matchMedia('(prefe
     window.ens_normalize = null;
     window.ensNormalizeReady = false;
     // Show warning after DOM loads
-    window.addEventListener('DOMContentLoaded', () => {
+    // The import can fail after DOMContentLoaded (slow gateway) — warn either way.
+    const warn = () => {
       const status = document.getElementById('status');
       if (status) {
         status.innerHTML = '⚠️ Anti-spoof protection unavailable (normalization library failed to load)';
         status.className = 'status show';
       }
-    });
+    };
+    if (document.readyState === 'loading') window.addEventListener('DOMContentLoaded', warn); else warn();
   }
 })();
 </script>
@@ -256,6 +258,7 @@ button.secondary:hover:not(:disabled) { background: var(--fg); color: var(--bg);
   margin: 0;
 }
 #freeMintBtn:hover { opacity: 0.85; }
+html.dark #freeMintBtn:not(:disabled) { color: #0a0a0a; } /* white on the bright dark-mode green is ~2:1 */
 #freeMintBtn:disabled { background: transparent; border: 1px dashed var(--border); color: var(--fg-dim); opacity: 1; }
 .free-panel .free-status {
   font-size: 13px;
@@ -389,6 +392,8 @@ button.secondary:hover:not(:disabled) { background: var(--fg); color: var(--bg);
 .input-wrap {
   position: relative;
 }
+/* Room for the overlaid ".wei", so a long name never runs under it. */
+#nameInput, #rollNameInput { padding-right: 56px; }
 
 /* "random" draw, sitting in the Name label's row */
 .label-row {
@@ -551,6 +556,8 @@ body.modal-open { overflow: hidden; }
   h1 { margin-bottom: 32px; font-size: 13px; }
   input { font-size: 20px; padding: 14px 0; }
   .suffix { font-size: 20px; bottom: 14px; }
+  /* iOS zooms the page into any focused field under 16px and leaves it there. */
+  .term-select, .names-bulk select, .tacit-fields input, #tacitAddr { font-size: 16px !important; }
   button { padding: 14px 20px; font-size: 11px; width: 100%; margin-right: 0; }
   button.secondary { width: auto; margin-left: 8px; }
   .manage-actions { grid-template-columns: 1fr 1fr; }
@@ -1320,6 +1327,8 @@ const LOTTERY_ABI = [
   'function enter(uint256 tokenId, uint256 boostPid)',
   'function draw() payable',
   'function claim(uint256 r)',
+  'function rollOver(uint256 r)',
+  'function resetRequest()',
   'function BOOST_BPS() view returns (uint256)'
 ];
 
@@ -1514,6 +1523,7 @@ async function withRpc(fn, { tries = 2 } = {}) {
 // custom node the user just saved (exactly when they'd be saving one).
 function invalidateRpc() {
   _rpcGeneration++;
+  if (typeof window._resetWalletRpc === 'function') window._resetWalletRpc();
   rpcProvider = null;
   readContract = null;
   _rpcInit = null;
@@ -1905,6 +1915,9 @@ function normalizeLabel(label) {
     // Our contract expects single label without dots
     if (normalized.includes('.')) return null;
 
+    // ENSIP-15 allows edge hyphens; the contract doesn't (isAvailable / register).
+    if (normalized.startsWith('-') || normalized.endsWith('-')) return null;
+
     // Check byte length for contract compatibility
     const bytes = textEncoder.encode(normalized);
     if (bytes.length < 1 || bytes.length > 255) return null;
@@ -1975,6 +1988,7 @@ function getNormalizationError(label) {
 
     const normalized = ens_normalize(s);
     // Don't error on dots here - handled by isSubdomainInput
+    if (normalized.split('.').some(l => l.startsWith('-') || l.endsWith('-'))) return 'Name cannot start or end with hyphen';
 
     const bytes = textEncoder.encode(normalized);
     if (bytes.length > 255) return 'Name too long (max 255 bytes)';
@@ -2263,6 +2277,9 @@ async function doCheckName() {
   // repaint the box after the user has cleared it or typed an invalid name (the
   // early-return branches below don't otherwise bump the version).
   checkVersion++;
+  // Every path into a lookup (hash nav, random draw, refresh) — not just typing —
+  // must lock the previous name's Commit until this name's answer is in.
+  commitBtn.disabled = true;
   for (const el of [availEl, feeEl, $('termRow')]) el && el.classList.remove('stale');
 
   if (!raw.trim()) {
@@ -2302,6 +2319,7 @@ async function doCheckName() {
       if (!rpcOk) {
         availEl.innerHTML = '<span class="taken">RPC unavailable</span>';
         availEl.classList.add('show');
+        feeEl.textContent = ''; hideTermRow(); hideManage();
         return;
       }
 
@@ -2485,6 +2503,7 @@ async function doCheckName() {
     if (!rpcOk) {
       availEl.innerHTML = '<span class="taken">RPC unavailable</span>';
       availEl.classList.add('show');
+      feeEl.textContent = ''; hideTermRow(); hideManage();
       return;
     }
 
@@ -2739,7 +2758,8 @@ async function doCommit() {
       timestamp: Math.floor(Date.now() / 1000),
       confirmed: false
     };
-    savePending(pending);
+    // No stored secret, no reveal: never pay for a commitment that can't be kept.
+    if (!savePending(pending)) { $('commitBtn').disabled = false; return; }
     displayPending(pending);
 
     showStatus('Submitting commitment...', '');
@@ -2748,6 +2768,8 @@ async function doCommit() {
     // Save tx hash so timer can verify confirmation independently
     pending.txHash = tx.hash;
     savePending(pending);
+    // The wallet prompt may have sat open past the poller's patience; restart it on the hash.
+    pendingTimerId++; updateTimer(pendingTimerId);
 
     showStatus('Waiting for confirmation...', '', tx.hash);
 
@@ -2785,6 +2807,7 @@ async function doCommit() {
         currentPending.confirmed = true;
         currentPending.timestamp = ts;
         savePending(currentPending);
+        pendingTimerId++; updateTimer(pendingTimerId); // start the countdown even if polling had stopped
       }
       showStatus('Commitment confirmed. Registration opens in about a minute.', 'success', tx.hash);
     }
@@ -3428,14 +3451,37 @@ async function updateTimer(timerId) {
         savePending(pending);
         showStatus('Registration reverted — you can try again.', 'error', revertedHash);
         // fall through to the normal ready-to-reveal state below
-      } else if (pending._revealPolls < 60) {
-        if (pendingTimeoutId) clearTimeout(pendingTimeoutId);
-        pendingTimeoutId = setTimeout(() => updateTimer(timerId), 2000);
-        return;
       } else {
-        return; // gave up auto-polling; the Etherscan link stays, a reload re-checks
+        // No receipt. A reveal that was cancelled or dropped never will have one; if the
+        // node no longer knows the tx and the commitment is still unspent, offer Register again.
+        let dropped = false;
+        if (pending.commitment && (pending._revealPolls % 15 === 0 || pending._revealPolls >= 60)) {
+          try {
+            const [known, live] = await Promise.all([
+              withRpc(p => p.getTransaction(pending.revealTxHash)),
+              withRpc(p => new ethers.Contract(CONTRACT, ABI, p).commitments(pending.commitment))
+            ]);
+            if (timerId !== pendingTimerId) return;
+            dropped = !known && live > 0n;
+          } catch (_) {}
+        }
+        if (dropped) {
+          delete pending.revealTxHash;
+          delete pending._revealPolls;
+          savePending(pending);
+          showStatus('The registration transaction was dropped — you can register again.', 'error');
+          lockTacitOpt(false);
+          // fall through to the ready-to-reveal state below
+        } else if (pending._revealPolls < 60) {
+          if (pendingTimeoutId) clearTimeout(pendingTimeoutId);
+          pendingTimeoutId = setTimeout(() => updateTimer(timerId), 2000);
+          return;
+        } else {
+          return; // gave up auto-polling; the Etherscan link stays, a reload re-checks
+        }
       }
     } catch (_) {
+      if (timerId !== pendingTimerId) return;
       if (pending._revealPolls < 60) {
         if (pendingTimeoutId) clearTimeout(pendingTimeoutId);
         pendingTimeoutId = setTimeout(() => updateTimer(timerId), 2000);
@@ -3458,7 +3504,8 @@ async function updateTimer(timerId) {
 
     // If we have a txHash and have been waiting >15s, poll for receipt
     if ((pending.txHash || pending.commitment) && elapsed > 15) {
-      pending._pollAttempts++;
+      // Time spent in the wallet prompt (no hash yet) isn't time the tx failed to land.
+      if (pending.txHash) pending._pollAttempts++;
 
       // Show an actionable fallback (Etherscan link + retry) instead of
       // spinning "Waiting for confirmation..." forever.
@@ -3546,6 +3593,7 @@ async function updateTimer(timerId) {
           return; // Stop polling
         }
       } catch (e) {
+        if (timerId !== pendingTimerId) return; // a newer chain owns the panel now
         // Don't swallow: a failing free RPC used to spin "Waiting for
         // confirmation..." forever with no signal (reported in the wild).
         // Surface it after a short streak so the user can verify on Etherscan
@@ -3584,6 +3632,8 @@ async function updateTimer(timerId) {
     // the next. Without this, a re-entrant caller that reuses the current
     // pendingTimerId (e.g. doRevealSelected's finally after a failed reveal) would
     // spawn a second self-sustaining setTimeout chain that never invalidates.
+    // A tick that awaited past a visibility change must not cancel the newer chain's timeout.
+    if (timerId !== pendingTimerId) return;
     if (pendingTimeoutId) clearTimeout(pendingTimeoutId);
     const delay = pending.confirmed === false && elapsed > 15 ? 4000 : 1000;
     pendingTimeoutId = setTimeout(() => updateTimer(timerId), delay);
@@ -3922,7 +3972,7 @@ function showManageForm(action) {
   switch (action) {
     case 'transfer':
       html = `
-        <label>Recipient</label>
+        <label for="transferTo">Recipient</label>
         <input type="text" id="transferTo" placeholder="0x... or name.wei" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" oninput="previewTransferRecipient()">
         <div id="transferPreview" style="font-size:12px;margin-bottom:12px;display:none;"></div>
         ${currentTacitRecord ? `<label class="tacit-check" style="margin-bottom:12px;"><input type="checkbox" id="transferClearTacit" checked><img src="${TACIT_LOGO}" width="14" height="14" alt=""><span>Clear the Tacit address first. If you keep it, it stays on the name and Tacit apps keep paying it until the new owner replaces it.</span></label>` : ''}
@@ -3932,18 +3982,18 @@ function showManageForm(action) {
       break;
     case 'setAddr':
       html = `
-        <label>Recipient Address</label>
+        <label for="resolveAddr">Recipient Address</label>
         <div style="font-size:11px;opacity:0.5;margin-bottom:8px;">Transfers to ${escapeHtml(currentTokenName)}.wei will go to this address</div>
-        <input type="text" id="resolveAddr" placeholder="0x... (leave empty for self)">
+        <input type="text" id="resolveAddr" placeholder="0x... (leave empty for self)" autocapitalize="none" autocorrect="off" spellcheck="false">
         <button onclick="doSetAddr()">Set Recipient</button>
         <button class="secondary" onclick="$('manageForm').classList.remove('show')">Cancel</button>
       `;
       break;
     case 'setContent':
       html = `
-        <label>IPFS / IPNS Content</label>
+        <label for="contentHash">IPFS / IPNS Content</label>
         <div style="font-size:11px;opacity:0.5;margin-bottom:8px;">Host a website at ${escapeHtml(currentTokenName)}.wei. Use an IPFS CID for a fixed site, or an IPNS name (ipns://k51...) to update the site later without a new transaction.</div>
-        <input type="text" id="contentHash" placeholder="bafy... / Qm... (IPFS) · ipns://k51... (IPNS) · 0x (raw)">
+        <input type="text" id="contentHash" placeholder="bafy... / Qm... (IPFS) · ipns://k51... (IPNS) · 0x (raw)" autocapitalize="none" autocorrect="off" spellcheck="false">
         <div style="font-size:11px;opacity:0.5;margin-top:4px;">Visit via: <a href="https://${escapeHtml(currentTokenName)}.${WEI_GATEWAY}" target="_blank" rel="noopener">${escapeHtml(currentTokenName)}.${WEI_GATEWAY}</a></div>
         <button onclick="doSetContent()">Set Website</button>
         <button class="secondary" onclick="$('manageForm').classList.remove('show')">Cancel</button>
@@ -3962,9 +4012,9 @@ function showManageForm(action) {
       break;
     case 'setText':
       html = `
-        <label>Key</label>
-        <input type="text" id="textKey" placeholder="e.g. url, email, description">
-        <label>Value</label>
+        <label for="textKey">Key</label>
+        <input type="text" id="textKey" placeholder="e.g. url, email, description" autocapitalize="none" autocorrect="off" spellcheck="false">
+        <label for="textValue">Value</label>
         <input type="text" id="textValue" placeholder="Value">
         <button onclick="doSetText()">Set Text</button>
         <button class="secondary" onclick="$('manageForm').classList.remove('show')">Cancel</button>
@@ -3972,8 +4022,8 @@ function showManageForm(action) {
       break;
     case 'subdomain':
       html = `
-        <label>Subdomain Label</label>
-        <input type="text" id="subLabel" placeholder="e.g. blog">
+        <label for="subLabel">Subdomain Label</label>
+        <input type="text" id="subLabel" placeholder="e.g. blog" autocapitalize="none" autocorrect="off" spellcheck="false">
         <div style="font-size:12px;opacity:0.5;margin-bottom:12px;">{label}.${escapeHtml(currentTokenName)}.wei</div>
         <button onclick="doSubdomain()">Register Subdomain</button>
         <button class="secondary" onclick="$('manageForm').classList.remove('show')">Cancel</button>
@@ -4068,6 +4118,8 @@ function normalizeRecipientName(input) {
 async function resolveRecipient(input) {
   // If it's already an address, return it
   if (ethers.isAddress(input)) return input.toLowerCase() === ethers.ZeroAddress ? null : { address: input, name: null };
+  // A mistyped checksum is an address typo, not the label "0x…" — never resolve it as a name.
+  if (/^0x[0-9a-f]{40}$/i.test(input)) return null;
 
   const normalized = normalizeRecipientName(input);
   if (!normalized) return null;
@@ -4112,7 +4164,9 @@ function previewRecipient(inputId, previewId) {
   st.timer = setTimeout(async () => {
     const result = await resolveRecipient(input);
     if (thisVersion !== st.version) return;
-    if (result && result.name) {
+    if (/^0x[0-9a-f]{40}$/i.test(input)) {
+      preview.innerHTML = '<span style="color:#c00;">Invalid address checksum</span>';
+    } else if (result && result.name) {
       const addrShort = result.address.slice(0, 10) + '...' + result.address.slice(-8);
       preview.innerHTML = `<span style="opacity:0.6;">→ ${escapeHtml(result.name)} resolves to </span><a href="https://etherscan.io/address/${result.address}" target="_blank" rel="noopener noreferrer" style="color:inherit;">${addrShort}</a>`;
     } else {
@@ -4127,6 +4181,8 @@ async function doTransfer() {
   if (isProcessing || !contract || !currentTokenId) return;
   const input = $('transferTo').value.trim();
   if (!input) { showStatus('Recipient required', 'error'); return; }
+  // Pin the name now: the lookup box stays live while the Tacit clear confirms.
+  const tokenId = currentTokenId, tokenName = currentTokenName;
 
   isProcessing = true;
   const btn = (typeof event !== 'undefined' && event?.target) || null; if (btn) btn.disabled = true;
@@ -4137,22 +4193,22 @@ async function doTransfer() {
 
     const to = result.address;
     const displayTo = result.name ? result.name : to.slice(0, 8) + '...' + to.slice(-4);
-    if (!confirm('Transfer ' + currentTokenName + '.wei to ' + displayTo + '?\n\nRecipient: ' + to + '\n\nThis action is irreversible.')) {
+    if (!confirm('Transfer ' + tokenName + '.wei to ' + displayTo + '?\n\nRecipient: ' + to + '\n\nThis action is irreversible.')) {
       return;
     }
     if ($('transferClearTacit')?.checked) {
       showStatus('Clearing the Tacit address...', '');
-      const clr = await wcTransaction(contract.setText(currentTokenId, TACIT_RECORD_KEY, ''), 'Approve clearing the Tacit address');
+      const clr = await wcTransaction(contract.setText(tokenId, TACIT_RECORD_KEY, ''), 'Approve clearing the Tacit address');
       showStatus('Waiting for confirmation...', '', clr.hash);
       await waitForTx(clr);
-      currentTacitRecord = null;
+      if (currentTokenId === tokenId) currentTacitRecord = null;
     }
     showStatus('Transferring to ' + displayTo + '...', '');
-    const tx = await wcTransaction(contract.transferFrom(_connectedAddress, to, currentTokenId), 'Approve transfer');
+    const tx = await wcTransaction(contract.transferFrom(_connectedAddress, to, tokenId), 'Approve transfer');
     showStatus('Waiting for confirmation...', '', tx.hash);
     const receipt = await waitForTx(tx);
     showStatus('Transferred!', 'success', tx.hash);
-    refreshAfterTx(currentTokenName, panelRepainted, receipt);
+    refreshAfterTx(tokenName, panelRepainted, receipt);
   } catch (e) {
     handleError(e);
   } finally {
@@ -5033,6 +5089,8 @@ async function showSubSalesForm() {
         let dec = null, sym = '';
         try { dec = await getTokenDecimals(cfgFeeToken, rpc); } catch {}
         try { sym = await getTokenSymbol(cfgFeeToken, rpc); } catch {}
+        // A blank price field would re-save a paid sale as free — retry instead.
+        if (dec == null && cfgPrice > 0n) throw new Error('decimals unavailable');
         subSalesTokenDecimals = dec ?? 18;
         subSalesTokenSymbol = sym;
         currentPriceStr = (dec != null && cfgPrice > 0n) ? ethers.formatUnits(cfgPrice, dec) : '';
@@ -5110,6 +5168,7 @@ async function showSubSalesForm() {
 
 async function doConfigureSubSales() {
   if (isProcessing || !_signer || !currentTokenId) return;
+  const parentId = currentTokenId; // the approval wait leaves the lookup box live
   isProcessing = true;
   const btn = (typeof event !== 'undefined' && event?.target) || null; if (btn) btn.disabled = true;
 
@@ -5154,7 +5213,7 @@ async function doConfigureSubSales() {
     // guess if the read fails.
     const [apprRes, liveCfg] = await aggregate3([
       { target: CONTRACT, iface: approvalIface, fn: 'isApprovedForAll', args: [_connectedAddress, SUBDOMAIN_REGISTRAR] },
-      { target: SUBDOMAIN_REGISTRAR, iface: regIface, fn: 'config', args: [currentTokenId] }
+      { target: SUBDOMAIN_REGISTRAR, iface: regIface, fn: 'config', args: [parentId] }
     ]);
     if (!liveCfg) throw new Error('Could not read the current subdomain-sales config — try again');
     const isApproved = apprRes ? apprRes[0] : false;
@@ -5177,7 +5236,7 @@ async function doConfigureSubSales() {
     showStatus('Configuring subdomain sales...', '');
     const registrar = new ethers.Contract(SUBDOMAIN_REGISTRAR, REGISTRAR_ABI, _signer);
     const tx = await wcTransaction(
-      registrar.configure(currentTokenId, payoutAddr, feeToken, price, true, gateToken, minGateBalance),
+      registrar.configure(parentId, payoutAddr, feeToken, price, true, gateToken, minGateBalance),
       'Approve configuration'
     );
     showStatus('Waiting for confirmation...', '', tx.hash);
@@ -6204,7 +6263,8 @@ function fmtEth(wei, dp = 4) {
   try {
     const n = parseFloat(ethers.formatEther(wei));
     if (n === 0) return '0';
-    if (n < 0.0001) return '<0.0001';
+    const min = 10 ** -dp;
+    if (n < min) return '<' + min.toFixed(dp);
     return n.toLocaleString('en-US', { maximumFractionDigits: dp });
   } catch (_) { return '0'; }
 }
@@ -6346,7 +6406,9 @@ function renderRoll(body, d, me) {
 
   // The round that has been drawn but not yet collected. Its prize is reserved — never part of
   // the next pot — so between a draw and its claim the pot reads 0 while real money sits here.
-  const pending = (d.infos || []).find(([, i]) => i.settled && i.winner !== 0n && !i.resolved);
+  // Past claimBy the prize can't be claimed any more — only rolled back into the pot.
+  const pending = (d.infos || []).find(([, i]) => i.settled && i.winner !== 0n && !i.resolved && Number(i.claimBy) >= now);
+  const lapsed = (d.infos || []).find(([, i]) => i.settled && i.winner !== 0n && !i.resolved && Number(i.claimBy) < now);
   const reserved = BigInt(st.reserved || 0);
 
   // Hero: the pot, unless there is none and a prize is waiting to be collected — a bare "0"
@@ -6370,6 +6432,14 @@ function renderRoll(body, d, me) {
       h += '<div class="roll-note" style="margin-top:-10px;">Plus ' + fmtEth(reserved, 4)
          + ' stETH reserved for round ' + pending[0] + '\u2019s winner — not part of this pot.</div>';
     }
+  }
+  // An unclaimed prize whose window closed: anyone can return it to the pot (rollOver),
+  // which also opens the next round.
+  if (lapsed) {
+    const [lr, li] = lapsed;
+    h += '<div class="roll-note">Round ' + lr + '\u2019s ' + fmtEth(li.prize, 4) + ' stETH prize went unclaimed. '
+       + 'Anyone can return it to the pot.</div>'
+       + '<button class="secondary" onclick="rollRollOver(' + lr + ')">Return it to the pot \u2192</button>';
   }
 
   // Round meta
@@ -6429,7 +6499,11 @@ function renderRoll(body, d, me) {
        + '<button onclick="rollEnter()">' + (me ? 'Enter round ' + d.round + ' \u2192' : 'Connect & enter \u2192') + '</button>'
        + '<div class="roll-note">One ticket per name. You keep the name; winning pays whoever holds it at claim time. Back a live <a href="https://etherscan.io/address/' + WEIDAO + '" target="_blank" rel="noopener" class="roll-name-link">WeiDAO</a> proposal with the same name to boost its entry automatically.</div>';
   } else if (phase === 2) {
-    if (st.drawSettles) {
+    if (Number(st.tickets) >= 2 && !st.drawSettles) {
+      // drawSettles is also false when the VRF price can't be read — calling draw() then
+      // would abandon a round that has real entries, so offer nothing.
+      h += '<div class="roll-note">Entries closed ' + fmtAgo(now - endTs) + '. The draw is temporarily unavailable — the Chainlink VRF price can\u2019t be read right now. Try again later.</div>';
+    } else if (st.drawSettles) {
       // st.drawPrice comes from state(), i.e. an eth_call at tx.gasprice 0, where the
       // VRF wrapper prices a seed at exactly 0 — so this rendered "≈ 0 ETH at current
       // gas" while the wallet was asked for a hardcoded 0.01. d.draw is the gas-aware
@@ -6445,7 +6519,8 @@ function renderRoll(body, d, me) {
     }
   } else if (phase === 3) {
     h += '<div class="roll-note">Winner is being drawn on-chain (Chainlink VRF, ~13 minutes for finality). This panel updates when it lands.'
-       + (Number(st.resetAt) && now > Number(st.resetAt) ? ' The request has stalled — anyone may reset it and redraw.' : '') + '</div>';
+       + (Number(st.resetAt) && now > Number(st.resetAt) ? ' The request has stalled — anyone may reset it and redraw.' : '') + '</div>'
+       + (Number(st.resetAt) && now > Number(st.resetAt) ? '<button class="secondary" onclick="rollReset()">Reset the draw</button>' : '');
   }
 
   // Current round field — who's in and their odds, from the cum-weight deltas.
@@ -6503,7 +6578,14 @@ function renderRoll(body, d, me) {
   h += '<div class="roll-forever">A perpetual machine: each ~30-day round pays a random holder, then '
      + 'the next opens — no operator, no off switch, for as long as the pot is fed and Ethereum runs.</div>';
 
+  // The 60s tick repaints the whole panel; don't yank the keyboard out from under a typist.
+  const act = document.activeElement;
+  const keep = act && body.contains(act) && act.id ? { id: act.id, a: act.selectionStart, b: act.selectionEnd } : null;
   body.innerHTML = h;
+  if (keep) {
+    const el = $(keep.id);
+    if (el) { try { el.focus({ preventScroll: true }); if (keep.a != null) el.setSelectionRange(keep.a, keep.b); } catch (_) {} }
+  }
   rollPreviewWeight();
 }
 
@@ -6730,17 +6812,41 @@ async function rollDraw(settlesHint) {
     // under-sending reverts Underpaid, so the buffer errs high.
     let quote = null;
     if (settles) { try { quote = await withRpc((p) => rollDrawQuote(p)); } catch (_) {} }
+    // The panel said "Draw the winner" but the round no longer settles (VRF price read
+    // failing): sending would abandon the round instead. Never do that silently.
+    if (settlesHint && !settles) { showStatus('The draw can’t be priced right now — try again later', 'error'); refreshRoll(); return; }
     if (settles && !quote) { showStatus('Couldn’t price the draw — try again', 'error'); return; }
     const value = settles ? rollDrawValue(quote) : 0n;
     const c = new ethers.Contract(LOTTERY, LOTTERY_ABI, window._signer);
     const tx = await wcTransaction(c.draw({ value }),
       settles ? 'Confirm draw (VRF fee, excess refunded)' : 'Confirm — start the next round (no fee)');
-    showStatus('Requesting the random draw…', '', tx.hash);
+    showStatus(settles ? 'Requesting the random draw…' : 'Starting the next round…', '', tx.hash);
     const receipt = await waitForTx(tx);
-    showStatus('Draw requested — winner lands in ~13 min', 'success', tx.hash);
+    showStatus(settles ? 'Draw requested — winner lands in ~13 min' : 'Next round started', 'success', tx.hash);
     afterReceipt(receipt, refreshRoll);
   } catch (e) { handleError(e); }
   finally { isProcessing = false; }
+}
+
+async function rollSend(fn, prompt, pending, done) {
+  if (isProcessing) return;
+  if (!window._signer) { toggleWallet(); return; }
+  isProcessing = true;
+  try {
+    const c = new ethers.Contract(LOTTERY, LOTTERY_ABI, window._signer);
+    const tx = await wcTransaction(fn(c), prompt);
+    showStatus(pending, '', tx.hash);
+    const receipt = await waitForTx(tx);
+    showStatus(done, 'success', tx.hash);
+    afterReceipt(receipt, refreshRoll);
+  } catch (e) { handleError(e); }
+  finally { isProcessing = false; }
+}
+function rollRollOver(r) {
+  return rollSend(c => c.rollOver(r), 'Return the unclaimed prize to the pot', 'Returning round ' + r + '\u2019s prize to the pot…', 'Prize returned to the pot');
+}
+function rollReset() {
+  return rollSend(c => c.resetRequest(), 'Reset the stalled draw', 'Resetting the draw…', 'Draw reset — it can be requested again');
 }
 
 async function rollClaim(r) {
@@ -7507,10 +7613,15 @@ async function rollEnterAtomic(picked, pids) {
   showStatus('Submitted — confirming…', '');
   const st = bundleId ? await rollPollCallsStatus(bundleId) : null;
   const code = st && st.status;
-  if ((typeof code === 'number' && code >= 400) || code === 'FAILED') {
+  // 600 = partial: with atomicRequired false some calls may have landed — the rescan says which.
+  if ((typeof code === 'number' && code >= 400 && code !== 600) || code === 'FAILED') {
     showStatus('The wallet reports the batch failed. Rescanning…', 'error');
-    return;
+    return null;
   }
+  // A receipt to wait on, so the rescan doesn't read the round from before inclusion.
+  const rc = st && Array.isArray(st.receipts) && st.receipts[st.receipts.length - 1];
+  if (!rc) await new Promise(r => setTimeout(r, 12000)); // status unknown: give it about a block
+  return rc ? { hash: rc.transactionHash, blockNumber: Number(rc.blockNumber) } : null;
   showStatus(picked.length + ' name' + (picked.length === 1 ? '' : 's')
     + ' submitted to the round. Rescanning to confirm which landed…', 'success');
 }
@@ -7519,7 +7630,7 @@ async function rollEnterAtomic(picked, pids) {
 // one failing must not stop the rest — a user decline is the one exception, since declining one
 // popup is a signal to stop, not to skip ahead to the next.
 async function rollEnterSequential(picked, pids = []) {
-  let ok = 0;
+  let ok = 0, last = null;
   const failed = [];
   for (let i = 0; i < picked.length; i++) {
     const r = picked[i];
@@ -7528,7 +7639,7 @@ async function rollEnterSequential(picked, pids = []) {
     try {
       const c = new ethers.Contract(LOTTERY, LOTTERY_ABI, window._signer);
       const tx = await wcTransaction(c.enter(r.id, pids[i] || 0), 'Confirm lottery entry (' + (i + 1) + '/' + picked.length + ')');
-      await waitForTx(tx);
+      last = await waitForTx(tx);
       ok++;
     } catch (e) {
       const msg = (e && (e.message || e.reason) || String(e)).toLowerCase();
@@ -7545,8 +7656,8 @@ async function rollEnterSequential(picked, pids = []) {
   } else if (failed.length) {
     showStatus('None entered — ' + failed.slice(0, 3).join(', ') + (failed.length > 3 ? ', …' : ''), 'error');
   }
-  // A run that was entirely declines shows nothing further; the in-progress line already
-  // reflected how far it got.
+  else $('status').classList.remove('show'); // all declined: drop the "Entering 1 of N" spinner
+  return last;
 }
 
 async function doEnterRollMany() {
@@ -7571,10 +7682,20 @@ async function doEnterRollMany() {
       return;
     }
 
-    if (window._walletSendCalls) await rollEnterAtomic(picked, pids);
-    else await rollEnterSequential(picked, pids);
+    let receipt;
+    if (window._walletSendCalls) {
+      try { receipt = await rollEnterAtomic(picked, pids); }
+      catch (e) {
+        // A wallet advertising only the v1 batch shape can reject the v2 request; one
+        // transaction per name still works there. A user decline stays a decline.
+        if (e && (e.code === 4001 || /user (rejected|denied|cancelled)/i.test(e.message || ''))) throw e;
+        receipt = await rollEnterSequential(picked, pids);
+      }
+    } else receipt = await rollEnterSequential(picked, pids);
     _rollSel = null; // let the fresh scan re-derive who still has a ticket to take
-    namesScan(false);
+    // Wait for the read side to see the entries, or the rescan re-offers names already in.
+    if (receipt) afterReceipt(receipt, () => namesScan(false));
+    else namesScan(false);
   } catch (e) {
     handleError(e);
   } finally {

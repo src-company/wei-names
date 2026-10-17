@@ -451,7 +451,9 @@ function renderProposals(){
 }
 
 /* ---------------- names ---------------- */
-const CKEY=a=>"wns:names:"+a, CACHE_TTL=36e5;
+// Not index.html's "wns:names:" — same origin, different format; sharing it made each page wipe the other's.
+const CKEY=a=>"wns:dao-names:"+a, CACHE_TTL=36e5;
+let SCAN_SEQ=0;
 async function discover(addr){
   let ids=null;
   try{ const c=JSON.parse(localStorage.getItem(CKEY(addr))||"null");
@@ -467,19 +469,23 @@ async function discover(addr){
 }
 async function scanNames(force){
   if(!ACCT){ $("pf").textContent="connect to scan"; return; }
-  if(force){ try{ localStorage.removeItem(CKEY(ACCT)); }catch(_){} }
+  // An account switch or a second Rescan supersedes this scan; only the newest may paint.
+  const me=ACCT, seq=++SCAN_SEQ, live=()=>seq===SCAN_SEQ&&ACCT===me;
+  if(force){ try{ localStorage.removeItem(CKEY(me)); }catch(_){} }
   try{
-    const ids=await discover(ACCT);
+    const ids=await discover(me);
+    if(!live()) return;
     const reqs=[];
     for(const id of ids){ reqs.push({to:NFT,data:"0x"+S.ownerOf+h(id)});
                           reqs.push({to:NFT,data:"0x"+S.records+h(id)});
                           reqs.push({to:DAO,data:"0x"+S.weightOf+h(id)}); }
-    const {out}=await callMany(reqs,(d,t)=>{ $("pf").textContent=`reading names… ${d}/${t}`; });
+    const {out}=await callMany(reqs,(d,t)=>{ if(live()) $("pf").textContent=`reading names… ${d}/${t}`; });
+    if(!live()) return;
     NAMES=[];
     ids.forEach((id,i)=>{
       const o=out[i*3], r=out[i*3+1], w=out[i*3+2];
       if(o===null||r===null||w===null) return;
-      if(("0x"+o.slice(-40)).toLowerCase()!==ACCT) return;
+      if(("0x"+o.slice(-40)).toLowerCase()!==me) return;
       const raw=r.slice(2);
       const off=Number(BigInt("0x"+raw.slice(0,64)))*2, len=Number(BigInt("0x"+raw.slice(off,off+64)));
       NAMES.push({id,label:utf8(raw.slice(off+64,off+64+len*2)),
@@ -491,7 +497,7 @@ async function scanNames(force){
     $("pf").innerHTML=`<span class="ok">${NAMES.length} weighted names · ${fmt(tot,6)} ETH</span>`+
       (Wreq&&tot<Wreq?` <span class="warn">— below the ${fmt(Wreq,6)} ETH a proposal needs, so these alone converge short of the bar</span>`:``);
     renderNames();
-  }catch(e){ $("pf").innerHTML=`<span class="bad">scan failed: ${esc(e.message)}</span>`; }
+  }catch(e){ if(live()) $("pf").innerHTML=`<span class="bad">scan failed: ${esc(e.message)}</span>`; }
 }
 function renderNames(){
   const tb=$("tbl").querySelector("tbody");
@@ -521,8 +527,12 @@ window.stageRoleVeto=(id)=>{
   stage(DAO,"0x"+S.veto+h(id),`veto(${id}) — send from the veto or exec role holder`);
   log(`staged veto(${id}) for the role holder — copy below`,"dim");
 };
+let SENDING=false;
 async function send(to,data,value,gasFloor,label){
   if(!PROV||!ACCT) return log("connect a wallet first","bad");
+  // One transaction in flight: a second click would estimate against pre-inclusion state.
+  if(SENDING) return log("a transaction is still pending — wait for it to confirm","warn");
+  SENDING=true;
   try{
     if(BigInt(await PROV.request({method:"eth_chainId"}))!==1n) return log("wallet is not on Ethereum mainnet","bad");
     let gas;
@@ -544,6 +554,7 @@ async function send(to,data,value,gasFloor,label){
     if(BigInt(r.status)===1n){ log("confirmed ✓","ok"); await refreshAll(); }
     else log("reverted","bad");
   }catch(e){ log("failed: "+esc(e.data?.message||e.message||e),"bad"); }
+  finally{ SENDING=false; }
 }
 // Support (or veto-support) a proposal with every selected name not already backing it.
 window.backAll=async(id,isVeto)=>{
