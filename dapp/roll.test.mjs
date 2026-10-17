@@ -601,5 +601,38 @@ function eq(name, got, want) {
   ok('a claimed winner is not counted down', !/to claim/.test(html), html);
 }
 
+// ── a claimed round keeps its paid amount in the winners list ────────────────
+//
+// After claim() prizeOf(r) is 0. The row must not read "0 stETH": it shows the amount from the
+// `prize` text record on <r>.roll.wei (passed in as d.paid) and says it was claimed.
+{
+  const { run, els } = sandbox({ address: '0xME' });
+  const now = Math.floor(Date.now() / 1000);
+  const st = `{ phase: 1, round: 1, roundEnd: ${now + 6 * 86400}, pot: 50860113676948432n, reserved: 0n,
+                totalWeight: 5n, tickets: 76, drawPrice: 0n, drawSettles: false, resetAt: 0, naming: true }`;
+  const infos = `[[0, { tickets: 200n, totalWeight: 1n, winner: 5n, prize: 0n,
+                        claimBy: ${now + 86400}n, roundName: 9n, trophy: 7n, resets: 0n,
+                        settled: true, resolved: true }]]`;
+  run(`renderRoll($('rollBody'), { st: ${st}, round: 1, infos: ${infos}, claimable: [],
+        names: { 0: 'lom.wei' }, paid: { 0: 1063209025185975128n }, draw: null }, '0xME')`);
+  const html = els.get('rollBody').innerHTML;
+  const row = (html.match(/roll-win-row[\s\S]*?<\/div>/) || [''])[0];
+  ok('claimed row shows the amount paid', /1\.063\d* stETH · claimed/.test(row), row);
+  ok('claimed row never reads 0 stETH', !/>0 stETH/.test(row), row);
+
+  // Text record unreadable: still says claimed, just without a number.
+  run(`renderRoll($('rollBody'), { st: ${st}, round: 1, infos: ${infos}, claimable: [],
+        names: { 0: 'lom.wei' }, paid: {}, draw: null }, '0xME')`);
+  const row2 = (els.get('rollBody').innerHTML.match(/roll-win-row[\s\S]*?<\/div>/) || [''])[0];
+  ok('claimed row without a readable amount', /class="p">claimed</.test(row2), row2);
+
+  // Resolved with no trophy: forfeited.
+  const lapsed = infos.replace('trophy: 7n', 'trophy: 0n');
+  run(`renderRoll($('rollBody'), { st: ${st}, round: 1, infos: ${lapsed}, claimable: [],
+        names: { 0: 'lom.wei' }, paid: {}, draw: null }, '0xME')`);
+  const row3 = (els.get('rollBody').innerHTML.match(/roll-win-row[\s\S]*?<\/div>/) || [''])[0];
+  ok('forfeited row says it rolled over', /rolled into the pot/.test(row3), row3);
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

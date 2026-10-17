@@ -6322,15 +6322,23 @@ async function refreshRoll() {
       // ...alongside the field's names + owners (one multicall, optional) — neither waits on the other.
       const nft = new ethers.Contract(CONTRACT, ABI, p);
       const names = {};
+      // A claimed round's prizeOf() reads 0; the amount paid lives on as the `prize` text
+      // record nameWinner wrote on <r>.roll.wei, so read it back from there.
+      const paid = {};
       const [, field] = await Promise.all([
         Promise.all(infos.map(async ([r, info]) => {
           if (info.settled && info.winner !== 0n) {
-            try { names[r] = await nft.getFullName(info.winner); } catch (_) { names[r] = null; }
+            await Promise.all([
+              nft.getFullName(info.winner).then(n => { names[r] = n; }, () => { names[r] = null; }),
+              info.resolved && info.trophy !== 0n
+                ? nft.text(info.roundName, 'prize').then(t => { if (/^\d+$/.test(t)) paid[r] = BigInt(t); }, () => {})
+                : null
+            ]);
           }
         })),
         rollBuildField(tickets, me).catch(() => null)
       ]);
-      return { st, round, infos, claimable, names, draw, tickets, field };
+      return { st, round, infos, claimable, names, paid, draw, tickets, field };
     });
     data.usd = await usdP;
     if (seq !== _rollRefreshSeq) return;   // a newer refresh (e.g. account switch) owns the panel
@@ -6567,9 +6575,19 @@ function renderRoll(body, d, me) {
     for (const [r, i] of settled) {
       const nm = d.names[r] ? rollNameLink(d.names[r]) : ('#' + i.winner.toString().slice(0, 8) + '…');
       const left = Number(i.claimBy) - now;
-      const tail = i.resolved ? '' : (left > 0 ? ' · ' + fmtCountdown(left) + ' to claim' : ' · unclaimed');
+      let p;
+      if (!i.resolved) {
+        p = fmtEth(i.prize) + ' stETH' + (left > 0 ? ' · ' + fmtCountdown(left) + ' to claim' : ' · unclaimed');
+      } else if (i.trophy !== 0n) {
+        // Claimed: prizeOf() is 0 now, so show what was paid (from the round name's text record).
+        const amt = d.paid && d.paid[r] != null ? d.paid[r] : null;
+        p = (amt != null ? fmtEth(amt) + ' stETH · ' : '') + 'claimed';
+      } else {
+        // Every claim mints a trophy while roll.wei is held, so a resolved round without one rolled over.
+        p = d.st.naming ? 'rolled into the pot' : 'closed';
+      }
       h += '<div class="roll-win-row"><span class="n">' + nm + '</span>'
-         + '<span class="p">' + fmtEth(i.prize) + ' stETH' + tail + '</span></div>';
+         + '<span class="p">' + p + '</span></div>';
     }
     h += '</div>';
   }
