@@ -199,7 +199,9 @@ button.secondary:hover:not(:disabled) { background: var(--fg); color: var(--bg);
   font-size: 18px;
   margin-top: 20px;
   display: none;
+  overflow-wrap: anywhere; /* a long name wraps instead of running off a phone screen */
 }
+footer a { white-space: nowrap; } /* "on-chain" broke at its hyphen */
 .availability.show { display: block; }
 .ok-box { border: 1px solid var(--ok); border-left-width: 4px; padding: 10px 12px; margin-bottom: 12px; font-size: 12px; }
 .warn-box { border: 1px solid #c98a00; border-left-width: 4px; padding: 10px 12px; margin-bottom: 12px; font-size: 12px; line-height: 1.5; color: var(--fg); }
