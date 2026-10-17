@@ -55,6 +55,12 @@ const DEFAULT_RPCS = [
 
 const RPC_TIMEOUT_MS = 5_000
 
+// Most an RPC reply may be before it is refused unread. A registry answer is a
+// few hundred bytes; page reads (onchain.js) pass their own, larger cap. Without
+// one, `res.json()` buffers whatever a contract returns — and anybody can point
+// `0x<address>.<zone>` at a contract that returns as much as the node will run.
+const RPC_MAX_RESPONSE_BYTES = 1024 * 1024
+
 // --- endpoint health + load shaping -----------------------------------------
 //
 // Two failure modes learned the hard way, both from traffic rather than bugs:
@@ -95,14 +101,44 @@ async function acquire() {
     e.overloaded = true
     throw e
   }
+  // Handed over by release() with `inflight` unchanged, so nobody can take the
+  // slot between the release and the wake-up and push past MAX_INFLIGHT.
   await new Promise((resolve) => waiting.push(resolve))
-  inflight++
 }
 
 function release() {
-  inflight--
   const next = waiting.shift()
   if (next) next()
+  else inflight--
+}
+
+// Parse a JSON body, refusing it once it passes `cap` bytes. Oversize is the
+// contract's answer, not the node's fault: tagged so the caller neither benches
+// the endpoint nor asks the next one for the same bytes.
+async function readJson(res, cap) {
+  if (!res.body) return res.json()
+  const reader = res.body.getReader()
+  const chunks = []
+  let total = 0
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    total += value.length
+    if (total > cap) {
+      reader.cancel().catch(() => {})
+      const e = new Error('rpc: response exceeds size cap')
+      e.tooLarge = true
+      throw e
+    }
+    chunks.push(value)
+  }
+  const bytes = new Uint8Array(total)
+  let at = 0
+  for (const c of chunks) {
+    bytes.set(c, at)
+    at += c.length
+  }
+  return JSON.parse(new TextDecoder().decode(bytes))
 }
 
 function isRateLimited(message) {
@@ -202,6 +238,7 @@ export async function ethCall(data, opts) {
   const to = opts?.contract || WNS_CONTRACT
   const endpoints = opts?.rpc?.length ? opts.rpc : DEFAULT_RPCS
   const timeoutMs = opts?.timeoutMs || RPC_TIMEOUT_MS
+  const maxBytes = opts?.maxResponseBytes || RPC_MAX_RESPONSE_BYTES
   const body = JSON.stringify({
     jsonrpc: '2.0',
     id: 1,
@@ -226,7 +263,7 @@ export async function ethCall(data, opts) {
           })
           // Read the body under the same timer: a node that sends headers and
           // then stalls must not hold an inflight slot forever.
-          if (res.ok) json = await res.json()
+          if (res.ok) json = await readJson(res, maxBytes)
           else res.body?.cancel().catch(() => {})
         } finally {
           clearTimeout(timer)
@@ -259,9 +296,11 @@ export async function ethCall(data, opts) {
         unhealthyUntil.delete(url)
         return json.result
       } catch (e) {
+        lastErr = e
+        // Every node would return the same oversized answer.
+        if (e?.tooLarge) break
         // Timeout or transport failure: the endpoint itself is the problem.
         unhealthyUntil.set(url, Date.now() + COOLDOWN_MS)
-        lastErr = e
       }
     }
   } finally {

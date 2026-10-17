@@ -43,6 +43,22 @@ const RESERVED_BY_ZONE = {
 // essentially instantly, which is the point of the wildcard design.
 const RESOLUTION_TTL_MS = 60_000
 const resolutionCache = new TtlCache({ maxEntries: 5_000 })
+// Names with nothing to serve live in their own cache. A flood of random labels
+// is all misses, and sharing one LRU with the hits let it evict every live name
+// and turn their next request into three cold `eth_call`s.
+const missCache = new TtlCache({ maxEntries: 5_000 })
+
+// The last IPFS/IPNS answer per name, kept for an hour so an RPC outage is not
+// every site's outage. Used ONLY when resolution throws (every endpoint down,
+// or the RPC queue full); a name that resolves always gets the fresh answer.
+// Contract pages never use it — AGENTS.md: an expired page is never a fallback.
+const STALE_RESOLUTION_MS = 3_600_000
+const staleResolutions = new TtlCache({ maxEntries: 5_000 })
+
+// computeId is `pure` (a namehash of the string), so a name's tokenId can never
+// change; holding it spares one of the three registry calls on each re-resolve.
+const TOKEN_ID_TTL_MS = 86_400_000
+const tokenIds = new TtlCache({ maxEntries: 20_000 })
 
 // Contract page bodies, held for exactly as long as the contract's own
 // Cache-Control allows (see cache.js). This is the difference between one
@@ -129,8 +145,23 @@ function ipfsQuery(search) {
 // upstream rather than how many bodies are in flight; holding a slot for the
 // whole transfer would let a handful of slow readers starve the queue into
 // shedding requests that would otherwise have been served.
-const PROXY_MAX_INFLIGHT = 10
+//
+// Sized together with the per-client gate below: no one client may hold more
+// than CLIENT_MAX_INFLIGHT of these, so a client asking for content nobody
+// pins (each fetch then waits out PROXY_TIMEOUT_MS) cannot hold them all.
+const PROXY_MAX_INFLIGHT = 32
 const PROXY_MAX_QUEUE = 200
+
+// How long an upstream body may go without producing a chunk. The headers
+// timeout above ends when headers land; without this a body that stalls holds
+// the visitor's connection — and, on a cacheable path, every request coalesced
+// behind it — until the upstream's TCP stack gives up. Only counts while the
+// reader is waiting, so a slow CLIENT never trips it (backpressure stops pulls).
+const PROXY_IDLE_MS = 20_000
+
+function idleMs(env) {
+  return envNumber(env, 'PROXY_IDLE_TIMEOUT_MS', PROXY_IDLE_MS) || PROXY_IDLE_MS
+}
 
 // How long an upstream gets to produce response HEADERS. Not the body: the
 // semaphore slot is released once headers arrive, so a slow large file costs
@@ -200,14 +231,57 @@ async function proxyAcquire() {
     e.overloaded = true
     throw e
   }
+  // The releasing caller hands its slot straight over (proxyBusy unchanged), so
+  // a newcomer can't slip in between the release and the wake-up and overshoot.
   await new Promise((resolve) => proxyWaiting.push(resolve))
-  proxyBusy++
 }
 
 function proxyRelease() {
-  proxyBusy--
   const next = proxyWaiting.shift()
   if (next) next()
+  else proxyBusy--
+}
+
+// One read that fails if the upstream sends nothing for `ms`. The caller owns
+// cancelling the reader on failure.
+function readTimed(reader, ms) {
+  let timer
+  const stalled = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error('upstream body stalled')), ms)
+  })
+  return Promise.race([reader.read(), stalled]).finally(() => clearTimeout(timer))
+}
+
+// A stream over `reader` that first re-emits `prefix`, then pulls the rest with
+// the idle timeout applied. A stall errors the stream (server.js then drops the
+// connection) instead of holding it open with nothing coming.
+function pump(reader, ms, prefix = []) {
+  return new ReadableStream({
+    start(c) {
+      for (const ch of prefix) c.enqueue(ch)
+    },
+    async pull(c) {
+      let next
+      try {
+        next = await readTimed(reader, ms)
+      } catch (e) {
+        reader.cancel(e).catch(() => {})
+        c.error(e)
+        return
+      }
+      if (next.done) c.close()
+      else c.enqueue(next.value)
+    },
+    cancel(reason) {
+      // Never unhandled: cancelling an already-errored reader rejects.
+      return reader.cancel(reason).catch(() => {})
+    },
+  })
+}
+
+// An upstream body, passed through with the idle timeout.
+function guarded(body, ms) {
+  return body ? pump(body.getReader(), ms) : body
 }
 
 // Read a body while refusing to buffer more than `cap` bytes.
@@ -216,33 +290,25 @@ function proxyRelease() {
 // may be cached — and `{ stream }` when it doesn't: a stream that re-emits what
 // was already pulled and then pipes the rest, so overrunning the cap costs a
 // passthrough rather than a second upstream fetch or a truncated response.
-async function readCapped(res, cap) {
+// Throws if the upstream stalls mid-body (see PROXY_IDLE_MS).
+async function readCapped(res, cap, ms) {
   if (!res.body) return { body: new Uint8Array(0) }
   const reader = res.body.getReader()
   const chunks = []
   let total = 0
   while (true) {
-    const { done, value } = await reader.read()
+    let next
+    try {
+      next = await readTimed(reader, ms)
+    } catch (e) {
+      reader.cancel(e).catch(() => {})
+      throw e
+    }
+    const { done, value } = next
     if (done) break
     chunks.push(value)
     total += value.length
-    if (total > cap) {
-      return {
-        stream: new ReadableStream({
-          start(c) {
-            for (const ch of chunks) c.enqueue(ch)
-          },
-          async pull(c) {
-            const next = await reader.read()
-            if (next.done) c.close()
-            else c.enqueue(next.value)
-          },
-          cancel(reason) {
-            reader.cancel(reason)
-          },
-        }),
-      }
-    }
+    if (total > cap) return { stream: pump(reader, ms, chunks) }
   }
   const body = new Uint8Array(total)
   let at = 0
@@ -382,6 +448,76 @@ function rateLimited(key, now, rps, burst) {
   return false
 }
 
+// The identity a budget is charged to. IPv4 as-is; IPv6 by its /64, which is
+// what one subscriber is handed — keyed per address, a single host could mint
+// 2^64 fresh buckets (and evict everybody else's) just by rotating its suffix.
+export function clientKey(ip) {
+  const v = String(ip || 'unknown').toLowerCase().split('%')[0]
+  if (!v.includes(':')) return v
+  const halves = v.split('::')
+  if (halves.length > 2) return v
+  const head = halves[0] ? halves[0].split(':') : []
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(':') : []
+  const fill = halves.length === 2 ? Array(Math.max(0, 8 - head.length - tail.length)).fill('0') : []
+  const groups = [...head, ...fill, ...tail].slice(0, 4)
+  return groups.map((g) => g.replace(/^0+(?=.)/, '')).join(':') + '::/64'
+}
+
+// Per-client concurrency: at most CLIENT_MAX_INFLIGHT of one client's requests
+// are being worked on at once, the next CLIENT_MAX_QUEUE wait their turn, and
+// anything past that is refused. The rate limit bounds how OFTEN a client asks;
+// this bounds how much of the gateway it holds while waiting. Without it, one
+// client asking at its permitted 15/s for content nobody pins holds every
+// upstream slot for PROXY_TIMEOUT_MS each, and every other site 503s.
+//
+// Counts handler time only (until response headers), not body streaming, and
+// queues rather than refuses first, so a page load firing many asset requests
+// at once is served in order instead of broken.
+const CLIENT_MAX_INFLIGHT = 8
+const CLIENT_MAX_QUEUE = 64
+const clientGates = new Map()
+
+async function clientAcquire(key) {
+  let g = clientGates.get(key)
+  if (!g) {
+    g = { active: 0, waiting: [] }
+    clientGates.set(key, g)
+  }
+  if (g.active < CLIENT_MAX_INFLIGHT) {
+    g.active++
+    return true
+  }
+  if (g.waiting.length >= CLIENT_MAX_QUEUE) return false
+  // Slots are handed over on release (see clientRelease), active unchanged.
+  await new Promise((resolve) => g.waiting.push(resolve))
+  return true
+}
+
+function clientRelease(key) {
+  const g = clientGates.get(key)
+  if (!g) return
+  const next = g.waiting.shift()
+  if (next) next()
+  else if (--g.active <= 0) clientGates.delete(key)
+}
+
+// An env number, or the default when unset or not a number.
+function envNumber(env, key, fallback) {
+  const n = Number(readEnv(env, key, fallback))
+  return Number.isFinite(n) ? n : fallback
+}
+
+function tooManyRequests() {
+  return new Response('Too many requests, slow down.\n', {
+    status: 429,
+    headers: {
+      'cache-control': 'no-store',
+      'retry-after': '1',
+      'content-type': 'text/plain; charset=utf-8',
+    },
+  })
+}
+
 // Statuses HTTP forbids a body on. `Response` throws rather than truncating.
 const NULL_BODY_STATUS = new Set([204, 205, 304])
 
@@ -472,7 +608,8 @@ async function proxyFetch(url, { method = 'GET', accept = '*/*', timeoutMs }) {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
-    return await fetch(url, { method, headers: { accept }, signal: controller.signal })
+    // `manual`, like the main fetch: a redirect is an answer, not a detour.
+    return await fetch(url, { method, headers: { accept }, redirect: 'manual', signal: controller.signal })
   } finally {
     clearTimeout(timer)
     proxyRelease()
@@ -483,7 +620,7 @@ async function proxyFetch(url, { method = 'GET', accept = '*/*', timeoutMs }) {
 // An absent or unreadable `_redirects` caches as an EMPTY map rather than as a
 // miss: a site without one is the common case, and re-reading it on every 404
 // would make the fallback cost more than the problem it fixes.
-async function redirectRulesFor(root, resolved, { timeoutMs, now }) {
+async function redirectRulesFor(root, resolved, { timeoutMs, idle, now }) {
   const key = resolved.kind === 'ipfs' ? resolved.id : null
   if (key) {
     const hit = redirectsCache.get(key, now)
@@ -501,7 +638,7 @@ async function redirectRulesFor(root, resolved, { timeoutMs, now }) {
   if (res.ok) {
     let read
     try {
-      read = await readCapped(res, REDIRECTS_MAX_BYTES)
+      read = await readCapped(res, REDIRECTS_MAX_BYTES, idle)
     } catch {
       cancelBody(res)
       return rules
@@ -545,6 +682,52 @@ function parseRedirects(text) {
     if (!rules.has(from)) rules.set(from, { to, status: code })
   }
   return rules
+}
+
+// An upstream redirect, as a path on the visitor's own <label>.<zone>, or null
+// when it points anywhere but inside the content being served.
+//
+// fetch() used to follow these itself, which is wrong for the commonest one: a
+// gateway answers `/docs` with `301 /ipfs/<cid>/docs/` (directories get a
+// trailing slash), and following it served `docs/index.html` AT `/docs`, where
+// every relative link in it resolves one level too high. The browser has to see
+// the redirect for the page's base URL to be right, so it is handed on.
+function visitorPath(location, candidate) {
+  if (!location) return null
+  let to
+  try {
+    to = new URL(location, candidate.url)
+  } catch {
+    return null
+  }
+  let path
+  if (candidate.root) {
+    const root = new URL(candidate.root)
+    const prefix = root.pathname.replace(/\/+$/, '')
+    if (to.origin !== root.origin) return null
+    if (to.pathname !== prefix && !to.pathname.startsWith(prefix + '/')) return null
+    path = to.pathname.slice(prefix.length) || '/'
+  } else {
+    if (to.origin !== new URL(candidate.url).origin) return null
+    path = to.pathname
+  }
+  // One leading slash: `//host` in a Location is protocol-relative to a browser.
+  return path.replace(/^\/+/, '/') + to.search
+}
+
+// RFC 9110 If-None-Match against one entity tag (weak comparison, as GET uses).
+function etagMatches(header, etag) {
+  if (!header || !etag) return false
+  if (header.trim() === '*') return true
+  const bare = (t) => t.trim().replace(/^W\//, '')
+  return header.split(',').some((t) => bare(t) === bare(etag))
+}
+
+// A held proxy body as a response — a 304 when the visitor already has it.
+function sharedResponse(shared, ifNoneMatch) {
+  const headers = new Headers(shared.headers)
+  if (etagMatches(ifNoneMatch, headers.get('etag'))) return new Response(null, { status: 304, headers })
+  return new Response(shared.body, { status: 200, headers })
 }
 
 // Pull the WNS subdomain out of a Host header, for any served zone.
@@ -629,7 +812,13 @@ async function resolveTarget(sub, opts) {
   const direct = contentLabel(sub)
   if (direct) return { resolved: direct }
 
-  const tokenId = await computeId(namesFromPunycode(sub), opts)
+  const name = namesFromPunycode(sub)
+  const idKey = `${opts.contract || ''}|${name}`
+  let tokenId = tokenIds.get(idKey, Date.now())
+  if (tokenId === undefined) {
+    tokenId = await computeId(name, opts)
+    tokenIds.set(idKey, tokenId, { expires: Date.now() + TOKEN_ID_TTL_MS })
+  }
   if (tokenId === 0n) return { resolved: null }
 
   // Address record and contenthash in parallel (one round-trip); the contract
@@ -651,7 +840,7 @@ export async function handleRequest(request, env, { clientIp = 'unknown' } = {})
   const zones = String(readEnv(env, 'ZONE', ZONE)).split(',').map((s) => s.trim()).filter(Boolean)
 
   if (request.method !== 'GET' && request.method !== 'HEAD') {
-    return new Response('Method Not Allowed', { status: 405 })
+    return new Response('Method Not Allowed', { status: 405, headers: { allow: 'GET, HEAD' } })
   }
 
   // Lightweight health check for Railway/Render.
@@ -661,18 +850,10 @@ export async function handleRequest(request, env, { clientIp = 'unknown' } = {})
 
   // After /healthz so platform monitoring is never limited, and before any
   // resolution so a refused request costs no RPC and no upstream fetch.
-  const rps = Number(readEnv(env, 'RATE_LIMIT_RPS', RATE_LIMIT_RPS))
-  const burst = Number(readEnv(env, 'RATE_LIMIT_BURST', RATE_LIMIT_BURST))
-  if (rateLimited(clientIp || 'unknown', Date.now(), rps, burst)) {
-    return new Response('Too many requests, slow down.\n', {
-      status: 429,
-      headers: {
-        'cache-control': 'no-store',
-        'retry-after': '1',
-        'content-type': 'text/plain; charset=utf-8',
-      },
-    })
-  }
+  const rps = envNumber(env, 'RATE_LIMIT_RPS', RATE_LIMIT_RPS)
+  const burst = envNumber(env, 'RATE_LIMIT_BURST', RATE_LIMIT_BURST)
+  const client = clientKey(clientIp)
+  if (rateLimited(client, Date.now(), rps, burst)) return tooManyRequests()
 
   // The host the request was routed on. On the Worker x-forwarded-host is
   // client-controlled; server.js already folds its proxy's header into the URL.
@@ -706,7 +887,14 @@ export async function handleRequest(request, env, { clientIp = 'unknown' } = {})
       // guard behind it turned out to be wrong those 404s kept being served
       // from browser caches long after the server was fixed — the outage
       // outlived its own cause. An error a client can pin is a liability.
-      { status: 404, headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' } },
+      {
+        status: 404,
+        headers: {
+          'content-type': 'text/plain; charset=utf-8',
+          'cache-control': 'no-store',
+          'x-content-type-options': 'nosniff',
+        },
+      },
     )
   }
 
@@ -719,6 +907,18 @@ export async function handleRequest(request, env, { clientIp = 'unknown' } = {})
     })
   }
 
+  // Everything past here may cost RPC or an upstream fetch, so it runs under
+  // the client's concurrency gate. Off with the rate limiter (RATE_LIMIT_RPS=0).
+  if (rps <= 0) return serve(request, env, url, sub)
+  if (!(await clientAcquire(client))) return tooManyRequests()
+  try {
+    return await serve(request, env, url, sub)
+  } finally {
+    clientRelease(client)
+  }
+}
+
+async function serve(request, env, url, sub) {
   const rpc = String(readEnv(env, 'RPC_URLS', '')).split(',').map((s) => s.trim()).filter(Boolean)
   const contract = readEnv(env, 'WNS_CONTRACT', undefined)
   // Page reads pull whole documents over `eth_call`, so they get their own
@@ -744,20 +944,33 @@ export async function handleRequest(request, env, { clientIp = 'unknown' } = {})
   let resolved
   let prefetched
   const now = Date.now()
-  const cached = resolutionCache.get(sub, now)
+  let cached = resolutionCache.get(sub, now)
+  if (cached === undefined && missCache.get(sub, now)) cached = null
   if (cached !== undefined) {
     resolved = cached
   } else {
     try {
       const hit = await singleFlight(resolveInflight, sub, async () => {
         const out = await resolveTarget(sub, opts)
-        resolutionCache.set(sub, out.resolved, { expires: Date.now() + RESOLUTION_TTL_MS })
+        const at = Date.now()
+        if (!out.resolved) {
+          missCache.set(sub, true, { expires: at + RESOLUTION_TTL_MS })
+        } else {
+          resolutionCache.set(sub, out.resolved, { expires: at + RESOLUTION_TTL_MS })
+          if (out.resolved.kind === 'ipfs' || out.resolved.kind === 'ipns') {
+            staleResolutions.set(sub, out.resolved, { expires: at + STALE_RESOLUTION_MS })
+          }
+        }
         return out
       })
       resolved = hit.resolved
       prefetched = hit.prefetched
     } catch (e) {
-      return upstreamError(e, 'resolving ' + sub)
+      // RPC is down or saturated. A name served from IPFS within the last hour
+      // keeps being served from the CID it had then, rather than 502ing.
+      const stale = staleResolutions.get(sub, Date.now())
+      if (!stale) return upstreamError(e, 'resolving ' + sub)
+      resolved = stale
     }
   }
 
@@ -985,13 +1198,27 @@ export async function handleRequest(request, env, { clientIp = 'unknown' } = {})
     // Trustless-gateway formats (raw blocks, CAR, tar, dag-json) are chosen by
     // Accept, which is not in the key — those are fetched but never shared.
     const negotiated = /application\/(vnd\.ipld\.|x-tar|json|cbor)/i.test(accept)
+    // A byte range is a different response from the whole file, so it is
+    // forwarded (media seeking needs it) and never held or shared.
+    const range = request.headers.get('range')
+    const ifNoneMatch = request.headers.get('if-none-match')
     const proxyKey =
-      resolved.kind === 'ipfs' && request.method === 'GET' && !negotiated
+      resolved.kind === 'ipfs' && request.method === 'GET' && !negotiated && !range
         ? `${resolved.id}|${url.pathname}${ipfsQuery(url.search)}`
         : null
     if (proxyKey) {
       const hit = proxyCache.get(proxyKey, now)
-      if (hit) return new Response(hit.body, { status: 200, headers: new Headers(hit.headers) })
+      if (hit) return sharedResponse(hit, ifNoneMatch)
+    }
+    // What the upstream is asked with. A held key is always fetched whole, and
+    // the visitor's validators are checked against the result here instead
+    // (sharedResponse); anything else passes them on, and a 304 passes back.
+    const upstreamHeaders = { accept }
+    if (range) upstreamHeaders.range = range
+    if (!proxyKey) {
+      const ims = request.headers.get('if-modified-since')
+      if (ifNoneMatch) upstreamHeaders['if-none-match'] = ifNoneMatch
+      if (ims) upstreamHeaders['if-modified-since'] = ims
     }
 
     // Join a fetch already running for this key rather than opening a second
@@ -1001,254 +1228,300 @@ export async function handleRequest(request, env, { clientIp = 'unknown' } = {})
     // 200), and anyone who joined then falls through and fetches for itself.
     if (proxyKey && proxyInflight.has(proxyKey)) {
       const shared = await proxyInflight.get(proxyKey)
-      if (shared) {
-        return new Response(shared.body, { status: 200, headers: new Headers(shared.headers) })
-      }
+      if (shared) return sharedResponse(shared, ifNoneMatch)
     }
     let settle
+    let flight
     if (proxyKey) {
-      proxyInflight.set(
-        proxyKey,
-        new Promise((resolve) => {
-          settle = resolve
-        }),
-      )
+      flight = new Promise((resolve) => {
+        settle = resolve
+      })
+      proxyInflight.set(proxyKey, flight)
     }
+    // Idempotent, and called again from the `finally` below: whatever path
+    // leaves this block — including a throw — releases everyone who joined.
+    // Before that, an unexpected throw left them awaiting forever.
+    let settled = false
     const done = (shared) => {
-      if (!proxyKey) return shared
-      proxyInflight.delete(proxyKey)
+      if (!proxyKey || settled) return shared
+      settled = true
+      if (proxyInflight.get(proxyKey) === flight) proxyInflight.delete(proxyKey)
       settle(shared)
       return shared
     }
+    try {
 
-    // Walk the upstream list until one answers something worth serving. Only
-    // shouldFailover() statuses and outright fetch failures move on; anything
-    // else — a 200, a 404, a 304 — is this content's real answer and is served.
-    //
-    // The LAST candidate is never failed over from: whatever it says (429 and
-    // all) is what the visitor gets, which is why a one-entry list is bit-for-
-    // bit the old behaviour. `rejected` holds the best failure seen so far so a
-    // list that fails all the way down still returns an upstream's own status
-    // rather than flattening everything into a 502.
-    let upstream = null
-    let rejected = null
-    let lastError = null
-    let servedBy = targets[0]
-    // A path gateway's 404 may only mean "not pinned here" (a NoFetch node), so
-    // it is held while the rest of the list is asked, and served if nothing
-    // better turns up — the _redirects step below still gets to see it.
-    let pathMiss = null
-    const proxyTimeoutMs =
-      Number(readEnv(env, 'PROXY_TIMEOUT_MS', PROXY_TIMEOUT_MS)) || PROXY_TIMEOUT_MS
-    // Try the ones that were working most recently first; see byHealth.
-    const attempts = byHealth(targets, now)
-    for (let i = 0; i < attempts.length; i++) {
-      const candidate = attempts[i]
-      let res
-      try {
-        await proxyAcquire()
-        // The timer is cleared the moment headers land, so the abort covers
-        // connect-and-hang and nothing else — a large body still streams.
-        const controller = new AbortController()
-        const timer = setTimeout(() => controller.abort(), proxyTimeoutMs)
+      // Walk the upstream list until one answers something worth serving. Only
+      // shouldFailover() statuses and outright fetch failures move on; anything
+      // else — a 200, a 404, a 304 — is this content's real answer and is served.
+      //
+      // The LAST candidate is never failed over from: whatever it says (429 and
+      // all) is what the visitor gets, which is why a one-entry list is bit-for-
+      // bit the old behaviour. `rejected` holds the best failure seen so far so a
+      // list that fails all the way down still returns an upstream's own status
+      // rather than flattening everything into a 502.
+      let upstream = null
+      let rejected = null
+      let lastError = null
+      let servedBy = targets[0]
+      // A path gateway's 404 may only mean "not pinned here" (a NoFetch node), so
+      // it is held while the rest of the list is asked, and served if nothing
+      // better turns up — the _redirects step below still gets to see it.
+      let pathMiss = null
+      // Set when the answer is a redirect inside the content (see visitorPath).
+      let redirectTo = null
+      const proxyTimeoutMs = envNumber(env, 'PROXY_TIMEOUT_MS', PROXY_TIMEOUT_MS) || PROXY_TIMEOUT_MS
+      // Try the ones that were working most recently first; see byHealth.
+      const attempts = byHealth(targets, now)
+      for (let i = 0; i < attempts.length; i++) {
+        const candidate = attempts[i]
+        let res
         try {
-          res = await fetch(candidate.url, {
-            method: request.method,
-            headers: { accept },
-            signal: controller.signal,
-          })
-        } finally {
-          clearTimeout(timer)
-          proxyRelease()
-        }
-      } catch (e) {
-        lastError = e
-        // A full outbound queue is this gateway's own back-pressure, not the
-        // upstream misbehaving — benching it for that would be self-inflicted.
-        if (!e?.overloaded) benchUpstream(candidate.host)
-        // A full outbound queue is this gateway shedding load, not the upstream
-        // being unwell — every candidate would hit the same closed door, so
-        // stop rather than spending the whole list discovering that.
-        if (e?.overloaded) break
-        continue
-      }
-      if (res.status === 404 && candidate.root && i < attempts.length - 1) {
-        if (pathMiss) cancelBody(pathMiss.res)
-        pathMiss = { res, candidate }
-        continue
-      }
-      if (shouldFailover(res.status)) {
-        benchUpstream(candidate.host)
-        if (i < attempts.length - 1) {
-          if (rejected) cancelBody(rejected)
-          rejected = res
-          servedBy = candidate
+          await proxyAcquire()
+          // The timer is cleared the moment headers land, so the abort covers
+          // connect-and-hang and nothing else — a large body still streams.
+          const controller = new AbortController()
+          const timer = setTimeout(() => controller.abort(), proxyTimeoutMs)
+          try {
+            res = await fetch(candidate.url, {
+              method: request.method,
+              headers: upstreamHeaders,
+              redirect: 'manual',
+              signal: controller.signal,
+            })
+          } finally {
+            clearTimeout(timer)
+            proxyRelease()
+          }
+        } catch (e) {
+          lastError = e
+          // A full outbound queue is this gateway's own back-pressure, not the
+          // upstream misbehaving — benching it for that would be self-inflicted.
+          if (!e?.overloaded) benchUpstream(candidate.host)
+          // A full outbound queue is this gateway shedding load, not the upstream
+          // being unwell — every candidate would hit the same closed door, so
+          // stop rather than spending the whole list discovering that.
+          if (e?.overloaded) break
           continue
         }
-      } else {
-        upstreamHealth.delete(candidate.host)
+        if (res.status >= 300 && res.status < 400 && res.status !== 304) {
+          const to = visitorPath(res.headers.get('location'), candidate)
+          if (to !== null) {
+            upstreamHealth.delete(candidate.host)
+            redirectTo = to
+            upstream = res
+            servedBy = candidate
+            break
+          }
+          // Somewhere outside the content: not ours to send a visitor to, and
+          // not something to follow blind. The next upstream may answer directly.
+          cancelBody(res)
+          lastError = new Error(`upstream redirected off-site (${res.status})`)
+          continue
+        }
+        if (res.status === 404 && candidate.root && i < attempts.length - 1) {
+          if (pathMiss) cancelBody(pathMiss.res)
+          pathMiss = { res, candidate }
+          continue
+        }
+        if (shouldFailover(res.status)) {
+          benchUpstream(candidate.host)
+          if (i < attempts.length - 1) {
+            if (rejected) cancelBody(rejected)
+            rejected = res
+            servedBy = candidate
+            continue
+          }
+        } else {
+          upstreamHealth.delete(candidate.host)
+        }
+        upstream = res
+        servedBy = candidate
+        break
       }
-      upstream = res
-      servedBy = candidate
-      break
-    }
-    if (pathMiss && (!upstream || shouldFailover(upstream.status))) {
-      if (upstream) cancelBody(upstream)
-      upstream = pathMiss.res
-      servedBy = pathMiss.candidate
-    } else if (pathMiss) {
-      cancelBody(pathMiss.res)
-    }
-    if (!upstream) {
-      if (rejected) {
-        upstream = rejected
-        rejected = null
-      } else {
+      if (pathMiss && (!upstream || shouldFailover(upstream.status))) {
+        if (upstream) cancelBody(upstream)
+        upstream = pathMiss.res
+        servedBy = pathMiss.candidate
+      } else if (pathMiss) {
+        cancelBody(pathMiss.res)
+      }
+      if (redirectTo !== null && upstream) {
+        cancelBody(upstream)
+        if (rejected) cancelBody(rejected)
         done(null)
-        if (isNavigation(request) && browserTarget()) return toBrowser('unreachable')
-        // An unreachable IPFS gateway is upstream trouble like any other; without
-        // this it escaped handleRequest entirely and server.js turned it into a
-        // bare 500 with no retry-after and no cache-control.
-        return upstreamError(lastError, 'fetching ' + attempts[attempts.length - 1].url)
+        return new Response(null, {
+          status: upstream.status,
+          headers: {
+            location: redirectTo,
+            // Content-addressed, so as stable as the bytes; IPNS can move.
+            'cache-control': resolved.kind === 'ipfs' ? 'public, max-age=300' : 'no-store',
+            'x-wns-name': sub,
+            'x-wns-mode': resolved.kind,
+            'x-wns-upstream': servedBy.host,
+            [idHeader[0]]: idHeader[1],
+          },
+        })
       }
-    }
-    if (rejected) cancelBody(rejected)
-
-    // A path gateway applies none of the site's routing, so a link that the
-    // site declares in `_redirects` arrives here as a 404. Consult the rules
-    // once before serving it. Deliberately AFTER the failover loop rather than
-    // inside it: a 404 is still this content's real answer and must not cause a
-    // failover — it just gets one declared rewrite honoured first.
-    //
-    // Only path targets (`servedBy.root`) reach this. A subdomain gateway
-    // already applied the rules, so a 404 from one is final.
-    if (upstream.status === 404 && servedBy?.root) {
-      const rules = await redirectRulesFor(servedBy.root, resolved, {
-        timeoutMs: proxyTimeoutMs,
-        now: Date.now(),
-      })
-      // A rule pointing at the path it was reached by would just 404 again.
-      const rule = rules.get(url.pathname)
-      if (rule && rule.to !== url.pathname) {
-        if (REDIRECT_STATUSES.has(rule.status)) {
-          cancelBody(upstream)
+      if (!upstream) {
+        if (rejected) {
+          upstream = rejected
+          rejected = null
+        } else {
           done(null)
-          // `to` is same-site and absolute (parseRedirects enforces both), so
-          // this stays on <label>.<zone> and comes back through this gateway.
-          return new Response(null, {
-            status: rule.status,
-            headers: {
-              location: rule.to,
-              'cache-control': 'public, max-age=300',
-              'x-wns-name': sub,
-              'x-wns-mode': resolved.kind,
-              'x-wns-upstream': servedBy.host,
-              [idHeader[0]]: idHeader[1],
-            },
-          })
+          if (isNavigation(request) && browserTarget()) return toBrowser('unreachable')
+          // An unreachable IPFS gateway is upstream trouble like any other; without
+          // this it escaped handleRequest entirely and server.js turned it into a
+          // bare 500 with no retry-after and no cache-control.
+          return upstreamError(lastError, 'fetching ' + attempts[attempts.length - 1].url)
         }
-        // A 200 rule rewrites the path without moving the address bar, which is
-        // the whole point of `/docs 200 /docs.html` rather than a 301.
-        let rewritten = null
+      }
+      if (rejected) cancelBody(rejected)
+
+      // A path gateway applies none of the site's routing, so a link that the
+      // site declares in `_redirects` arrives here as a 404. Consult the rules
+      // once before serving it. Deliberately AFTER the failover loop rather than
+      // inside it: a 404 is still this content's real answer and must not cause a
+      // failover — it just gets one declared rewrite honoured first.
+      //
+      // Only path targets (`servedBy.root`) reach this. A subdomain gateway
+      // already applied the rules, so a 404 from one is final.
+      if (upstream.status === 404 && servedBy?.root) {
+        const rules = await redirectRulesFor(servedBy.root, resolved, {
+          timeoutMs: proxyTimeoutMs,
+          idle: idleMs(env),
+          now: Date.now(),
+        })
+        // A rule pointing at the path it was reached by would just 404 again.
+        const rule = rules.get(url.pathname)
+        if (rule && rule.to !== url.pathname) {
+          if (REDIRECT_STATUSES.has(rule.status)) {
+            cancelBody(upstream)
+            done(null)
+            // `to` is same-site and absolute (parseRedirects enforces both), so
+            // this stays on <label>.<zone> and comes back through this gateway.
+            return new Response(null, {
+              status: rule.status,
+              headers: {
+                location: rule.to,
+                'cache-control': 'public, max-age=300',
+                'x-wns-name': sub,
+                'x-wns-mode': resolved.kind,
+                'x-wns-upstream': servedBy.host,
+                [idHeader[0]]: idHeader[1],
+              },
+            })
+          }
+          // A 200 rule rewrites the path without moving the address bar, which is
+          // the whole point of `/docs 200 /docs.html` rather than a 301.
+          let rewritten = null
+          try {
+            rewritten = await proxyFetch(`${servedBy.root}${rule.to}${ipfsQuery(url.search)}`, {
+              method: request.method,
+              accept,
+              timeoutMs: proxyTimeoutMs,
+            })
+          } catch {}
+          // Only a working rewrite replaces the 404; a broken rule leaves the
+          // honest answer in place rather than inventing a worse one.
+          if (rewritten && rewritten.ok) {
+            cancelBody(upstream)
+            // A 404/410 rule serves its page with the rule's status, never as a
+            // cacheable 200
+            upstream = rule.status === 200
+              ? rewritten
+              : new Response(rewritten.body, { status: rule.status, headers: rewritten.headers })
+          } else if (rewritten) {
+            cancelBody(rewritten)
+          }
+        }
+      }
+
+      // Every upstream failed, or the only answer is a path gateway that doesn't
+      // hold the content: a page load goes to the browser gateway rather than
+      // bricking the site behind an error.
+      if (
+        isNavigation(request) &&
+        browserTarget() &&
+        (shouldFailover(upstream.status) || (upstream.status === 404 && servedBy?.root))
+      ) {
+        cancelBody(upstream)
+        done(null)
+        return toBrowser(upstream.status === 404 ? 'not-pinned' : 'upstream-' + upstream.status)
+      }
+
+      // Forward only a safe subset. Never propagate Set-Cookie: upstream content
+      // is untrusted and must not be able to set cookies on a *.wei.limo origin.
+      //
+      // content-length is deliberately NOT forwarded. fetch() transparently
+      // decodes content-encoding but leaves the ORIGINAL (compressed)
+      // content-length on the header object, while content-encoding itself is not
+      // in this list — so forwarding it would advertise the gzipped length for a
+      // body we hand over decompressed, and every client would truncate there.
+      // dweb.link happens to answer chunked today, which is the only reason this
+      // has not bitten; IPFS_SUBDOMAIN_GATEWAY is env-configurable and the next
+      // one need not. Let the runtime frame the body.
+      //
+      // content-range/accept-ranges ride along with a forwarded Range (a 206
+      // without them is unusable); content-disposition is the gateway's answer to
+      // `?download=`/`?filename=`, which IPFS_QUERY_KEYS keeps for exactly that.
+      const PASS = ['content-type', 'etag', 'last-modified', 'content-range', 'accept-ranges', 'content-disposition']
+      const headers = new Headers()
+      for (const h of PASS) {
+        const v = upstream.headers.get(h)
+        if (v) headers.set(h, v)
+      }
+      // Never let an upstream failure be cached: a 5xx from the IPFS gateway held
+      // for five minutes outlives the outage that caused it, which is the exact
+      // trap the depth-guard 404 above documents. A 304 renews the visitor's copy
+      // and so carries the same freshness the 200 did.
+      headers.set('cache-control', upstream.ok || upstream.status === 304 ? 'public, max-age=300' : 'no-store')
+      // Defense-in-depth for untrusted content executing on this origin.
+      headers.set('x-content-type-options', 'nosniff')
+      headers.set('vary', 'accept')
+      headers.set('x-wns-name', sub)
+      headers.set('x-wns-mode', resolved.kind)
+      headers.set(idHeader[0], idHeader[1])
+      // Which upstream answered. With a failover list, "the gateway is serving a
+      // 429" and "the third gateway in the list is serving a 429" are different
+      // problems, and nothing else in the response tells them apart.
+      headers.set('x-wns-upstream', servedBy.host)
+      // `Response` throws rather than truncating when a null-body status carries
+      // one — same guard the contract path already has.
+      if (request.method === 'HEAD' || NULL_BODY_STATUS.has(upstream.status)) {
+        done(null)
+        return new Response(null, { status: upstream.status, headers })
+      }
+
+      // Nothing but a cacheable key on a healthy 200 may be held, and even then
+      // only if it fits: readCapped hands back a passthrough stream instead of
+      // bytes for anything larger, which is served and forgotten — and cannot be
+      // shared with anyone who joined, so they are released to fetch their own.
+      if (proxyKey && upstream.status === 200) {
+        let read
         try {
-          rewritten = await proxyFetch(`${servedBy.root}${rule.to}${ipfsQuery(url.search)}`, {
-            method: request.method,
-            accept,
-            timeoutMs: proxyTimeoutMs,
-          })
-        } catch {}
-        // Only a working rewrite replaces the 404; a broken rule leaves the
-        // honest answer in place rather than inventing a worse one.
-        if (rewritten && rewritten.ok) {
-          cancelBody(upstream)
-          // A 404/410 rule serves its page with the rule's status, never as a
-          // cacheable 200
-          upstream = rule.status === 200
-            ? rewritten
-            : new Response(rewritten.body, { status: rule.status, headers: rewritten.headers })
-        } else if (rewritten) {
-          cancelBody(rewritten)
+          read = await readCapped(upstream, PROXY_MAX_BODY_BYTES, idleMs(env))
+        } catch (e) {
+          done(null)
+          return upstreamError(e, 'reading ' + servedBy.url)
         }
+        if (read.stream) {
+          done(null)
+          return new Response(read.stream, { status: 200, headers })
+        }
+        const shared = { body: read.body, headers: [...headers] }
+        proxyCache.set(proxyKey, shared, {
+          expires: Date.now() + PROXY_TTL_MS,
+          size: read.body.length + 512,
+        })
+        done(shared)
+        return sharedResponse(shared, ifNoneMatch)
       }
-    }
-
-    // Every upstream failed, or the only answer is a path gateway that doesn't
-    // hold the content: a page load goes to the browser gateway rather than
-    // bricking the site behind an error.
-    if (
-      isNavigation(request) &&
-      browserTarget() &&
-      (shouldFailover(upstream.status) || (upstream.status === 404 && servedBy?.root))
-    ) {
-      cancelBody(upstream)
       done(null)
-      return toBrowser(upstream.status === 404 ? 'not-pinned' : 'upstream-' + upstream.status)
-    }
-
-    // Forward only a safe subset. Never propagate Set-Cookie: upstream content
-    // is untrusted and must not be able to set cookies on a *.wei.limo origin.
-    //
-    // content-length is deliberately NOT forwarded. fetch() transparently
-    // decodes content-encoding but leaves the ORIGINAL (compressed)
-    // content-length on the header object, while content-encoding itself is not
-    // in this list — so forwarding it would advertise the gzipped length for a
-    // body we hand over decompressed, and every client would truncate there.
-    // dweb.link happens to answer chunked today, which is the only reason this
-    // has not bitten; IPFS_SUBDOMAIN_GATEWAY is env-configurable and the next
-    // one need not. Let the runtime frame the body.
-    const PASS = ['content-type', 'etag', 'last-modified']
-    const headers = new Headers()
-    for (const h of PASS) {
-      const v = upstream.headers.get(h)
-      if (v) headers.set(h, v)
-    }
-    // Never let an upstream failure be cached: a 5xx from the IPFS gateway held
-    // for five minutes outlives the outage that caused it, which is the exact
-    // trap the depth-guard 404 above documents.
-    headers.set('cache-control', upstream.ok ? 'public, max-age=300' : 'no-store')
-    // Defense-in-depth for untrusted content executing on this origin.
-    headers.set('x-content-type-options', 'nosniff')
-    headers.set('vary', 'accept')
-    headers.set('x-wns-name', sub)
-    headers.set('x-wns-mode', resolved.kind)
-    headers.set(idHeader[0], idHeader[1])
-    // Which upstream answered. With a failover list, "the gateway is serving a
-    // 429" and "the third gateway in the list is serving a 429" are different
-    // problems, and nothing else in the response tells them apart.
-    headers.set('x-wns-upstream', servedBy.host)
-    // `Response` throws rather than truncating when a null-body status carries
-    // one — same guard the contract path already has.
-    if (request.method === 'HEAD' || NULL_BODY_STATUS.has(upstream.status)) {
+      return new Response(guarded(upstream.body, idleMs(env)), { status: upstream.status, headers })
+    } finally {
       done(null)
-      return new Response(null, { status: upstream.status, headers })
     }
-
-    // Nothing but a cacheable key on a healthy 200 may be held, and even then
-    // only if it fits: readCapped hands back a passthrough stream instead of
-    // bytes for anything larger, which is served and forgotten — and cannot be
-    // shared with anyone who joined, so they are released to fetch their own.
-    if (proxyKey && upstream.status === 200) {
-      let read
-      try {
-        read = await readCapped(upstream, PROXY_MAX_BODY_BYTES)
-      } catch (e) {
-        done(null)
-        return upstreamError(e, 'reading ' + servedBy.url)
-      }
-      if (read.stream) {
-        done(null)
-        return new Response(read.stream, { status: 200, headers })
-      }
-      const shared = { body: read.body, headers: [...headers] }
-      proxyCache.set(proxyKey, shared, {
-        expires: Date.now() + PROXY_TTL_MS,
-        size: read.body.length + 512,
-      })
-      done(shared)
-      return new Response(read.body, { status: 200, headers })
-    }
-    done(null)
-    return new Response(upstream.body, { status: upstream.status, headers })
   }
 
   // Default: 302 to the upstream gateway. Bandwidth-light (the gateway is never

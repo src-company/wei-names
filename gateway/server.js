@@ -16,14 +16,30 @@ import { createClientIdentity } from './client-ip.js'
 const PORT = Number(process.env.PORT) || 8080
 const clientIdentity = createClientIdentity(process.env)
 
+function badRequest(res) {
+  res.statusCode = 400
+  res.setHeader('content-type', 'text/plain; charset=utf-8')
+  res.setHeader('cache-control', 'no-store')
+  res.end('Bad Request')
+}
+
 const server = createServer(async (req, res) => {
+  // A forged Host or request target is the client's problem, not a gateway
+  // error: answered here, before it can throw below and log a stack per request.
+  // Only origin-form targets (`/path`); a proxy may list several hosts, first wins.
+  const host = String(req.headers['x-forwarded-host'] || req.headers.host || 'wei.limo').split(',')[0].trim()
+  if (!req.url?.startsWith('/') || !/^[a-z0-9.:\[\]_-]+$/i.test(host)) return badRequest(res)
   try {
-    const host = req.headers['x-forwarded-host'] || req.headers.host || 'wei.limo'
     const proto = req.headers['x-forwarded-proto'] === 'http' ? 'http' : 'https'
-    const request = new Request(`${proto}://${host}${req.url}`, {
-      method: req.method,
-      headers: req.headers,
-    })
+    let request
+    try {
+      request = new Request(`${proto}://${host}${req.url}`, {
+        method: req.method,
+        headers: req.headers,
+      })
+    } catch {
+      return badRequest(res)
+    }
 
     const response = await handleRequest(request, process.env, { clientIp: clientIdentity(req) })
 
@@ -46,6 +62,19 @@ const server = createServer(async (req, res) => {
   }
 })
 
+// Outlive the platform proxy's pooled upstream connections. Node's default 5s
+// keep-alive closes a socket the proxy still thinks is open, and the request it
+// sends down it next fails as a sporadic 502. headersTimeout must exceed it.
+server.keepAliveTimeout = 65_000
+server.headersTimeout = 66_000
+// GET/HEAD only, so a whole request is just its headers.
+server.requestTimeout = 70_000
+
+// A stray rejection (an upstream stream erroring after its response was
+// abandoned, say) is one request's problem; it must not take the process —
+// and every other site with it — down.
+process.on('unhandledRejection', (e) => console.error('unhandled rejection:', e))
+
 server.listen(PORT, () => {
   console.log(`wei.limo gateway listening on :${PORT}`)
 })
@@ -53,5 +82,7 @@ server.listen(PORT, () => {
 // Let in-flight requests finish on a redeploy
 process.on('SIGTERM', () => {
   server.close(() => process.exit(0))
+  // close() waits for keep-alive sockets; idle ones can go now.
+  server.closeIdleConnections?.()
   setTimeout(() => process.exit(0), 10_000).unref()
 })

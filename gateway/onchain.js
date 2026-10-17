@@ -45,6 +45,41 @@ const MAX_HEADER_DECODE_LEN = 16 * 1024
 // Longer than a registry lookup: a page read returns the whole document.
 const PAGE_TIMEOUT_MS = 15_000
 
+// The RPC reply a page read may be: the body's hex, the header strings, and the
+// JSON around them. Past this the reply is refused unread (see wns.js).
+const PAGE_MAX_RESPONSE_BYTES = 2 * MAX_BODY_BYTES + 4 * 1024 * 1024
+
+// Page reads get their own, smaller share of the RPC semaphore in wns.js. They
+// are whole documents and slow, and a 5219 contract answers per URL, so a flood
+// of fresh `?x=N` is a flood of page reads; capped here, it queues behind other
+// page reads and leaves the rest of the slots to the registry lookups every
+// other name needs to resolve at all. Also what bounds the memory they hold.
+const PAGE_MAX_INFLIGHT = 8
+const PAGE_MAX_QUEUE = 100
+let pageBusy = 0
+const pageWaiting = []
+
+async function pageCall(data, address, opts) {
+  if (pageBusy < PAGE_MAX_INFLIGHT) pageBusy++
+  else if (pageWaiting.length >= PAGE_MAX_QUEUE) {
+    const e = new Error('gateway busy: page queue full')
+    e.overloaded = true
+    throw e
+  } else await new Promise((resolve) => pageWaiting.push(resolve)) // slot handed over
+  try {
+    return await ethCall(data, {
+      ...opts,
+      contract: address,
+      timeoutMs: opts?.pageTimeoutMs || PAGE_TIMEOUT_MS,
+      maxResponseBytes: PAGE_MAX_RESPONSE_BYTES,
+    })
+  } finally {
+    const next = pageWaiting.shift()
+    if (next) next()
+    else pageBusy--
+  }
+}
+
 // What a page gets when it doesn't say. `html()` has nowhere to put a
 // Cache-Control at all, and an ERC-5219 contract may simply omit one — 5
 // minutes is short enough that a name repointed on chain goes live promptly.
@@ -282,11 +317,7 @@ export async function fetchErc5219(address, pathname, search, opts) {
   const resource = pathToResource(pathname)
   const params = [...new URLSearchParams(search || '')].map(([k, v]) => [k, v])
   const fetchedAt = Date.now()
-  const res = await ethCall(encodeRequestCall(resource, params), {
-    ...opts,
-    contract: address,
-    timeoutMs: opts?.pageTimeoutMs || PAGE_TIMEOUT_MS,
-  })
+  const res = await pageCall(encodeRequestCall(resource, params), address, opts)
   if (!res || res === '0x') return null
   // Two hex chars per byte, plus the leading `0x`.
   if (res.length > 2 * MAX_BODY_BYTES + 2) throw new Error('page exceeds size cap')
@@ -312,12 +343,11 @@ export async function fetchErc8244(address, opts) {
   const fetchedAt = Date.now()
   let res
   try {
-    res = await ethCall(HTML, {
-      ...opts,
-      contract: address,
-      timeoutMs: opts?.pageTimeoutMs || PAGE_TIMEOUT_MS,
-    })
+    res = await pageCall(HTML, address, opts)
   } catch (e) {
+    // Bigger than any page this gateway serves: not a page, and cacheably so,
+    // rather than a 502 that re-reads the whole thing on every request.
+    if (e?.tooLarge) return null
     // A contract without `html()` reverts, which reaches us as a throw — same
     // shape as every endpoint being down. `rpcError` means a node answered and
     // the CALL failed, so pair it with a revert-shaped message before deciding

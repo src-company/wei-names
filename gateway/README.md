@@ -185,10 +185,11 @@ The gateway also keeps a `RESERVED_LABELS` guard as defense-in-depth.
 | `WEB3_CHAIN_ID` | `1` | Chain id used in the web3:// gateway host (mainnet) |
 | `RPC_URLS` | built-in list | Comma-separated mainnet RPCs. **Set a dedicated authenticated endpoint in production** — see [Load behaviour](#load-behaviour) |
 | `PROXY_TIMEOUT_MS` | `8000` | How long an upstream IPFS gateway gets to return **headers** in `proxy` mode. Not the body — the transfer is uncapped, only the connect-and-hang is. Exceeding it fails over to the next entry and benches this one |
+| `PROXY_IDLE_TIMEOUT_MS` | `20000` | How long an upstream body may go without sending a chunk in `proxy` mode. A stall ends the response (a `502` if nothing was sent yet) instead of holding the connection, and every request coalesced behind it, open indefinitely. Only counts while the gateway is waiting on the upstream, so a slow client never trips it |
 | `PAGE_TIMEOUT_MS` | `15000` | Per-endpoint timeout for contract page reads (`request()` / `html()`), which return whole documents — longer than a registry lookup's `5000` |
 | `WNS_CONTRACT` | mainnet WNS | Override the registry address |
 | `RESERVED_LABELS` | — | Extra labels to never treat as `.wei` names (added to the built-in set, which is empty) |
-| `RATE_LIMIT_RPS` | `15` | Sustained requests per second per client, token-bucket. `0` disables the limiter |
+| `RATE_LIMIT_RPS` | `15` | Sustained requests per second per client (IPv6 clients by `/64`), token-bucket. `0` disables the limiter, and the per-client concurrency gate with it |
 | `RATE_LIMIT_BURST` | `100` | Requests a client may make back-to-back before the sustained rate applies. Generous because one page load pulls many assets |
 | `ZONE` | `wei.limo,wei.is,wei.domains` | Comma-separated zones this gateway serves. Must include every zone whose `*.<zone>` wildcard points here |
 | `PORT` | `8080` | Node server only |
@@ -229,8 +230,10 @@ actually answered.
 Two things stop a failover list from being slower than no list at all:
 
 - **A timeout.** `PROXY_TIMEOUT_MS` (8s) caps how long an upstream gets to
-  return *headers*. Bodies stream uncapped — the semaphore slot is released once
-  headers land, so a large file costs bandwidth, not a slot. Without this cap a
+  return *headers*. Bodies stream uncapped in size — the semaphore slot is
+  released once headers land, so a large file costs bandwidth, not a slot — but
+  not in time: a body that sends nothing for `PROXY_IDLE_TIMEOUT_MS` (20s) is cut
+  off. Without this cap a
   gateway that accepts the connection and then hangs holds a slot until the
   runtime's own default gives up, and a list turns that from one stall into one
   stall *per entry, in series*. `wns.js` documents the same failure for
@@ -376,6 +379,26 @@ range. Invalid configuration fails startup; invalid headers fall back to the
 socket peer. Without this setting, visitors behind a proxy share its budget.
 This limits one source; a distributed flood still spreads across addresses.
 
+**A client also gets a bounded share of the gateway at any one moment.** The
+rate limit bounds how often a client asks, not how much it holds: a request for
+content nobody pins waits out `PROXY_TIMEOUT_MS`, so 15/s of those would hold
+every upstream slot. At most 8 of one client's requests are worked on at once,
+the next 64 queue in order (a page load firing many asset requests is served,
+not refused), and anything past that is a `429`. Contract page reads have their
+own 8-wide share of the RPC semaphore, so a flood of fresh `?x=N` on a 5219
+name queues behind other page reads instead of starving the registry lookups
+every other name needs. RPC replies are capped (1 MB for a registry call, the
+page cap plus headers for a page read) and refused unread past that.
+
+**An RPC outage does not take IPFS sites down with it.** The last IPFS/IPNS
+target a name resolved to is kept for an hour and served only when resolution
+*fails* (every endpoint down, or the RPC queue full); whenever the chain
+answers, its answer wins. Contract pages never fall back this way — an expired
+page is never served (see [`cache.js`](cache.js)). Names that resolve to
+nothing are cached apart from names that do, so a flood of random labels
+cannot evict the live ones, and a name's tokenId (a pure namehash) is held for
+a day.
+
 **Proxy-mode bodies are held, and one name cannot evict another.** In `proxy`
 mode the gateway fetches the whole document from the IPFS gateway on every hit;
 the resolution cache spares the RPC and nothing else. Bodies are now held for
@@ -383,10 +406,21 @@ the resolution cache spares the RPC and nothing else. Bodies are now held for
 change — while `ipns` stays uncached, because it is resolved fresh each request
 so an owner can update a site with no on-chain transaction. Anything over 2 MB
 streams straight through rather than being buffered. The outbound fetch has its
-own semaphore (10 concurrent) and joins an in-flight fetch for the same key, and
+own semaphore (32 concurrent) and joins an in-flight fetch for the same key, and
 the page cache caps any one contract's share at an eighth of the budget, so a
 single name answering on many URLs evicts its own oldest entries instead of
 every other name's.
+
+**Upstream redirects reach the browser; ranges and validators reach the
+upstream.** A path gateway answers a directory without its trailing slash with
+`301 /ipfs/<cid>/docs/`. Following that inside the gateway served
+`docs/index.html` *at* `/docs`, one level too high for every relative link in
+it, so upstream redirects are no longer followed: one that stays inside the
+content is handed to the visitor as a path on `<name>.<zone>` (`/docs/`), and
+one that leaves it is treated as a failed upstream. `Range` is forwarded (a
+`206` and its `content-range` pass back, never cached), so media can seek. A
+held body answers `If-None-Match` itself with a `304`; anything not held passes
+the validators upstream and its `304` back.
 
 **Query parameters that change nothing cannot mint cache entries.** An IPFS
 gateway answers `?format=raw`, `?download=` and the CAR/DAG selectors
