@@ -6281,6 +6281,9 @@ async function refreshRoll() {
     return;
   }
   const me = window._connectedAddress || null;
+  // The price depends on nothing below — start it now rather than as a last round-trip.
+  // (A microtask later: the #roll deep link runs this before rollEthUsd's state is declared.)
+  const usdP = Promise.resolve().then(rollEthUsd).catch(() => null);
   try {
     // Every read here fans out. Walking the rounds sequentially meant ~20 chained
     // round-trips against the shared public FallbackProvider — and because withRpc
@@ -6314,18 +6317,20 @@ async function refreshRoll() {
       const claimable = claimRounds.filter((_, i) => claimFlags[i]);
 
       // Resolve winner names via NameNFT.
+      // ...alongside the field's names + owners (one multicall, optional) — neither waits on the other.
       const nft = new ethers.Contract(CONTRACT, ABI, p);
       const names = {};
-      await Promise.all(infos.map(async ([r, info]) => {
-        if (info.settled && info.winner !== 0n) {
-          try { names[r] = await nft.getFullName(info.winner); } catch (_) { names[r] = null; }
-        }
-      }));
-      return { st, round, infos, claimable, names, draw, tickets };
+      const [, field] = await Promise.all([
+        Promise.all(infos.map(async ([r, info]) => {
+          if (info.settled && info.winner !== 0n) {
+            try { names[r] = await nft.getFullName(info.winner); } catch (_) { names[r] = null; }
+          }
+        })),
+        rollBuildField(tickets, me).catch(() => null)
+      ]);
+      return { st, round, infos, claimable, names, draw, tickets, field };
     });
-    // Resolve the field's names + owners in one multicall, and the ETH price — both optional.
-    data.field = await rollBuildField(data.tickets, me).catch(() => null);
-    data.usd = await rollEthUsd().catch(() => null);
+    data.usd = await usdP;
     if (seq !== _rollRefreshSeq) return;   // a newer refresh (e.g. account switch) owns the panel
     _rollPhase = Number(data.st.phase);
     renderRoll(body, data, me);
