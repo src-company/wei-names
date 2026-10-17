@@ -10,9 +10,26 @@ function ip(value) {
   return isIP(address) ? address : null
 }
 
+// Cloudflare's published edge ranges (cloudflare.com/ips-v4, /ips-v6; checked
+// 2026-10-17). `cloudflare` in TRUSTED_PROXY_CIDRS stands for all of them.
+// Render's own edge is Cloudflare: a request reaches Node as peer 10.x with
+// `X-Forwarded-For: <client>, <cloudflare edge>`, so without these the walk
+// stops at the edge IP — which rotates per request, so no client's requests
+// ever add up, while everyone behind the same edge IP shares one budget.
+export const CLOUDFLARE_CIDRS = [
+  '173.245.48.0/20', '103.21.244.0/22', '103.22.200.0/22', '103.31.4.0/22',
+  '141.101.64.0/18', '108.162.192.0/18', '190.93.240.0/20', '188.114.96.0/20',
+  '197.234.240.0/22', '198.41.128.0/17', '162.158.0.0/15', '104.16.0.0/13',
+  '104.24.0.0/14', '172.64.0.0/13', '131.0.72.0/22',
+  '2400:cb00::/32', '2606:4700::/32', '2803:f800::/32', '2405:b500::/32',
+  '2405:8100::/32', '2a06:98c0::/29', '2c0f:f248::/32',
+]
+
 export function createClientIdentity(env = {}) {
   const proxies = new BlockList()
-  for (const entry of String(env.TRUSTED_PROXY_CIDRS || '').split(',').map(s => s.trim()).filter(Boolean)) {
+  const entries = String(env.TRUSTED_PROXY_CIDRS || '').split(',').map(s => s.trim()).filter(Boolean)
+    .flatMap(entry => (entry.toLowerCase() === 'cloudflare' ? CLOUDFLARE_CIDRS : [entry]))
+  for (const entry of entries) {
     const parts = entry.split('/')
     const address = ip(parts[0])
     if (!address || parts.length > 2) throw new Error('Invalid TRUSTED_PROXY_CIDRS entry')

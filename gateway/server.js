@@ -23,12 +23,7 @@ function badRequest(res) {
   res.end('Bad Request')
 }
 
-let xffSamples = 30
 const server = createServer(async (req, res) => {
-  if (xffSamples > 0 && req.url !== '/healthz') {
-    xffSamples--
-    console.log('xff-probe', JSON.stringify({ peer: req.socket?.remoteAddress, xff: req.headers['x-forwarded-for'], id: clientIdentity(req), url: req.url }))
-  }
   // A forged Host or request target is the client's problem, not a gateway
   // error: answered here, before it can throw below and log a stack per request.
   // Only origin-form targets (`/path`); a proxy may list several hosts, first wins.

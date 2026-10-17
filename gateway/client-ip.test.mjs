@@ -40,6 +40,15 @@ for (const config of ['garbage', '10.0.0.1/33', '10.0.0.1/-1', '10.0.0.1/24/1', 
   assert.throws(() => createClientIdentity({ TRUSTED_PROXY_CIDRS: config }))
 }
 
+// Render: peer is its internal proxy, then the client, then a Cloudflare edge
+// that rotates per request. The client is the hop before Cloudflare's, and a
+// prepended value never gets that far.
+const render = createClientIdentity({ TRUSTED_PROXY_CIDRS: '10.0.0.0/8, cloudflare' })
+assert.equal(render(req('::ffff:10.192.8.35', { 'x-forwarded-for': '4.155.74.49, 172.68.22.107' })), '4.155.74.49')
+assert.equal(render(req('::ffff:10.192.8.35', { 'x-forwarded-for': '4.155.74.49, 172.71.151.90' })), '4.155.74.49')
+assert.equal(render(req('::ffff:10.192.8.35', { 'x-forwarded-for': '6.6.6.6,4.155.74.49, 172.71.151.90' })), '4.155.74.49')
+assert.equal(render(req('::ffff:10.192.8.35', { 'x-forwarded-for': '2001:db8::5, 2606:4700::1' })), '2001:db8::5')
+
 // Worker identity is platform-supplied; unrelated XFF cannot rotate it.
 buckets.clear()
 for (let n = 0; n < 4; n++) {

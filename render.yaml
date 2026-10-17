@@ -198,6 +198,8 @@ services:
       # to socket identity. Configure TRUSTED_PROXY_CIDRS in the dashboard with
       # the actual ingress proxy networks to separate client budgets behind it;
       # otherwise visitors share the proxy's budget. See gateway/README.md.
+      # On Render: 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10,cloudflare
+      # (Render's edge is Cloudflare and puts its edge IP after the client's).
       - key: TRUSTED_PROXY_CIDRS
         sync: false
       - key: RATE_LIMIT_RPS

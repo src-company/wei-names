@@ -377,6 +377,11 @@ proxy must append the peer it observed or overwrite the header, and clients
 must not be able to connect from a trusted network. Never use an all-addresses
 range. Invalid configuration fails startup; invalid headers fall back to the
 socket peer. Without this setting, visitors behind a proxy share its budget.
+The entry `cloudflare` stands for Cloudflare's published edge ranges. Render
+needs it: its edge is Cloudflare, so a request arrives from a 10.x peer with
+`X-Forwarded-For: <client>, <cloudflare edge>`, and without it the walk stops at
+the edge IP, which changes per request. On Render use
+`10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10,cloudflare`.
 This limits one source; a distributed flood still spreads across addresses.
 
 **A client also gets a bounded share of the gateway at any one moment.** The
