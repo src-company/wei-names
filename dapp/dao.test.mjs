@@ -160,5 +160,23 @@ const { ctx, run } = sandbox();
      /\$\("cdsec"\)\.style\.display=""/.test(JS));
 }
 
+// ── a veto that cannot reach the bar must say so, like the support track does
+{
+  // Backing a veto with every name you own still tops out below the threshold if
+  // your weight is under W_req. The page showed it creeping up from 0.0% with no
+  // hint it would never arrive — the same blind spot that cost a real decision.
+  ok('the veto bar gets the dead treatment when its ceiling falls short',
+     /vetoStalled=p\.VW!==undefined&&p\.VW>0n&&!reaches\(p\.VW\)/.test(JS));
+  ok('and it names the shortfall in ETH',
+     /veto is building but cannot reach the threshold/.test(JS)
+  && /it needs \$\{fmt\(T\*\(SCALE-AL\)\/SCALE-p\.VW,6\)\} ETH more/.test(JS));
+  ok('ConvictionVeto supportWeight is actually read',
+     /vprops:"fda54c16"/.test(JS) && /to:CV ,data:"0x"\+S\.vprops/.test(JS));
+  ok('a live but tiny position is not rounded away to 0.0%',
+     /v>0&&v<0\.1\?"&lt;0\.1%"/.test(JS));
+  ok('the ceiling test uses the DAO\'s live alpha, not a hardcoded one',
+     /const AL=DAOINFO\.alpha/.test(JS) && !/SCALE-ALPHA\)/.test(JS));
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
