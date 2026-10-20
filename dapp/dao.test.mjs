@@ -178,5 +178,29 @@ const { ctx, run } = sandbox();
      /const AL=DAOINFO\.alpha/.test(JS) && !/SCALE-ALPHA\)/.test(JS));
 }
 
+// ── passed-but-unexecutable proposals are set aside, not hidden
+{
+  // #8 passed months ago and can never execute: it is a zero-value call into
+  // roll.wei's receive(), which stakes the contract's whole ETH balance, and Lido
+  // rejects a zero deposit. Nothing in the stored proposal says so — the page has
+  // to simulate execute() to find out.
+  ok('the page simulates execute() rather than guessing from calldata',
+     /async function probeExecutable\(\)/.test(JS)
+  && /method:"eth_call",params:\[\s*\{from:"0x000000000000000000000000000000000000dEaD",to:DAO,data:"0x"\+S\.execute/.test(JS));
+  ok('only passed, un-timelocked, still-open proposals are probed',
+     /!p\.executed&&!p\.vetoed&&p\.C!==undefined\s*&&p\.C>=DAOINFO\.T&&Date\.now\(\)\/1000>=p\.created\+DAOINFO\.delay/.test(JS));
+  ok('a failed probe claims nothing rather than guessing',
+     /catch\(_\)\{ p\.stuck=undefined; \}/.test(JS));
+  ok('ExecutionFailed is translated into a reason a reader can act on',
+     /"0xacfdb444":"the target call reverts"/.test(JS));
+  ok('stuck proposals leave the live list', /!p\.executed&&!p\.vetoed&&!p\.stuck/.test(JS));
+  ok('...but are still reachable, counted in the disclosure',
+     /p\.stuck\),"unexecutable"/.test(JS) && /<details><summary>/.test(JS));
+  ok('and say why they cannot execute',
+     /passed, but executing reverts/.test(JS));
+  ok('the empty live list reads as a state, not an error',
+     /no proposals need a decision right now/.test(JS));
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

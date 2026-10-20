@@ -95,6 +95,7 @@ pre{border:1px solid var(--frame);padding:10px 12px !important;overflow:auto;max
 .pill.exec{color:var(--ok)}
 .pill.veto{color:var(--bad)}
 .pill.ready{color:var(--fg);background:var(--fg);color:var(--bg);border-color:var(--fg)}
+.pill.stuck{color:var(--fg-dim)}
 .bars{display:grid;grid-template-columns:54px 1fr 64px;gap:12px;align-items:center;
       font-size:10px;letter-spacing:0.1em;text-transform:uppercase;margin:8px 0;color:var(--fg-muted)}
 .bars > span:last-child{text-align:right;font-variant-numeric:tabular-nums;letter-spacing:0.02em;color:var(--fg)}
@@ -112,6 +113,16 @@ pre{border:1px solid var(--frame);padding:10px 12px !important;overflow:auto;max
 .tbtn:hover:not(:disabled){background:none;color:var(--fg);border-bottom-color:var(--fg)}
 .tbtn.warn{color:var(--bad);border-bottom-color:currentColor}
 
+/* settled proposals: one line until asked for, then the same cards */
+#archive{margin-top:30px}
+#archive details{border-top:1px solid var(--border);padding-top:16px}
+#archive summary{list-style:none;cursor:pointer;font-size:10px;letter-spacing:0.12em;
+                 text-transform:uppercase;color:var(--fg-dim);padding:2px 0}
+#archive summary::-webkit-details-marker{display:none}
+#archive summary::before{content:"+ ";font-family:ui-monospace,monospace}
+#archive details[open] summary::before{content:"\2212 "}
+#archive summary:hover{color:var(--fg)}
+#archive .arch{margin-top:14px}
 .scroll{max-height:250px;overflow:auto}
 table{width:100%;border-collapse:collapse;font-size:13px}
 th{text-align:left;color:var(--fg-dim);font-weight:400;font-size:10px;text-transform:uppercase;
@@ -175,15 +186,13 @@ footer a{text-decoration:none}
 </section>
 
 <section><h2>Proposals</h2>
-<div class="note" style="margin-bottom:20px">Descriptions are read from <code>ProposalCreated</code> logs,
-so they survive even where a proposal's <code>&lt;id&gt;.dao.wei</code> record was never written &mdash;
-three of these have none on-chain.</div>
+<div class="note" style="margin-bottom:22px">Descriptions are read from <code>ProposalCreated</code> logs,
+so they survive even where a proposal's <code>&lt;id&gt;.dao.wei</code> record was never written.</div>
 <div class="row" style="margin-bottom:26px">
 <button class="sec sm" id="refresh">Refresh</button>
-<label style="margin:0;display:flex;align-items:center;gap:7px;text-transform:none;letter-spacing:normal;font-size:12px;color:var(--fg-muted)">
-<input type="checkbox" id="showClosed"> show closed</label>
 <span id="plist-info" class="dim" style="margin-left:auto;font-size:11px"></span></div>
-<div id="plist"><div class="dim">loading…</div></div></section>
+<div id="plist"><div class="dim">loading…</div></div>
+<div id="archive"></div></section>
 
 <section><h2>New proposal</h2>
 <label>target — address or .wei name<input id="f-target" placeholder="roll.wei"></label>
@@ -399,8 +408,27 @@ async function loadProposals(){
       VW:vp===null?undefined:word(vp,2)});   // props() = (lastUpdate, conviction, supportWeight)
   }
   renderProposals();
+  await probeExecutable();   // second pass once we know which ones actually run
+  renderProposals();
+}
+// A proposal can pass, clear its timelock, and still be impossible to execute:
+// WeiDAO reverts ExecutionFailed when the target's own call reverts. Nothing in
+// the stored proposal says so — only a simulation does — so ask the chain.
+const REVERTS={"0xacfdb444":"the target call reverts","0x6fed7d85":"still timelocked",
+               "0xefde6dcf":"below threshold","0xdf92a046":"vetoed","0x0dc10197":"already executed"};
+async function probeExecutable(){
+  const cands=PROPS.filter(p=>!p.unread&&!p.executed&&!p.vetoed&&p.C!==undefined
+    &&p.C>=DAOINFO.T&&Date.now()/1000>=p.created+DAOINFO.delay);
+  for(const p of cands){
+    try{
+      const j=await node([{jsonrpc:"2.0",id:1,method:"eth_call",params:[
+        {from:"0x000000000000000000000000000000000000dEaD",to:DAO,data:"0x"+S.execute+h(p.id)},"latest"]}]);
+      p.stuck=j[0].error?(REVERTS[j[0].error.data]||"reverts on execute"):null;
+    }catch(_){ p.stuck=undefined; }   // could not ask — claim nothing
+  }
 }
 function statusOf(p){
+  if(p.stuck) return ["stuck","passed \u00b7 cannot execute"];
   if(p.executed) return ["exec","executed"];
   if(p.vetoed)   return ["veto","vetoed"];
   if(p.C!==undefined&&p.C>=DAOINFO.T)
@@ -408,11 +436,24 @@ function statusOf(p){
   return ["open","open"];
 }
 function renderProposals(){
-  const showClosed=$("showClosed").checked;
-  const list=PROPS.slice().reverse().filter(p=>showClosed||!(p.executed||p.vetoed));
-  $("plist-info").textContent=`${list.length} shown of ${PROPS.length}`;
-  if(!list.length){ $("plist").innerHTML='<div class="dim">nothing open</div>'; return; }
-  $("plist").innerHTML=list.map(p=>{
+  const all=PROPS.slice().reverse();
+  // Live = still decidable. Everything settled — executed, vetoed, or passed but
+  // unable to execute — moves behind one disclosure: out of the way, still there.
+  const live=all.filter(p=>!p.unread&&!p.executed&&!p.vetoed&&!p.stuck);
+  const done=all.filter(p=>p.unread||p.executed||p.vetoed||p.stuck);
+  $("plist").innerHTML=live.length?live.map(card).join("")
+    :'<div class="dim">no proposals need a decision right now</div>';
+  const n=(f)=>done.filter(f).length;
+  const bits=[[n(p=>p.executed),"executed"],[n(p=>p.vetoed),"vetoed"],
+              [n(p=>p.stuck),"unexecutable"],[n(p=>p.unread),"unreadable"]]
+             .filter(([c])=>c).map(([c,l])=>`${c} ${l}`);
+  $("archive").innerHTML=done.length
+    ? `<details><summary>${bits.join(" &middot; ")}</summary><div class="arch">${done.map(card).join("")}</div></details>`
+    : "";
+  $("plist-info").textContent=`${live.length} open of ${PROPS.length}`;
+}
+function card(p){
+  {
     if(p.unread) return `<div class="prop"><span class="pid">#${p.id}</span> <span class="bad">could not read</span></div>`;
     const meta=DESCS[p.id]||{};
     const [cls,label]=statusOf(p);
@@ -439,6 +480,8 @@ function renderProposals(){
         ${meta.who?`<span>${esc(meta.who)}</span>`:''}
         <span class="pval">${p.value===0n?"&mdash;":fmt(p.value)+" ETH"}</span></div>
       <div class="pdesc">${meta.desc?esc(meta.desc):'<span class="dim">no description in logs</span>'}</div>
+      ${p.stuck?`<div class="pnote"><span class="warn">passed, but executing reverts &mdash; ${esc(p.stuck)}.
+        It cannot be executed as written and stays open until vetoed.</span></div>`:''}
       <div class="pnote">calls ${eslink(p.target)} with <code>${p.data==="0x"?"empty calldata":esc(p.data.slice(0,42))+(p.data.length>42?"…":"")}</code></div>
       <div class="bars" style="margin-top:14px"><span>support</span>
         <div class="bar${stalled?' dead':''}"><i style="width:${pct(p.C)}%"></i></div>
@@ -460,7 +503,7 @@ function renderProposals(){
         <button class="tbtn" onclick="stageRoleVeto(${p.id})">Role-veto calldata</button>
       </div>`}
     </div>`;
-  }).join("");
+  }
 }
 
 /* ---------------- names ---------------- */
@@ -714,7 +757,6 @@ $("connect").onclick=()=>{
 $("rescan").onclick=()=>scanNames(true);
 $("selAll").onchange=()=>{ const v=$("selAll").checked; NAMES.forEach(n=>n.sel=v); renderNames(); };
 $("refresh").onclick=refreshAll;
-$("showClosed").onchange=renderProposals;
 $("copy").onclick=()=>navigator.clipboard.writeText($("cd").textContent).then(()=>log("copied","dim"),()=>log("copy failed","bad"));
 $("toaddr").textContent=DAO;
 
