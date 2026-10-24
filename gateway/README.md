@@ -183,12 +183,14 @@ The gateway also keeps a `RESERVED_LABELS` guard as defense-in-depth.
 | `IPFS_PATH_GATEWAY` | `https://ipfs.filebase.io` | Path gateways → `<origin>/ipfs/<cid>/<path>`. Comma-separated, tried after every subdomain entry, **`proxy` mode only**; `off` for none. Filebase is path style only — `<cid>.ipfs.filebase.io` does not resolve. The gateway reads the site's `_redirects` itself here (exact rules only) — see [`_redirects` on a path gateway](#_redirects-on-a-path-gateway). |
 | `WEB3_GATEWAY` | `w3link.io` | web3:// HTTP gateways for on-chain (ERC-4804) dapps → `https://<addr>.<chainId>.<gw>`. Comma-separated, same failover rules |
 | `WEB3_CHAIN_ID` | `1` | Chain id used in the web3:// gateway host (mainnet) |
-| `RPC_URLS` | built-in list | Comma-separated mainnet RPCs. **Set a dedicated authenticated endpoint in production** — see [Load behaviour](#load-behaviour) |
+| `RPC_URLS` | built-in list | Comma-separated mainnet RPCs, preferred over the built-in public pool, which backs them up when they fail and takes their overflow when they are saturated. **Set dedicated authenticated endpoints in production** — see [Load behaviour](#load-behaviour) |
 | `PROXY_TIMEOUT_MS` | `8000` | How long an upstream IPFS gateway gets to return **headers** in `proxy` mode. Not the body — the transfer is uncapped, only the connect-and-hang is. Exceeding it fails over to the next entry and benches this one |
 | `PROXY_IDLE_TIMEOUT_MS` | `20000` | How long an upstream body may go without sending a chunk in `proxy` mode. A stall ends the response (a `502` if nothing was sent yet) instead of holding the connection, and every request coalesced behind it, open indefinitely. Only counts while the gateway is waiting on the upstream, so a slow client never trips it |
 | `PAGE_TIMEOUT_MS` | `15000` | Per-endpoint timeout for contract page reads (`request()` / `html()`), which return whole documents — longer than a registry lookup's `5000` |
 | `WNS_CONTRACT` | mainnet WNS | Override the registry address |
 | `RESERVED_LABELS` | — | Extra labels to never treat as `.wei` names (added to the built-in set, which is empty) |
+| `PAGE_READS_PER_SEC` | `2` | Sustained *cold* page reads per contract address, whoever asks, token-bucket. Cached pages never spend from it. Past it a fresh URL on that address is a `503` + `Retry-After` instead of another whole-document `eth_call` |
+| `PAGE_READS_BURST` | `60` | Cold page reads an address may make back-to-back — a first page load's distinct asset paths |
 | `RATE_LIMIT_RPS` | `15` | Sustained requests per second per client (IPv6 clients by `/64`), token-bucket. `0` disables the limiter, and the per-client concurrency gate with it |
 | `RATE_LIMIT_BURST` | `100` | Requests a client may make back-to-back before the sustained rate applies. Generous because one page load pulls many assets |
 | `ZONE` | `wei.limo,wei.is,wei.domains` | Comma-separated zones this gateway serves. Must include every zone whose `*.<zone>` wildcard points here |
@@ -352,10 +354,31 @@ Measured against mainnet through one authenticated endpoint:
 | 200 further reads (warm) | **0** | 149 ms |
 | 100 distinct `NN.zswap.wei.limo` junk hosts | **0** | 15 ms |
 
-The RPC layer also rotates across endpoints rather than always starting at the
-first, benches one that times out or rate-limits for 30s instead of paying its
-timeout on every request, caps concurrent outbound calls, and sheds load with
-`503` + `Retry-After` rather than queueing without bound.
+**The RPC pool adapts to what the endpoints sustain.** Each endpoint has its
+own in-flight limit, found by AIMD: +1/limit per success, halved on a 429, a
+rate-limit error or a timeout. The gateway's total capacity is the sum over
+healthy endpoints (8–192), so it scales with the endpoints rather than a fixed
+cap, and contracts the moment one pushes back. Calls go to the endpoint with
+room and the lowest latency × load, `RPC_URLS` before the public pool. A
+refusing endpoint is benched for its `Retry-After`, else 5s doubling to 2min,
+and returns at its reduced limit so it ramps up instead of being slammed.
+Beyond the queue the gateway sheds load with `503` + `Retry-After`.
+
+**Registry reads are batched.** A name's `resolve` + `contenthash` go out as one
+Multicall3 `eth_call`, with the `resolveMode()` of the address the name had last
+time riding along. Re-resolving a contract page is one call, not three; a cold
+name is two plus its page. A node without Multicall3 falls back to plain calls.
+
+**Hot entries are renewed before they expire.** A hit in the last quarter of its
+life starts a background re-read while the RPC pool is idle, so a popular name
+or page never makes a visitor wait on a cold read and its expiry no longer lines
+everyone up behind one call. Nothing is served past its TTL.
+
+**Scanner probes cost nothing.** On a 5219 page, any path segment starting with
+`.` (`/.env`, `/.git/config`, …; `/.well-known/` excepted) is a `404` before any
+RPC. A contract's "nothing here" is held for 60s so one probe across a name's
+hostnames is one read, and each address's cold reads are budgeted
+(`PAGE_READS_PER_SEC` / `PAGE_READS_BURST`) however many IPs ask.
 
 **One client cannot spend everyone's budget.** The caches above make a
 *repeated* URL cheap, and the semaphores keep the process upright, but neither
@@ -442,9 +465,11 @@ IPFS for a name that is a contract page and never touches IPFS, and recommended
 an env var that path ignores. Check the header before concluding what this
 gateway is doing.
 
-**In production, set `RPC_URLS` to a dedicated authenticated endpoint.** The
-built-in public list is a fallback for local use; it will rate-limit under real
-traffic. Keep the key in the host's dashboard — `render.yaml` marks `RPC_URLS`
+**In production, set `RPC_URLS` to dedicated authenticated endpoints — two
+providers, not one.** The built-in public pool backs them up and absorbs
+overflow, but it is less trustworthy and rate-limits sooner, and one key on one
+provider is a single point of failure: on 2026-10-24 a rate-limited Tenderly
+key 502'd every name until the public fallback existed. Keep the key in the host's dashboard — `render.yaml` marks `RPC_URLS`
 `sync: false` so it never enters git.
 
 ## Operator note: the Public Suffix List

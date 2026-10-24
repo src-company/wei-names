@@ -8,7 +8,7 @@
 // Runtime-agnostic: takes a standard `Request`, returns a standard `Response`.
 // Used by both worker.js (Cloudflare) and server.js (Node/Railway).
 
-import { computeId, contenthashOf, resolveAddress, resolveMode, WEB3_MODES } from './wns.js'
+import { computeId, contenthashOf, registryRecords, resolveAddress, resolveMode, rpcIdle, WEB3_MODES } from './wns.js'
 import { namesFromPunycode } from './punycode.js'
 import { decodeContenthash } from './contenthash.js'
 import { fetchErc5219, fetchErc8244 } from './onchain.js'
@@ -60,6 +60,25 @@ const staleResolutions = new TtlCache({ maxEntries: 5_000 })
 const TOKEN_ID_TTL_MS = 86_400_000
 const tokenIds = new TtlCache({ maxEntries: 20_000 })
 
+// The address each name last resolved to. Only ever a guess — handed to
+// registryRecords() so the next resolution can batch that address's
+// resolveMode() with the registry reads, and checked against the fresh addr
+// record before it is used. A wrong guess costs one extra call, never an answer.
+const lastAddress = new TtlCache({ maxEntries: 20_000 })
+
+// Refresh-ahead: a hit in the last quarter of its life starts a background
+// re-read, so a hot name or page is renewed before it expires instead of making
+// its next visitor wait on a cold read — and a popular entry's expiry no longer
+// lines up every one of its visitors behind the same RPC. The visitor still
+// gets the unexpired entry; nothing is served past its TTL. Only while the RPC
+// pool is idle (rpcIdle), so renewing never competes with real traffic.
+const REFRESH_AHEAD = 0.25
+
+function nearExpiry(cache, key, lifetimeMs, now) {
+  const expires = cache.expiresAt(key)
+  return expires !== undefined && expires - now < lifetimeMs * REFRESH_AHEAD
+}
+
 // Contract page bodies, held for exactly as long as the contract's own
 // Cache-Control allows (see cache.js). This is the difference between one
 // `eth_call` per request and one per TTL: a hot page is a few hundred KB of
@@ -84,6 +103,28 @@ const pageCache = new TtlCache({
 // because on a cold entry every one of them misses at the same instant.
 const resolveInflight = new Map()
 const pageInflight = new Map()
+
+// What one contract page may cost, whoever is asking. A 5219 contract is handed
+// path and query, so every URL nobody has asked for yet is a full-document
+// eth_call — 667 KB for zswap — and secrets scanners rotating across IPs walk
+// `/.env`, `/.git/config`, … on every name they find. The per-client limit
+// can't see that; this can. Cached pages are always served; only cold reads
+// spend from the address's bucket, and past it the gateway answers 503 rather
+// than spending the RPC budget every other name shares.
+const PAGE_READS_PER_SEC = 2
+const PAGE_READS_BURST = 60
+export const pageBuckets = new Map()
+
+// Contract answers of "nothing here", per page key, for as long as a name miss
+// is held. Nothing to honour a Cache-Control on — there is no page — and
+// without it the same probe on the name's four hostnames is four reads.
+const emptyPages = new TtlCache({ maxEntries: 5_000 })
+
+// Dot-segments (`/.env`, `/.git/config`, `/x/.npmrc`) are what scanners probe
+// and what no on-chain dapp serves. `/.well-known/` is the one legitimate one.
+function isProbePath(pathname) {
+  return pathname.split('/').some((seg, i) => seg.startsWith('.') && !(i === 1 && seg === '.well-known'))
+}
 
 // Proxy-mode bodies. In `redirect` mode the gateway is never in the data path,
 // but in `proxy` mode it fetches the whole document from the IPFS gateway on
@@ -427,22 +468,22 @@ export const buckets = new Map()
 // Callers without transport context share a bucket rather than trusting headers.
 
 // True when this request is over budget. Charges a token when it isn't.
-function rateLimited(key, now, rps, burst) {
+function rateLimited(key, now, rps, burst, map = buckets) {
   if (rps <= 0) return false
-  let b = buckets.get(key)
+  let b = map.get(key)
   if (!b) {
     b = { tokens: burst, last: now }
     // Touch-on-write keeps insertion order meaningful for eviction below.
-    if (buckets.size >= RATE_LIMIT_MAX_CLIENTS) {
-      const oldest = buckets.keys().next()
-      if (!oldest.done) buckets.delete(oldest.value)
+    if (map.size >= RATE_LIMIT_MAX_CLIENTS) {
+      const oldest = map.keys().next()
+      if (!oldest.done) map.delete(oldest.value)
     }
   } else {
-    buckets.delete(key)
+    map.delete(key)
     b.tokens = Math.min(burst, b.tokens + ((now - b.last) / 1000) * rps)
     b.last = now
   }
-  buckets.set(key, b)
+  map.set(key, b)
   if (b.tokens < 1) return true
   b.tokens -= 1
   return false
@@ -795,8 +836,10 @@ function upstreamError(e, what) {
 // isn't fetched twice on a cache miss. It is per-request only and is NEVER
 // cached: bodies come from the contract on every request, so that the
 // contract's own Cache-Control is the only thing deciding how long they live.
-async function classifyContract(address, opts) {
-  const mode = await resolveMode(address, opts)
+// `knownMode` is a resolveMode() answer already read in the same batch as the
+// registry records (see registryRecords), saving the call here.
+async function classifyContract(address, opts, knownMode) {
+  const mode = knownMode ?? (await resolveMode(address, opts))
   if (mode === '5219') return { resolved: { kind: 'contract', address, mode: '5219' } }
   if (WEB3_MODES.has(mode)) return { resolved: { kind: 'web3', address } }
   const page = await fetchErc8244(address, opts)
@@ -821,14 +864,19 @@ async function resolveTarget(sub, opts) {
   }
   if (tokenId === 0n) return { resolved: null }
 
-  // Address record and contenthash in parallel (one round-trip); the contract
-  // probes below only run when the name resolves to an address at all.
-  const [address, contenthash] = await Promise.all([
-    resolveAddress(tokenId, opts),
-    contenthashOf(tokenId, opts),
-  ])
+  // Address record and contenthash in one batched eth_call, with resolveMode()
+  // of the address this name had last time riding along. Plain parallel calls
+  // when the batch can't be read. The contract probes below only run when the
+  // name resolves to an address at all.
+  const guess = lastAddress.get(idKey, Date.now())
+  const records = await registryRecords(tokenId, guess, opts)
+  const [address, contenthash] = records
+    ? [records.address, records.contenthash]
+    : await Promise.all([resolveAddress(tokenId, opts), contenthashOf(tokenId, opts)])
   if (address) {
-    const hit = await classifyContract(address, opts)
+    lastAddress.set(idKey, address, { expires: Date.now() + TOKEN_ID_TTL_MS })
+    const known = records?.mode?.address === address ? records.mode.value : undefined
+    const hit = await classifyContract(address, opts, known)
     if (hit.resolved) return hit
   }
   const content = decodeContenthash(contenthash)
@@ -918,6 +966,41 @@ export async function handleRequest(request, env, { clientIp = 'unknown' } = {})
   }
 }
 
+// Resolve `sub` from chain and record the answer, one flight per label. Shared
+// by a cold request (which awaits it) and refresh-ahead (which doesn't).
+function resolveFresh(sub, opts) {
+  return singleFlight(resolveInflight, sub, async () => {
+    const out = await resolveTarget(sub, opts)
+    const at = Date.now()
+    if (!out.resolved) {
+      resolutionCache.forget(sub)
+      missCache.set(sub, true, { expires: at + RESOLUTION_TTL_MS })
+    } else {
+      resolutionCache.set(sub, out.resolved, { expires: at + RESOLUTION_TTL_MS })
+      if (out.resolved.kind === 'ipfs' || out.resolved.kind === 'ipns') {
+        staleResolutions.set(sub, out.resolved, { expires: at + STALE_RESOLUTION_MS })
+      }
+    }
+    return out
+  })
+}
+
+// Read a contract page from chain and hold it for its own Cache-Control, one
+// flight per key. Shared by a cold request and refresh-ahead.
+function readPage(resolved, url, opts, pageKey) {
+  return singleFlight(pageInflight, pageKey, async () =>
+    rememberPage(
+      pageKey,
+      resolved.mode === '5219'
+        ? await fetchErc5219(resolved.address, url.pathname, url.search, opts)
+        : // ERC-8244 has no notion of a path: one document, served at
+          // every path, the same shape as an SPA fallback.
+          await fetchErc8244(resolved.address, opts),
+      resolved.address,
+    ),
+  )
+}
+
 async function serve(request, env, url, sub) {
   const rpc = String(readEnv(env, 'RPC_URLS', '')).split(',').map((s) => s.trim()).filter(Boolean)
   const contract = readEnv(env, 'WNS_CONTRACT', undefined)
@@ -948,21 +1031,21 @@ async function serve(request, env, url, sub) {
   if (cached === undefined && missCache.get(sub, now)) cached = null
   if (cached !== undefined) {
     resolved = cached
+    // Hits only: renewing misses would let a flood of random labels buy RPC.
+    if (cached && nearExpiry(resolutionCache, sub, RESOLUTION_TTL_MS, now) && rpcIdle()) {
+      resolveFresh(sub, opts)
+        .then((hit) => {
+          // An html() page read to classify the name is also its content:
+          // keep it rather than reading the same document again on next miss.
+          if (hit.prefetched && hit.resolved?.mode === 'html') {
+            rememberPage(hit.resolved.address, hit.prefetched, hit.resolved.address)
+          }
+        })
+        .catch(() => {})
+    }
   } else {
     try {
-      const hit = await singleFlight(resolveInflight, sub, async () => {
-        const out = await resolveTarget(sub, opts)
-        const at = Date.now()
-        if (!out.resolved) {
-          missCache.set(sub, true, { expires: at + RESOLUTION_TTL_MS })
-        } else {
-          resolutionCache.set(sub, out.resolved, { expires: at + RESOLUTION_TTL_MS })
-          if (out.resolved.kind === 'ipfs' || out.resolved.kind === 'ipns') {
-            staleResolutions.set(sub, out.resolved, { expires: at + STALE_RESOLUTION_MS })
-          }
-        }
-        return out
-      })
+      const hit = await resolveFresh(sub, opts)
       resolved = hit.resolved
       prefetched = hit.prefetched
     } catch (e) {
@@ -1013,9 +1096,27 @@ async function serve(request, env, url, sub) {
     // budget. Keying an 8244 page by address alone makes that free — a cache
     // buster and a plain reload become the same entry, and singleFlight then
     // coalesces every concurrent reader of the name rather than one per URL.
+    if (resolved.mode === '5219' && isProbePath(url.pathname)) {
+      return new Response('Not Found\n', {
+        status: 404,
+        headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' },
+      })
+    }
     const pageKey =
       resolved.mode === '5219' ? `${resolved.address}|${url.pathname}${url.search}` : resolved.address
     let page = pageCache.get(pageKey, Date.now())
+    if (!page && emptyPages.get(pageKey, Date.now())) {
+      return new Response('Not Found', {
+        status: 404,
+        headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' },
+      })
+    }
+    if (page && rpcIdle()) {
+      const at = Date.now()
+      if (nearExpiry(pageCache, pageKey, (pageCache.expiresAt(pageKey) ?? at) - page.fetchedAt, at)) {
+        readPage(resolved, url, opts, pageKey).catch(() => {})
+      }
+    }
     if (!page) {
       try {
         if (prefetched) {
@@ -1023,17 +1124,14 @@ async function serve(request, env, url, sub) {
           // don't call the contract a second time for the same bytes.
           page = rememberPage(pageKey, prefetched, resolved.address)
         } else {
-          page = await singleFlight(pageInflight, pageKey, async () =>
-            rememberPage(
-              pageKey,
-              resolved.mode === '5219'
-                ? await fetchErc5219(resolved.address, url.pathname, url.search, opts)
-                : // ERC-8244 has no notion of a path: one document, served at
-                  // every path, the same shape as an SPA fallback.
-                  await fetchErc8244(resolved.address, opts),
-              resolved.address,
-            ),
-          )
+          const rps = envNumber(env, 'PAGE_READS_PER_SEC', PAGE_READS_PER_SEC)
+          const burst = envNumber(env, 'PAGE_READS_BURST', PAGE_READS_BURST)
+          // Joining a read already in flight is free; only a new one is charged.
+          if (!pageInflight.has(pageKey) && rateLimited(resolved.address, Date.now(), rps, burst, pageBuckets)) {
+            return upstreamError({ overloaded: true }, 'reading ' + resolved.address)
+          }
+          page = await readPage(resolved, url, opts, pageKey)
+          if (!page) emptyPages.set(pageKey, true, { expires: Date.now() + RESOLUTION_TTL_MS })
         }
       } catch (e) {
         // Rule 3's corollary: never serve stale here. An expired entry is not a

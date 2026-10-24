@@ -16,7 +16,9 @@
 // Serving a cached copy INSIDE the max-age the contract itself published is not
 // staleness, it's the header being honoured. Serving one PAST it would be, and
 // nothing here ever does: expired entries are dropped, never revalidated-while-
-// stale and never used as a fallback when RPC is down.
+// stale and never used as a fallback when RPC is down. (handler.js may re-read
+// a hot entry shortly BEFORE it expires — refresh-ahead — which only ever
+// replaces it with a fresher one.)
 
 // --- bounded LRU with a byte budget -----------------------------------------
 
@@ -69,6 +71,17 @@ export class TtlCache {
     this.map.delete(key)
     this.map.set(key, hit)
     return hit.value
+  }
+
+  // When `key` expires (ms epoch), or undefined if it isn't held. Doesn't touch
+  // LRU order or drop anything; an expired entry still leaves via get().
+  expiresAt(key) {
+    return this.map.get(key)?.expires
+  }
+
+  // Drop one entry, if held.
+  forget(key) {
+    this.#forget(key)
   }
 
   set(key, value, { expires, size = 0, group } = {}) {

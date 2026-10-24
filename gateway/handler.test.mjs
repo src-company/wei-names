@@ -5,7 +5,7 @@
 // test can assert not just the response but which calls were and weren't made.
 // No network, no chain, no dependencies.
 
-import { handleRequest, buckets, upstreamHealth, redirectsCache } from './handler.js'
+import { handleRequest, buckets, pageBuckets, upstreamHealth, redirectsCache } from './handler.js'
 
 let pass = 0
 let fail = 0
@@ -86,29 +86,74 @@ let routes = {}
 // `proxyResponse`, which a test sets to a function of the target URL. RPC calls
 // are the ones carrying a JSON-RPC body.
 let proxyResponse = null
+// Outbound JSON-RPC requests, as opposed to `calls` (logical eth_calls, which
+// counts each call inside a Multicall3 batch). The difference is the batching.
+let requests = 0
+// The fake node has Multicall3 unless a test takes it away.
+let multicall = true
+const MULTICALL3 = '0xca11bde05977b3631167028862be2a173976ca11'
+const AGGREGATE3 = '0x82ad56cb'
+
+// One routed eth_call: { result } | { revert } | throws for 'down'.
+function route(to, data) {
+  const selector = data.slice(0, 10)
+  calls.push({ to, selector, data })
+  let hit = routes[`${to}:${selector}`]
+  if (hit === undefined) hit = '0x' // no code / no such function — empty return
+  if (hit === 'down') throw new Error('connect ECONNREFUSED')
+  if (hit === 'revert') return { revert: true }
+  return { result: typeof hit === 'function' ? hit(data) : hit }
+}
+
+// aggregate3 calldata -> [{ to, data }], decoded independently of wns.js.
+function decodeAggregate3Call(data) {
+  const hex = data.slice(10)
+  const at = (byte) => Number.parseInt(hex.slice(byte * 2, byte * 2 + 64), 16)
+  const base = at(0) + 32
+  return Array.from({ length: at(at(0)) }, (_, i) => {
+    const t = base + at(base + 32 * i)
+    const bytesAt = t + at(t + 64)
+    const len = at(bytesAt)
+    return { to: '0x' + hex.slice(t * 2 + 24, t * 2 + 64), data: '0x' + hex.slice((bytesAt + 32) * 2, (bytesAt + 32 + len) * 2) }
+  })
+}
+
+// [{ success, data }] -> (bool, bytes)[] return data.
+function encodeAggregate3Return(results) {
+  const tuples = results.map(({ success, data }) => {
+    const b = data.replace(/^0x/, '')
+    return word(success ? '1' : '0') + word('40') + word((b.length / 2).toString(16)) + b.padEnd(Math.ceil(b.length / 64) * 64, '0')
+  })
+  let off = 32 * tuples.length
+  const offsets = tuples.map((t) => { const o = off; off += t.length / 2; return word(o.toString(16)) })
+  return '0x' + word('20') + word(results.length.toString(16)) + offsets.join('') + tuples.join('')
+}
+
+const reply = (body) =>
+  new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, ...body }), { headers: { 'content-type': 'application/json' } })
+
 globalThis.fetch = async (url, init) => {
   if (!init?.body) {
     if (!proxyResponse) throw new Error('unexpected non-RPC fetch: ' + url)
     return proxyResponse(String(url), init)
   }
+  requests++
   const req = JSON.parse(init.body)
   const to = req.params[0].to.toLowerCase()
   const data = req.params[0].data
-  const selector = data.slice(0, 10)
-  calls.push({ to, selector, data })
 
-  let hit = routes[`${to}:${selector}`]
-  if (hit === undefined) hit = '0x' // no code / no such function — empty return
-  if (hit === 'down') throw new Error('connect ECONNREFUSED')
-  if (hit === 'revert') {
-    return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, error: { code: 3, message: 'execution reverted' } }), {
-      headers: { 'content-type': 'application/json' },
+  if (to === MULTICALL3 && data.startsWith(AGGREGATE3)) {
+    if (!multicall) return reply({ result: '0x' })
+    const results = decodeAggregate3Call(data).map(({ to: t, data: d }) => {
+      const r = route(t, d)
+      return r.revert ? { success: false, data: '0x' } : { success: true, data: r.result }
     })
+    return reply({ result: encodeAggregate3Return(results) })
   }
-  const result = typeof hit === 'function' ? hit(data) : hit
-  return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result }), {
-    headers: { 'content-type': 'application/json' },
-  })
+
+  const r = route(to, data)
+  if (r.revert) return reply({ error: { code: 3, message: 'execution reverted' } })
+  return reply({ result: r.result })
 }
 
 // The rate limiter is off for the body of the suite — every request here comes
@@ -580,6 +625,126 @@ res = await proxyGet('p33.wei.limo/live')
 eq('ipns: an update is visible immediately', await res.text(), 'v2')
 eq('ipns: never served from cache', upstreamFetches, 2)
 proxyResponse = null
+
+// --- 27b. registry reads are batched through Multicall3 ----------------------
+//
+// A name's addr + contenthash go out as one eth_call, and on re-resolution the
+// last address's resolveMode() rides along. Counted in outbound requests, not
+// logical calls: that is what a node's rate limit sees.
+
+const MC = addr(0xc0de50)
+const MC2 = addr(0xc0de51)
+routes = nameRoutes(50, MC, {
+  [`${MC}:${RESOLVE_MODE}`]: mode('5219'),
+  [`${MC}:${REQUEST}`]: RET_IMMUTABLE,
+  [`${MC2}:${RESOLVE_MODE}`]: mode('5219'),
+  [`${MC2}:${REQUEST}`]: RET_IMMUTABLE,
+})
+requests = 0
+res = await get('mc50.wei.limo/')
+eq('multicall: cold name served', res.status, 200)
+eq('multicall: cold name is 4 requests (id, batch, mode, page), was 5', requests, 4)
+
+// Past the resolution TTL the name is re-resolved; the page is still held.
+const realNow = Date.now
+Date.now = () => realNow() + 61_000
+requests = 0
+res = await get('mc50.wei.limo/')
+eq('multicall: re-resolution served', res.status, 200)
+eq('multicall: re-resolution is ONE request, was 3', requests, 1)
+
+// The name moves: the speculative resolveMode() was for the old address, so
+// the new one is asked separately — and the new contract is what gets served.
+routes[`${WNS}:${RESOLVE}`] = addressWord(MC2)
+Date.now = () => realNow() + 122_000
+requests = 0
+res = await get('mc50.wei.limo/')
+eq('multicall: a moved name is served from its new address', res.headers.get('x-wns-contract'), MC2)
+eq('multicall: and asked the new address its mode', calls.some((c) => c.to === MC2 && c.selector === RESOLVE_MODE), true)
+Date.now = realNow
+
+// A node without Multicall3 answers '0x': fall back to plain calls, same answer.
+multicall = false
+routes = nameRoutes(51, addr(0xc0de52), {
+  [`${addr(0xc0de52)}:${RESOLVE_MODE}`]: mode('5219'),
+  [`${addr(0xc0de52)}:${REQUEST}`]: RET_IMMUTABLE,
+})
+res = await get('mc51.wei.limo/')
+eq('multicall: no Multicall3 on the node still serves', res.status, 200)
+eq('multicall: via the plain addr call', calls.some((c) => c.to === WNS && c.selector === RESOLVE), true)
+multicall = true
+
+// --- 27c. refresh-ahead: a hot name is renewed before it expires --------------
+
+const RA = addr(0xc0de53)
+routes = nameRoutes(53, RA, {
+  [`${RA}:${RESOLVE_MODE}`]: mode('5219'),
+  [`${RA}:${REQUEST}`]: RET_IMMUTABLE,
+})
+await get('ra53.wei.limo/')
+const t0 = Date.now()
+const realNow2 = Date.now
+Date.now = () => t0 + 50_000 // last quarter of the 60s resolution TTL
+requests = 0
+res = await get('ra53.wei.limo/')
+eq('refresh-ahead: the visitor is served from cache', res.status, 200)
+await new Promise((r) => setTimeout(r, 0))
+eq('refresh-ahead: one background request renews the name', requests, 1)
+Date.now = () => t0 + 70_000 // past the ORIGINAL expiry, inside the renewed one
+requests = 0
+res = await get('ra53.wei.limo/')
+eq('refresh-ahead: past the old expiry, still no cold read', requests, 0)
+Date.now = () => t0 + 10_000
+requests = 0
+await get('ra53.wei.limo/')
+await new Promise((r) => setTimeout(r, 0))
+eq('refresh-ahead: a young entry is left alone', requests, 0)
+Date.now = realNow2
+
+// --- 27d. scanner probes on a contract page -----------------------------------
+//
+// A 5219 contract is handed every path, so `/.env` on a page is a full-document
+// eth_call unless refused first. These must cost nothing.
+
+const PR = addr(0xc0de60)
+routes = nameRoutes(60, PR, {
+  [`${PR}:${RESOLVE_MODE}`]: mode('5219'),
+  [`${PR}:${REQUEST}`]: RET_IMMUTABLE,
+})
+await get('pr60.wei.limo/')
+for (const probe of ['/.env', '/.git/config', '/.npmrc', '/app/.env.local', '/.github/workflows/deploy.yml']) {
+  res = await get('pr60.wei.limo' + probe)
+  eq(`probe ${probe}: 404`, res.status, 404)
+  eq(`probe ${probe}: no page read`, calls.filter((c) => c.selector === REQUEST).length, 0)
+}
+res = await get('pr60.wei.limo/.well-known/security.txt')
+eq('probe: /.well-known/ still reaches the contract', calls.filter((c) => c.selector === REQUEST).length, 1)
+
+// "Nothing here" is held for a minute, so one probe on many hostnames is one read.
+const PE = addr(0xc0de61)
+routes = nameRoutes(61, PE, { [`${PE}:${RESOLVE_MODE}`]: mode('5219'), [`${PE}:${REQUEST}`]: '0x' })
+res = await get('pe61.wei.limo/wp-login.php')
+eq('empty page: 404', res.status, 404)
+res = await get('pe61.wei.limo/wp-login.php')
+eq('empty page: the repeat costs no read', calls.filter((c) => c.selector === REQUEST).length, 0)
+
+// One address's cold reads are budgeted, however many clients ask.
+const PB = addr(0xc0de62)
+routes = nameRoutes(62, PB, {
+  [`${PB}:${RESOLVE_MODE}`]: mode('5219'),
+  [`${PB}:${REQUEST}`]: RET_IMMUTABLE,
+  [`${PR}:${RESOLVE_MODE}`]: mode('5219'),
+  [`${PR}:${REQUEST}`]: RET_IMMUTABLE,
+})
+const BUDGET_ENV = { ...ENV, PAGE_READS_PER_SEC: 0.001, PAGE_READS_BURST: 3 }
+const budgeted = (path) => handleRequest(new Request('https://pb62.wei.limo' + path), BUDGET_ENV)
+const st = []
+for (let i = 0; i < 5; i++) st.push((await budgeted(`/p${i}`)).status)
+eq('page budget: the burst is read', st.slice(0, 3).join(), '200,200,200')
+eq('page budget: past it, 503 instead of more RPC', st[3], 503)
+eq('page budget: cached pages still served', (await budgeted('/p0')).status, 200)
+eq('page budget: other addresses unaffected', (await get('pr60.wei.limo/fresh')).status, 200)
+pageBuckets.clear()
 
 // --- 28. the per-client rate limit -------------------------------------------
 //

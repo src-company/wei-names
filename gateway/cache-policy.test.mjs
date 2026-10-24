@@ -49,11 +49,15 @@ try {
   assert.equal(await hit.text(), 'old')
   assert.equal(hit.headers.get('cache-control'), 'public, max-age=300')
   assert.equal(hit.headers.get('age'), '299')
-  assert.equal(st.reads, 1)
-  assert.equal((await get('HEAD')).headers.get('age'), '299')
+  // In its last quarter of life the hit is renewed in the background
+  // (refresh-ahead): this visitor got the unexpired copy, the next gets the
+  // fresh one, and nobody waits on the chain when max-age runs out.
+  assert.equal(st.reads, 2)
+  await new Promise((r) => setTimeout(r, 0))
+  assert.equal((await get('HEAD')).headers.get('age'), '0')
   now += 1000
   assert.equal(await (await get()).text(), 'new')
-  assert.equal(st.reads, 2)
+  assert.equal(st.reads, 2, 'the renewed copy is served, not read again')
   now += 300000
   st.fail = true
   assert.equal((await get()).status, 502, 'expired entries cannot mask RPC failure')

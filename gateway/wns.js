@@ -46,7 +46,7 @@ export const WEB3_MODES = new Set(['auto', 'manual', '5219'])
 //                         kind, since benching still pays one full timeout first
 // The benching below covers an endpoint that rots later; it does not make a
 // permanently dead one free, because a benched endpoint is re-probed every
-// COOLDOWN_MS forever. Re-check with live-check.mjs before adding one back.
+// bench interval (backing off to 2min) forever. Re-check with live-check.mjs before adding one back.
 //
 // 2026-10-24, after an outage where every name 502'd: tenderly's public
 // gateway 429s after ~15 calls in a burst. The three added below each served
@@ -69,38 +69,130 @@ const RPC_TIMEOUT_MS = 5_000
 // `0x<address>.<zone>` at a contract that returns as much as the node will run.
 const RPC_MAX_RESPONSE_BYTES = 1024 * 1024
 
-// --- endpoint health + load shaping -----------------------------------------
+// --- endpoint pool: adaptive limits + load shaping ---------------------------
 //
-// Two failure modes learned the hard way, both from traffic rather than bugs:
+// Failure modes learned the hard way, all from traffic rather than bugs:
 //
 //   1. A fixed endpoint order means endpoint[0] takes every request and gets
-//      rate-limited first, while the rest sit idle. `rrCursor` rotates the
-//      starting point so load spreads across the list.
+//      rate-limited first, while the rest sit idle.
 //   2. Once an endpoint starts refusing, retrying it on every request costs a
-//      full timeout each time — with four endpoints that is 20s of dead wait
-//      per request, and connections pile up faster than they drain. A failing
-//      endpoint is benched for COOLDOWN_MS instead.
+//      full timeout each time, and connections pile up faster than they drain.
+//   3. A fixed global cap is wrong in both directions: too high for one healthy
+//      endpoint, a ceiling on throughput with six.
 //
-// Reverts do NOT bench an endpoint: the node answered correctly, the contract
-// just said no. Only transport failures and rate limits count against it.
-const COOLDOWN_MS = 30_000
-const unhealthyUntil = new Map()
-let rrCursor = 0
+// So each endpoint carries its own state. `limit` is how many calls it may
+// have in flight, found by AIMD the way TCP finds a window: +1/limit per
+// success, halved on a rate limit or a timeout. The gateway's total capacity
+// is the sum over healthy endpoints, so it grows with what the nodes actually
+// sustain and shrinks the moment one pushes back. A refusing endpoint is
+// benched — for its own Retry-After when it sends one, else 5s doubling per
+// consecutive strike up to 2min — and comes back at the limit it left with, so
+// it ramps up again instead of being slammed.
+//
+// Selection: configured RPC_URLS first, then the public pool; within each,
+// endpoints with room before saturated ones, ranked by measured latency times
+// load, jittered so equals share. Benched endpoints are still tried last —
+// nothing is ever unreachable.
+//
+// Reverts do NOT count against an endpoint: the node answered correctly, the
+// contract just said no. Only transport failures and rate limits do.
+const LIMIT_START = 8
+const LIMIT_MAX = 64
+const BENCH_BASE_MS = 5_000
+const BENCH_MAX_MS = 120_000
+const RETRY_AFTER_MAX_MS = 300_000
+const pool = new Map()
 
-// Cap on concurrent outbound RPCs. Without one, a spike opens a socket per
-// request and every call times out together; with one, excess calls queue and
-// the service degrades in latency instead of failing outright.
-// Beyond this many *queued* calls the gateway sheds load instead of queueing
-// deeper. A queue that grows without bound just converts a traffic spike into
-// a slower, longer outage where every request times out; refusing early keeps
-// the requests that are already in progress finishing.
-const MAX_INFLIGHT = 24
+function endpoint(url) {
+  let ep = pool.get(url)
+  if (!ep) {
+    // Unmeasured endpoints start at a middling latency so they get tried.
+    ep = { url, limit: LIMIT_START, inflight: 0, ewmaMs: 300, benchedUntil: 0, strikes: 0 }
+    pool.set(url, ep)
+  }
+  return ep
+}
+
+// Log by host only: an RPC_URLS path is usually an API key.
+function hostOf(url) {
+  try {
+    return new URL(url).host
+  } catch {
+    return 'rpc'
+  }
+}
+
+function reward(ep, ms) {
+  ep.strikes = 0
+  ep.benchedUntil = 0
+  if (ms !== undefined) ep.ewmaMs = 0.8 * ep.ewmaMs + 0.2 * ms
+  const before = Math.floor(ep.limit)
+  ep.limit = Math.min(LIMIT_MAX, ep.limit + 1 / ep.limit)
+  if (Math.floor(ep.limit) > before) drain()
+}
+
+function penalize(ep, reason, retryAfterMs) {
+  const wasHealthy = ep.benchedUntil <= Date.now()
+  ep.limit = Math.max(1, ep.limit / 2)
+  const backoff = Math.min(BENCH_MAX_MS, BENCH_BASE_MS * 2 ** ep.strikes)
+  ep.strikes = Math.min(ep.strikes + 1, 10)
+  const ms = retryAfterMs ? Math.min(RETRY_AFTER_MAX_MS, retryAfterMs) : backoff
+  ep.benchedUntil = Date.now() + ms
+  if (wasHealthy) console.warn(`rpc: benched ${hostOf(ep.url)} for ${Math.round(ms / 1000)}s (${reason}), limit ${Math.floor(ep.limit)}`)
+}
+
+// Retry-After as milliseconds: delta-seconds or an HTTP date. 0 if absent.
+function retryAfterMs(res) {
+  const v = res.headers?.get?.('retry-after')
+  if (!v) return 0
+  const s = Number(v)
+  if (Number.isFinite(s)) return Math.max(1_000, s * 1000)
+  const at = Date.parse(v)
+  return Number.isFinite(at) ? Math.max(1_000, at - Date.now()) : 0
+}
+
+// Next endpoint to try for one call: configured with room, public with room,
+// configured saturated, public saturated, then benched soonest-back first.
+function pickEndpoint(primary, backup, tried, now) {
+  let best
+  let bestScore = Infinity
+  for (let tier = 0; tier < 2; tier++) {
+    for (const url of tier === 0 ? primary : backup) {
+      if (tried.has(url)) continue
+      const ep = endpoint(url)
+      const benched = ep.benchedUntil > now
+      const cls = benched ? 4 + tier : ep.inflight >= Math.floor(ep.limit) ? 2 + tier : tier
+      const within = benched
+        ? ep.benchedUntil - now
+        : ep.ewmaMs * (1 + ep.inflight / ep.limit) * (0.85 + 0.3 * Math.random())
+      const score = cls * 1e9 + within
+      if (score < bestScore) {
+        bestScore = score
+        best = url
+      }
+    }
+  }
+  return best
+}
+
+// Global gate. Excess calls queue rather than opening a socket each, so a spike
+// degrades into latency instead of every call timing out together. Beyond
+// MAX_QUEUE the gateway sheds load: an unbounded queue just converts a traffic
+// spike into a slower, longer outage where every request times out.
+const MIN_INFLIGHT = 8
+const MAX_INFLIGHT = 192
 const MAX_QUEUE = 200
 let inflight = 0
 const waiting = []
 
+function capacity(now) {
+  let sum = 0
+  for (const ep of pool.values()) if (ep.benchedUntil <= now) sum += Math.floor(ep.limit)
+  return Math.min(MAX_INFLIGHT, Math.max(MIN_INFLIGHT, sum))
+}
+
 async function acquire() {
-  if (inflight < MAX_INFLIGHT) {
+  if (inflight < capacity(Date.now())) {
     inflight++
     return
   }
@@ -109,15 +201,28 @@ async function acquire() {
     e.overloaded = true
     throw e
   }
-  // Handed over by release() with `inflight` unchanged, so nobody can take the
-  // slot between the release and the wake-up and push past MAX_INFLIGHT.
+  // Woken by drain() with the slot already counted, so nobody can take it
+  // between the wake-up and the caller resuming.
   await new Promise((resolve) => waiting.push(resolve))
 }
 
+function drain() {
+  const cap = capacity(Date.now())
+  while (waiting.length && inflight < cap) {
+    inflight++
+    waiting.shift()()
+  }
+}
+
 function release() {
-  const next = waiting.shift()
-  if (next) next()
-  else inflight--
+  inflight--
+  drain()
+}
+
+// True while the pool has plenty of room. Background work (refresh-ahead in
+// handler.js) runs only then, so it never competes with visitors for capacity.
+export function rpcIdle() {
+  return waiting.length === 0 && inflight < capacity(Date.now()) / 2
 }
 
 // Parse a JSON body, refusing it once it passes `cap` bytes. Oversize is the
@@ -151,19 +256,6 @@ async function readJson(res, cap) {
 
 function isRateLimited(message) {
   return /rate|limit|429|too many|capacity|quota|exceeded/i.test(message || '')
-}
-
-// Healthy endpoints first (rotated), benched ones last as a last resort — if
-// every endpoint is benched we still try rather than failing outright.
-function orderEndpoints(endpoints, now) {
-  const start = rrCursor++ % endpoints.length
-  const rotated = [...endpoints.slice(start), ...endpoints.slice(0, start)]
-  const healthy = []
-  const benched = []
-  for (const url of rotated) {
-    ;((unhealthyUntil.get(url) || 0) > now ? benched : healthy).push(url)
-  }
-  return [...healthy, ...benched]
 }
 
 // --- ABI encoding (subset) -------------------------------------------------
@@ -254,18 +346,24 @@ export async function ethCall(data, opts) {
     params: [{ to, data }, 'latest'],
   })
 
+  // A configured list (RPC_URLS) goes first; the built-in public endpoints
+  // back it up, so a dead or exhausted key degrades to public RPC instead of
+  // 502ing every name, and take its overflow when it is saturated.
+  const backup = endpoints === DEFAULT_RPCS ? [] : DEFAULT_RPCS.filter((u) => !endpoints.includes(u))
+  for (const url of endpoints) endpoint(url)
+  for (const url of backup) endpoint(url)
+  // Page reads move hundreds of KB; only plain lookups feed the latency estimate.
+  const measure = !opts?.timeoutMs
+
   let lastErr
   await acquire()
   try {
-    // A configured list (RPC_URLS) goes first; the built-in public endpoints
-    // back it up, so a dead or exhausted key degrades to public RPC instead of
-    // 502ing every name.
-    const now = Date.now()
-    const order = orderEndpoints(endpoints, now)
-    if (endpoints !== DEFAULT_RPCS) {
-      for (const url of orderEndpoints(DEFAULT_RPCS, now)) if (!order.includes(url)) order.push(url)
-    }
-    for (const url of order) {
+    const tried = new Set()
+    for (let url; (url = pickEndpoint(endpoints, backup, tried, Date.now())); ) {
+      tried.add(url)
+      const ep = endpoint(url)
+      ep.inflight++
+      const started = Date.now()
       try {
         const controller = new AbortController()
         const timer = setTimeout(() => controller.abort(), timeoutMs)
@@ -286,7 +384,7 @@ export async function ethCall(data, opts) {
         }
         if (!res.ok) {
           // 429/5xx never carries a usable body — bench and move on.
-          unhealthyUntil.set(url, Date.now() + COOLDOWN_MS)
+          penalize(ep, `http ${res.status}`, retryAfterMs(res))
           lastErr = new Error(`rpc http ${res.status}`)
           continue
         }
@@ -296,27 +394,35 @@ export async function ethCall(data, opts) {
           // tag it: callers probing for an optional function need to tell "this
           // contract said no" apart from "no endpoint would talk to us".
           const message = json.error?.message || 'rpc error'
-          if (isRateLimited(message)) unhealthyUntil.set(url, Date.now() + COOLDOWN_MS)
           lastErr = new Error(message)
           lastErr.rpcError = true
+          if (isRateLimited(message)) {
+            penalize(ep, 'rate limited')
+            continue
+          }
           // A revert is deterministic: every other node would say the same
-          if (json.error?.code === 3 || /revert/i.test(message)) break
+          if (json.error?.code === 3 || /revert/i.test(message)) {
+            reward(ep, measure ? Date.now() - started : undefined)
+            break
+          }
           continue
         }
         // A reply with no hex result is a broken node, not an empty answer
         if (typeof json?.result !== 'string' || !/^0x(?:[0-9a-fA-F]{2})*$/.test(json.result)) {
-          unhealthyUntil.set(url, Date.now() + COOLDOWN_MS)
+          penalize(ep, 'malformed result')
           lastErr = new Error('rpc: malformed result')
           continue
         }
-        unhealthyUntil.delete(url)
+        reward(ep, measure ? Date.now() - started : undefined)
         return json.result
       } catch (e) {
         lastErr = e
         // Every node would return the same oversized answer.
         if (e?.tooLarge) break
         // Timeout or transport failure: the endpoint itself is the problem.
-        unhealthyUntil.set(url, Date.now() + COOLDOWN_MS)
+        penalize(ep, e?.name === 'AbortError' ? 'timeout' : 'unreachable')
+      } finally {
+        ep.inflight--
       }
     }
   } finally {
@@ -324,6 +430,90 @@ export async function ethCall(data, opts) {
   }
   if (!lastErr?.rpcError && !lastErr?.tooLarge) console.error('rpc: all endpoints failed:', lastErr?.message || lastErr)
   throw lastErr || new Error('all RPC endpoints failed')
+}
+
+// --- Multicall3 ---------------------------------------------------------------
+//
+// A name's registry records are two calls, and a name pointing at a contract
+// needs that contract's resolveMode() too — three round-trips, each one counted
+// against an RPC's rate limit, repeated every time the resolution expires.
+// Multicall3's aggregate3 folds them into a single eth_call. Deployed at the
+// same address on mainnet (and every major chain) since 2022.
+const MULTICALL3 = '0xca11bde05977b3631167028862be2a173976ca11'
+const AGGREGATE3 = '0x82ad56cb'
+
+const hexWord = (n) => n.toString(16).padStart(64, '0')
+
+// aggregate3((address target, bool allowFailure, bytes callData)[]), every call
+// allowed to fail so one revert does not take the others with it.
+function encodeAggregate3(calls) {
+  const tuples = calls.map(({ target, data }) => {
+    const bytes = data.replace(/^0x/, '')
+    const padded = bytes.padEnd(Math.ceil(bytes.length / 64) * 64, '0')
+    return target.replace(/^0x/, '').toLowerCase().padStart(64, '0') +
+      hexWord(1) + hexWord(0x60) + hexWord(bytes.length / 2) + padded
+  })
+  let offset = 32 * calls.length
+  const offsets = tuples.map((t) => {
+    const at = offset
+    offset += t.length / 2
+    return hexWord(at)
+  })
+  return AGGREGATE3 + hexWord(0x20) + hexWord(calls.length) + offsets.join('') + tuples.join('')
+}
+
+// (bool success, bytes returnData)[] -> [{ success, data }], or null for
+// anything that is not well-formed, so the caller falls back to plain calls.
+function decodeAggregate3(result) {
+  const hex = String(result || '').replace(/^0x/, '')
+  const word = (byte) => {
+    if (byte < 0 || 2 * byte + 64 > hex.length) return NaN
+    return Number.parseInt(hex.slice(2 * byte, 2 * byte + 64), 16)
+  }
+  const head = word(0)
+  const n = word(head)
+  if (!Number.isSafeInteger(n) || n > 16) return null
+  const base = head + 32
+  const out = []
+  for (let i = 0; i < n; i++) {
+    const at = base + word(base + 32 * i)
+    const success = word(at)
+    const len = word(at + word(at + 32))
+    const start = at + word(at + 32) + 32
+    if (![at, success, len].every(Number.isSafeInteger) || 2 * (start + len) > hex.length) return null
+    out.push({ success: success === 1, data: '0x' + hex.slice(2 * start, 2 * (start + len)) })
+  }
+  return out
+}
+
+// A name's addr and contenthash in one eth_call, plus resolveMode() of `guess`
+// (the address the name pointed at last time) speculatively in the same call:
+// names rarely move, so a re-resolution of a contract page costs one round-trip
+// instead of three. Returns null when the batch can't be read — the node
+// lacks Multicall3, or a registry call itself failed — and the caller asks the
+// plain way, so batching can only ever save calls, never change an answer.
+export async function registryRecords(tokenId, guess, opts) {
+  const registry = opts?.contract || WNS_CONTRACT
+  const calls = [
+    { target: registry, data: RESOLVE + encodeUint256(tokenId) },
+    { target: registry, data: CONTENTHASH + encodeUint256(tokenId) },
+  ]
+  if (guess) calls.push({ target: guess, data: RESOLVE_MODE })
+  let out
+  try {
+    out = decodeAggregate3(await ethCall(encodeAggregate3(calls), { ...opts, contract: MULTICALL3 }))
+  } catch (e) {
+    // Transport failure: the plain calls would hit the same wall.
+    if (!e?.rpcError) throw e
+    return null
+  }
+  if (!out || out.length !== calls.length || !out[0].success || !out[1].success) return null
+  return {
+    address: decodeAddress(out[0].data),
+    contenthash: decodeBytes(out[1].data),
+    // A failed resolveMode() is a revert: "not an on-chain dapp", as below.
+    mode: guess ? { address: guess, value: out[2].success ? decodeBytes32Ascii(out[2].data) : '' } : null,
+  }
 }
 
 // --- Public API ------------------------------------------------------------
