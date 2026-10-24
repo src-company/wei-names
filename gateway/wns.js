@@ -249,7 +249,15 @@ export async function ethCall(data, opts) {
   let lastErr
   await acquire()
   try {
-    for (const url of orderEndpoints(endpoints, Date.now())) {
+    // A configured list (RPC_URLS) goes first; the built-in public endpoints
+    // back it up, so a dead or exhausted key degrades to public RPC instead of
+    // 502ing every name.
+    const now = Date.now()
+    const order = orderEndpoints(endpoints, now)
+    if (endpoints !== DEFAULT_RPCS) {
+      for (const url of orderEndpoints(DEFAULT_RPCS, now)) if (!order.includes(url)) order.push(url)
+    }
+    for (const url of order) {
       try {
         const controller = new AbortController()
         const timer = setTimeout(() => controller.abort(), timeoutMs)
@@ -306,6 +314,7 @@ export async function ethCall(data, opts) {
   } finally {
     release()
   }
+  if (!lastErr?.rpcError && !lastErr?.tooLarge) console.error('rpc: all endpoints failed:', lastErr?.message || lastErr)
   throw lastErr || new Error('all RPC endpoints failed')
 }
 
