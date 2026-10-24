@@ -375,6 +375,13 @@ life starts a background re-read while the RPC pool is idle, so a popular name
 or page never makes a visitor wait on a cold read and its expiry no longer lines
 everyone up behind one call. Nothing is served past its TTL.
 
+**Name ids are hashed locally.** The registry's `computeId` is a pure
+namehash, so the gateway computes it (zero-dependency keccak in `keccak.js`,
+pinned to on-chain ids in `keccak.test.mjs`) instead of spending a round-trip on
+every cold name. A cold contract page is now three calls: the batch, its
+`resolveMode()`, and the page. Proxied IPFS bodies are held for an hour — keyed
+by CID, they cannot change.
+
 **Revisits are cheap.** A contract page carries a strong `ETag` (SHA-256 of
 status, type and body), so a browser whose `max-age` ran out revalidates with
 `If-None-Match` and gets a `304` instead of the whole document again. An IPFS

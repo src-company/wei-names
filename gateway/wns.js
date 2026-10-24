@@ -20,6 +20,8 @@
 // gateway stays a self-contained, build-free file like zFi's other workers.
 
 // Canonical WNS registry on Ethereum mainnet.
+import { keccak256 } from './keccak.js'
+
 export const WNS_CONTRACT = '0x0000000000696760E15f265e828DB644A0c242EB'
 
 // Function selectors.
@@ -523,6 +525,37 @@ export function normalizeName(name) {
   let n = String(name).toLowerCase().trim()
   if (!n.endsWith('.wei')) n += '.wei'
   return n
+}
+
+const WEI_NODE = 'a82820059d5df798546bcc2985157a77c3eef25eba9ba01899927333efacbd6f'
+
+// The registry's computeId(), without the eth_call: it is `pure` — an ENS-style
+// namehash rooted at WEI_NODE over ASCII-lowercased UTF-8 labels — so asking a
+// node costs a round-trip on every cold name (every random scanner label too)
+// for something this process can hash in microseconds. Mirrors
+// NameNFT.computeNamehash, including the permissive lowercasing (A-Z only).
+// Returns null where the contract would revert (an empty label).
+export function localComputeId(name) {
+  let n = String(name)
+  if (/\.wei$/i.test(n)) n = n.slice(0, -4)
+  if (n === '') return BigInt('0x' + WEI_NODE)
+  const labels = n.split('.')
+  if (labels.some((l) => l === '')) return null
+  let node = hexToBytes(WEI_NODE)
+  for (let i = labels.length - 1; i >= 0; i--) {
+    const label = new TextEncoder().encode(labels[i]).map((c) => (c >= 0x41 && c <= 0x5a ? c + 32 : c))
+    const buf = new Uint8Array(64)
+    buf.set(node)
+    buf.set(keccak256(label), 32)
+    node = keccak256(buf)
+  }
+  return BigInt('0x' + bytesToHex(node).replace(/^0x/, ''))
+}
+
+function hexToBytes(hex) {
+  const out = new Uint8Array(hex.length / 2)
+  for (let i = 0; i < out.length; i++) out[i] = Number.parseInt(hex.slice(2 * i, 2 * i + 2), 16)
+  return out
 }
 
 // Compute a full `.wei` name's WNS tokenId (0n if the name has no id).

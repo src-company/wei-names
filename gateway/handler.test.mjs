@@ -369,7 +369,7 @@ const herd = await Promise.all(
 )
 eq('herd: every request served', herd.every((r) => r.status === 200), true)
 // Without coalescing this is 25 resolutions and 25 page reads.
-eq('herd: one computeId for 25 requests', calls.filter((c) => c.selector === COMPUTE_ID).length, 1)
+eq('herd: computeId is hashed locally, never asked', calls.filter((c) => c.selector === COMPUTE_ID).length, 0)
 eq('herd: one page read for 25 requests', calls.filter((c) => c.selector === REQUEST).length, 1)
 
 // --- 14. depth guard: only what TLS could never reach is refused ------------
@@ -643,7 +643,7 @@ routes = nameRoutes(50, MC, {
 requests = 0
 res = await get('mc50.wei.limo/')
 eq('multicall: cold name served', res.status, 200)
-eq('multicall: cold name is 4 requests (id, batch, mode, page), was 5', requests, 4)
+eq('multicall: cold name is 3 requests (batch, mode, page), was 5', requests, 3)
 
 // Past the resolution TTL the name is re-resolved; the page is still held.
 const realNow = Date.now

@@ -8,7 +8,7 @@
 // Runtime-agnostic: takes a standard `Request`, returns a standard `Response`.
 // Used by both worker.js (Cloudflare) and server.js (Node/Railway).
 
-import { computeId, contenthashOf, registryRecords, resolveAddress, resolveMode, rpcIdle, WEB3_MODES } from './wns.js'
+import { computeId, contenthashOf, localComputeId, normalizeName, registryRecords, resolveAddress, resolveMode, rpcIdle, WEB3_MODES } from './wns.js'
 import { namesFromPunycode } from './punycode.js'
 import { decodeContenthash } from './contenthash.js'
 import { fetchErc5219, fetchErc8244 } from './onchain.js'
@@ -203,7 +203,11 @@ function strike(key, now, jailMs) {
 // held, so one large file can't be buffered into an OOM on a starter instance.
 const PROXY_CACHE_MAX_BYTES = 16 * 1024 * 1024
 const PROXY_MAX_BODY_BYTES = 2 * 1024 * 1024
-const PROXY_TTL_MS = 300_000
+// An hour, not minutes: the key is a CID, so the bytes cannot go stale — the
+// TTL only bounds how long a cold entry squats in the byte budget (the LRU
+// already evicts first). Which CID a *name* serves is the resolution cache's
+// job, and that stays 60s.
+const PROXY_TTL_MS = 3_600_000
 const proxyCache = new TtlCache({ maxEntries: 500, maxBytes: PROXY_CACHE_MAX_BYTES })
 const proxyInflight = new Map()
 
@@ -920,7 +924,10 @@ async function resolveTarget(sub, opts) {
 
   const name = namesFromPunycode(sub)
   const idKey = `${opts.contract || ''}|${name}`
-  let tokenId = tokenIds.get(idKey, Date.now())
+  // The mainnet registry's id is a pure hash: computed here, no round-trip.
+  // A WNS_CONTRACT override may hash differently, so it is still asked.
+  let tokenId = opts.contract ? tokenIds.get(idKey, Date.now()) : localComputeId(normalizeName(name))
+  if (tokenId === null) return { resolved: null }
   if (tokenId === undefined) {
     tokenId = await computeId(name, opts)
     tokenIds.set(idKey, tokenId, { expires: Date.now() + TOKEN_ID_TTL_MS })
