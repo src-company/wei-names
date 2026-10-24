@@ -47,9 +47,17 @@ export const WEB3_MODES = new Set(['auto', 'manual', '5219'])
 // The benching below covers an endpoint that rots later; it does not make a
 // permanently dead one free, because a benched endpoint is re-probed every
 // COOLDOWN_MS forever. Re-check with live-check.mjs before adding one back.
+//
+// 2026-10-24, after an outage where every name 502'd: tenderly's public
+// gateway 429s after ~15 calls in a burst. The three added below each served
+// the full 667 KB zswap.wei page and took 60 concurrent calls without a 429.
+// (blastapi passed too this time, but stays out on its hang history.)
 const DEFAULT_RPCS = [
   'https://ethereum-rpc.publicnode.com',
   'https://eth.drpc.org',
+  'https://rpc.mevblocker.io',
+  'https://eth.rpc.blxrbdn.com',
+  'https://eth-pokt.nodies.app',
   'https://mainnet.gateway.tenderly.co',
 ]
 
