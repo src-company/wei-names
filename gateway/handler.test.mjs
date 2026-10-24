@@ -802,6 +802,42 @@ eq('rate limit: a rotated x-forwarded-for cannot buy a fresh budget', res.status
 eq('rate limit: the bucket is keyed on cf-connecting-ip', buckets.has('9.9.9.9'), true)
 eq('rate limit: not on the spoofable header', buckets.has('spoof-1'), false)
 
+// --- 28c. contract pages revalidate with a 304 ---------------------------------
+
+const ET = addr(0xc0de80)
+routes = nameRoutes(80, ET, { [`${ET}:${RESOLVE_MODE}`]: mode('5219'), [`${ET}:${REQUEST}`]: RET_IMMUTABLE })
+res = await get('et80.wei.limo/')
+const tag = res.headers.get('etag')
+eq('etag: a contract page carries one', /^"[0-9a-f]{32}"$/.test(tag || ''), true)
+res = await handleRequest(new Request('https://et80.wei.limo/', { headers: { 'if-none-match': tag } }), ENV)
+eq('etag: a matching revalidation is a 304', res.status, 304)
+eq('etag: with no body', (await res.text()).length, 0)
+eq('etag: and the page policy still on it', res.headers.get('cache-control'), 'public, max-age=31536000, immutable')
+res = await handleRequest(new Request('https://et80.wei.limo/', { headers: { 'if-none-match': '"stale"' } }), ENV)
+eq('etag: a stale validator gets the page', res.status, 200)
+eq('etag: stable across reads', res.headers.get('etag'), tag)
+
+// --- 28d. an unreachable CID: only the first page load waits it out ------------
+
+let unreachFetches = 0
+proxyResponse = () => { unreachFetches++; throw new Error('connect ETIMEDOUT') }
+routes = nameRoutes(81, addr(0), { [`${WNS}:${CONTENTHASH}`]: IPFS_CH })
+const UNREACH_ENV = { ...ENV, GATEWAY_MODE: 'proxy', IPFS_PATH_GATEWAY: 'https://unreach.gw' }
+const nav = () =>
+  handleRequest(new Request('https://ur81.wei.limo/ur81-page', { headers: { 'sec-fetch-mode': 'navigate', accept: 'text/html' } }), UNREACH_ENV)
+res = await nav()
+eq('unreachable: first page load falls back to the browser gateway', res.headers.get('x-wns-fallback'), 'unreachable')
+const firstFetches = unreachFetches
+res = await nav()
+eq('unreachable: the next is sent there at once', res.headers.get('x-wns-fallback'), 'unreachable')
+eq('unreachable: without asking the upstream again', unreachFetches, firstFetches)
+proxyResponse = () => new Response('back', { status: 200 })
+res = await handleRequest(new Request('https://ur81.wei.limo/ur81-app.js'), UNREACH_ENV)
+eq('unreachable: a subresource still asks, and sees the recovery', res.status, 200)
+res = await nav()
+eq('unreachable: which clears it for page loads too', res.status, 200)
+proxyResponse = null
+
 // --- 28b. scanner probes are refused everywhere, and probers are jailed -------
 
 // On an IPFS name in proxy mode a probe would be an upstream fetch per path.

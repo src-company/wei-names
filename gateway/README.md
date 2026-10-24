@@ -375,6 +375,13 @@ life starts a background re-read while the RPC pool is idle, so a popular name
 or page never makes a visitor wait on a cold read and its expiry no longer lines
 everyone up behind one call. Nothing is served past its TTL.
 
+**Revisits are cheap.** A contract page carries a strong `ETag` (SHA-256 of
+status, type and body), so a browser whose `max-age` ran out revalidates with
+`If-None-Match` and gets a `304` instead of the whole document again. An IPFS
+id that no upstream could reach is remembered for 2 minutes: the next page load
+goes straight to the browser gateway instead of waiting out `PROXY_TIMEOUT_MS`
+again, while subresources keep asking, so a recovery clears it at once.
+
 **Scanner probes cost nothing.** On a 5219 page, any path segment starting with
 `.` (`/.env`, `/.git/config`, …; `/.well-known/` excepted) is a `404` before any
 RPC. A contract's "nothing here" is held for 60s so one probe across a name's

@@ -104,6 +104,31 @@ const pageCache = new TtlCache({
 const resolveInflight = new Map()
 const pageInflight = new Map()
 
+// IPFS/IPNS ids no upstream could answer for at all (every gateway timed out
+// or refused to connect — the content isn't pinned anywhere they can reach).
+// Without this every visitor waits out PROXY_TIMEOUT_MS before the browser-
+// gateway fallback; with it only the first does, for UNREACHABLE_MS.
+const UNREACHABLE_MS = 120_000
+const unreachableIds = new TtlCache({ maxEntries: 2_000 })
+
+// A strong validator for a contract page, computed once per held page object.
+// Without one, a visitor whose max-age ran out re-downloads the whole document
+// (zswap: 667 KB) even when the chain has not changed a byte; with one, it is a
+// 304. Hashes status, type and body, so any change in what is served changes it.
+async function pageEtag(page) {
+  if (page.etag !== undefined) return page.etag
+  const subtle = globalThis.crypto?.subtle
+  if (!subtle) return (page.etag = null)
+  const body = typeof page.body === 'string' ? new TextEncoder().encode(page.body) : page.body
+  const head = new TextEncoder().encode(`${page.status}\n${page.contentType}\n`)
+  const bytes = new Uint8Array(head.length + body.length)
+  bytes.set(head)
+  bytes.set(body, head.length)
+  const digest = new Uint8Array(await subtle.digest('SHA-256', bytes))
+  page.etag = '"' + Array.from(digest.slice(0, 16), (b) => b.toString(16).padStart(2, '0')).join('') + '"'
+  return page.etag
+}
+
 // What one contract page may cost, whoever is asking. A 5219 contract is handed
 // path and query, so every URL nobody has asked for yet is a full-document
 // eth_call — 667 KB for zswap — and secrets scanners rotating across IPs walk
@@ -1225,6 +1250,13 @@ async function serve(request, env, url, sub) {
       // doing.
       'x-wns-mode': resolved.mode,
     })
+    const etag = page.status === 200 ? await pageEtag(page) : null
+    if (etag) {
+      headers.set('etag', etag)
+      if (etagMatches(request.headers.get('if-none-match'), etag)) {
+        return new Response(null, { status: 304, headers })
+      }
+    }
     if (request.method === 'HEAD') {
       headers.set('content-length', String(page.body.length))
       return new Response(null, { status: page.status, headers })
@@ -1360,6 +1392,14 @@ async function serve(request, env, url, sub) {
     if (proxyKey) {
       const hit = proxyCache.get(proxyKey, now)
       if (hit) return sharedResponse(hit, ifNoneMatch)
+    }
+    // Recently unreachable everywhere: a page load goes straight to the browser
+    // gateway instead of waiting it out again. Only navigations — anything else
+    // still asks, so a recovered upstream is noticed (and clears this) at once.
+    // Keyed with the upstream set: unreachable is a fact about these gateways.
+    const idKey = `${resolved.kind}:${resolved.id}|${targets.map((t) => t.host).join(',')}`
+    if (isNavigation(request) && browserTarget() && unreachableIds.get(idKey, now)) {
+      return toBrowser('unreachable')
     }
     // What the upstream is asked with. A held key is always fetched whole, and
     // the visitor's validators are checked against the result here instead
@@ -1520,6 +1560,7 @@ async function serve(request, env, url, sub) {
           rejected = null
         } else {
           done(null)
+          unreachableIds.set(idKey, true, { expires: Date.now() + UNREACHABLE_MS })
           if (isNavigation(request) && browserTarget()) return toBrowser('unreachable')
           // An unreachable IPFS gateway is upstream trouble like any other; without
           // this it escaped handleRequest entirely and server.js turned it into a
@@ -1528,6 +1569,7 @@ async function serve(request, env, url, sub) {
         }
       }
       if (rejected) cancelBody(rejected)
+      unreachableIds.forget(idKey)
 
       // A path gateway applies none of the site's routing, so a link that the
       // site declares in `_redirects` arrives here as a 404. Consult the rules
