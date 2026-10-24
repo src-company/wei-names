@@ -191,6 +191,7 @@ The gateway also keeps a `RESERVED_LABELS` guard as defense-in-depth.
 | `RESERVED_LABELS` | — | Extra labels to never treat as `.wei` names (added to the built-in set, which is empty) |
 | `PAGE_READS_PER_SEC` | `2` | Sustained *cold* page reads per contract address, whoever asks, token-bucket. Cached pages never spend from it. Past it a fresh URL on that address is a `503` + `Retry-After` instead of another whole-document `eth_call` |
 | `PAGE_READS_BURST` | `60` | Cold page reads an address may make back-to-back — a first page load's distinct asset paths |
+| `PROBE_JAIL_MS` | `900000` | Scanner probes (`/.env`, `/.git/…`, `*.php`, `wp-admin`, …; `/.well-known/` excepted) are a `404` on every host before any RPC or upstream fetch. A client's second probe refuses it outright (`403`) for this long. `0` disables the jail; it is also off with the rate limiter, and never applies to `unknown` or private/proxy addresses |
 | `RATE_LIMIT_RPS` | `15` | Sustained requests per second per client (IPv6 clients by `/64`), token-bucket. `0` disables the limiter, and the per-client concurrency gate with it |
 | `RATE_LIMIT_BURST` | `100` | Requests a client may make back-to-back before the sustained rate applies. Generous because one page load pulls many assets |
 | `ZONE` | `wei.limo,wei.is,wei.domains` | Comma-separated zones this gateway serves. Must include every zone whose `*.<zone>` wildcard points here |

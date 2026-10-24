@@ -5,7 +5,7 @@
 // test can assert not just the response but which calls were and weren't made.
 // No network, no chain, no dependencies.
 
-import { handleRequest, buckets, pageBuckets, upstreamHealth, redirectsCache } from './handler.js'
+import { handleRequest, buckets, pageBuckets, probeJail, upstreamHealth, redirectsCache } from './handler.js'
 
 let pass = 0
 let fail = 0
@@ -801,6 +801,42 @@ res = await cf('9.9.9.9', 'spoof-4', '/?a=4')
 eq('rate limit: a rotated x-forwarded-for cannot buy a fresh budget', res.status, 429)
 eq('rate limit: the bucket is keyed on cf-connecting-ip', buckets.has('9.9.9.9'), true)
 eq('rate limit: not on the spoofable header', buckets.has('spoof-1'), false)
+
+// --- 28b. scanner probes are refused everywhere, and probers are jailed -------
+
+// On an IPFS name in proxy mode a probe would be an upstream fetch per path.
+let probeUpstream = 0
+proxyResponse = () => { probeUpstream++; return new Response('x') }
+routes = nameRoutes(70, addr(0), { [`${WNS}:${CONTENTHASH}`]: IPFS_CH })
+const PROBE_PROXY_ENV = { ...ENV, GATEWAY_MODE: 'proxy', IPFS_PATH_GATEWAY: 'https://pin.gw', IPFS_BROWSER_GATEWAY: 'off' }
+for (const probe of ['/.env', '/%2eenv', '/wp-login.php', '/cgi-bin/luci', '/backup.sql']) {
+  calls = []
+  res = await handleRequest(new Request('https://ip70.wei.limo' + probe), PROBE_PROXY_ENV)
+  eq(`global probe ${probe}: 404`, res.status, 404)
+  eq(`global probe ${probe}: no rpc`, calls.length, 0)
+}
+eq('global probe: no upstream fetch either', probeUpstream, 0)
+proxyResponse = null
+
+// Two probes jail the client; the rest of its scan costs nothing.
+const scan = (ip, path) =>
+  handleRequest(new Request('https://zswap.wei.limo' + path), RL_ENV, { clientIp: ip })
+eq('jail: first probe is a plain 404', (await scan('6.6.6.6', '/.env')).status, 404)
+eq('jail: second probe too', (await scan('6.6.6.6', '/.git/config')).status, 404)
+calls = []
+res = await scan('6.6.6.6', '/')
+eq('jail: then even a real page is refused', res.status, 403)
+eq('jail: refused before any rpc', calls.length, 0)
+eq('jail: not cacheable', res.headers.get('cache-control'), 'no-store')
+eq('jail: a different client is unaffected', (await scan('7.7.7.7', '/.env')).status, 404)
+eq('jail: one stray probe does not jail', probeJail.get('7.7.7.7').until, 0)
+probeJail.get('6.6.6.6').until = Date.now() - 1
+eq('jail: released when it expires', (await scan('6.6.6.6', '/')).status !== 403, true)
+await scan('unknown', '/.env'); await scan('unknown', '/.env')
+eq('jail: never holds the unidentified', probeJail.has('unknown'), false)
+await scan('10.1.2.3', '/.env'); await scan('10.1.2.3', '/.env')
+eq('jail: never holds a proxy hop', (await scan('10.1.2.3', '/')).status !== 403, true)
+probeJail.clear()
 
 // Health checks are never limited — the platform must always be able to ask.
 statuses = []

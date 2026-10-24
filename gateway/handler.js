@@ -120,10 +120,48 @@ export const pageBuckets = new Map()
 // without it the same probe on the name's four hostnames is four reads.
 const emptyPages = new TtlCache({ maxEntries: 5_000 })
 
-// Dot-segments (`/.env`, `/.git/config`, `/x/.npmrc`) are what scanners probe
-// and what no on-chain dapp serves. `/.well-known/` is the one legitimate one.
+// What secrets/CMS scanners ask every host for, and no static or on-chain site
+// serves: dot-segments (`/.env`, `/.git/config`, `/x/.npmrc` — `/.well-known/`
+// is the one legitimate one), server-side scripts (no IPFS or contract site
+// executes PHP), and the admin panels they hunt. Percent-encoding is undone
+// first so `/%2eenv` is the same probe.
+const PROBE_SEGMENT = /^(?:wp-admin|wp-includes|wp-content|wp-login\.php|xmlrpc\.php|phpmyadmin|pma|cgi-bin|phpunit|actuator|server-status|boaform|hnap1|owa|autodiscover)$|\.(?:php\d?|phtml|aspx?|jsp|cgi|env|ini|sql|bak|old|swp)$/i
 function isProbePath(pathname) {
-  return pathname.split('/').some((seg, i) => seg.startsWith('.') && !(i === 1 && seg === '.well-known'))
+  let path = pathname
+  try {
+    path = decodeURIComponent(pathname)
+  } catch {}
+  return path.split('/').some(
+    (seg, i) => (seg.startsWith('.') && !(i === 1 && seg === '.well-known')) || PROBE_SEGMENT.test(seg),
+  )
+}
+
+// Clients caught probing. Two probes and a client is refused outright for
+// PROBE_JAIL_MS — before rate limiting, resolution or any upstream — so the
+// rest of its scan (other paths, other names) costs nothing at all. Scanners
+// rotate IPs; each IP still runs a long list, and this ends that list at the
+// second entry. One stray probe from a person costs them nothing.
+const PROBE_JAIL_MS = 900_000
+const PROBE_STRIKES = 2
+export const probeJail = new Map()
+const SHARED_KEY = /^(?:unknown|10\.|127\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.|f[cd][0-9a-f]{2}:|::1$)/i
+
+function jailed(key, now) {
+  const j = probeJail.get(key)
+  return j !== undefined && j.until > now
+}
+
+function strike(key, now, jailMs) {
+  let j = probeJail.get(key)
+  if (!j || (j.until && j.until <= now)) j = { strikes: 0, until: 0 }
+  probeJail.delete(key)
+  j.strikes++
+  if (j.strikes >= PROBE_STRIKES) j.until = now + jailMs
+  if (probeJail.size >= RATE_LIMIT_MAX_CLIENTS) {
+    const oldest = probeJail.keys().next()
+    if (!oldest.done) probeJail.delete(oldest.value)
+  }
+  probeJail.set(key, j)
 }
 
 // Proxy-mode bodies. In `redirect` mode the gateway is never in the data path,
@@ -901,6 +939,27 @@ export async function handleRequest(request, env, { clientIp = 'unknown' } = {})
   const rps = envNumber(env, 'RATE_LIMIT_RPS', RATE_LIMIT_RPS)
   const burst = envNumber(env, 'RATE_LIMIT_BURST', RATE_LIMIT_BURST)
   const client = clientKey(clientIp)
+
+  // Scanner probes: refused on every host and mode, before anything that costs.
+  // The jail follows the rate limiter (RATE_LIMIT_RPS=0 turns both off) and
+  // never holds 'unknown', which is everyone the runtime couldn't identify.
+  // Nor a private/proxy address: seeing one means identity failed upstream
+  // (TRUSTED_PROXY_CIDRS unset) and the key is every visitor behind that hop.
+  const jailMs = rps > 0 && !SHARED_KEY.test(client) ? envNumber(env, 'PROBE_JAIL_MS', PROBE_JAIL_MS) : 0
+  if (jailMs > 0 && jailed(client, Date.now())) {
+    return new Response('Forbidden\n', {
+      status: 403,
+      headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' },
+    })
+  }
+  if (isProbePath(url.pathname)) {
+    if (jailMs > 0) strike(client, Date.now(), jailMs)
+    return new Response('Not Found\n', {
+      status: 404,
+      headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' },
+    })
+  }
+
   if (rateLimited(client, Date.now(), rps, burst)) return tooManyRequests()
 
   // The host the request was routed on. On the Worker x-forwarded-host is
@@ -1096,12 +1155,6 @@ async function serve(request, env, url, sub) {
     // budget. Keying an 8244 page by address alone makes that free — a cache
     // buster and a plain reload become the same entry, and singleFlight then
     // coalesces every concurrent reader of the name rather than one per URL.
-    if (resolved.mode === '5219' && isProbePath(url.pathname)) {
-      return new Response('Not Found\n', {
-        status: 404,
-        headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' },
-      })
-    }
     const pageKey =
       resolved.mode === '5219' ? `${resolved.address}|${url.pathname}${url.search}` : resolved.address
     let page = pageCache.get(pageKey, Date.now())
