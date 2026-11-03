@@ -10,6 +10,7 @@ is about developing wei-names itself.)
   registrar + ENS-compatible resolver, single non-upgradeable file).
   `SubdomainRegistrar.sol`, `WeiDAO.sol` alongside it. `WeiTerms.sol` is a stateless helper
   that buys several 365-day terms in one transaction (the registry sells one per call).
+  `WeiPosts.sol` is the ownerless posts log (posts/SPEC.md), forked back from gwei-names.
 - `test/`, `script/` — Foundry tests and deploy scripts.
 - `gateway/` — the `*.wei.limo` / `.wei.is` / `.wei.domains` HTTP gateway.
   Zero-dependency ESM; `handler.js` is runtime-agnostic, wrapped by `worker.js`
@@ -18,6 +19,9 @@ is about developing wei-names itself.)
   ERC-8244 `html()`), plus `0x<address>.<zone>` labels that skip WNS.
 - `dapp/` — static client-side app (no build step; vendored bundles committed,
   `#hash` routing). Served at wei.domains and pinned on IPFS.
+- `posts/` — the posts protocol (`SPEC.md`) and the Python blob publisher (`poster/`). The blob
+  format, including its `gwei` magic, is shared with gwei-names on purpose: don't rebrand it.
+  `gateway/posts.js` is the index, `gateway/posts-page.js` its API and pages on `posts.wei.domains`.
 - `skills/` — integration skill(s) for external agents/devs.
 - Deploy config: `render.yaml` (Render), `gateway/wrangler.toml` (Cloudflare).
 
@@ -32,9 +36,15 @@ forge snapshot        # update .gas-snapshot after gas-affecting changes
 
 **Gateway** (Node ≥18, zero deps):
 ```bash
-cd gateway && npm test        # contenthash + ERC-5219 codecs, handler e2e (no network)
+cd gateway && npm test        # contenthash + ERC-5219 codecs, handler e2e, posts index (no network)
 node live-check.mjs zswap.wei.limo   # same handler, against live mainnet
 node server.js                # run locally (GET/HEAD only)
+```
+
+**Publisher** (Python 3.12, `pip install -r posts/poster/requirements.txt`):
+```bash
+cd posts/poster && POSTER_TRUSTED_SETUP=trusted_setup.txt python -m unittest test_poster
+# e2e cases need anvil, cast, node and `forge build`; trusted_setup.txt is c-kzg-4844's
 ```
 
 **Dapp**: no build — open `dapp/index.html` (or serve the folder). It's static.

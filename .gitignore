@@ -7,8 +7,12 @@
 ops/__pycache__/
 ops/*.out
 ops/deploy_*.hex
+ops/deploy_*.json
 ops/demo_*.html
 
 # node
 node_modules/
 npm-debug.log*
+
+# python
+__pycache__/

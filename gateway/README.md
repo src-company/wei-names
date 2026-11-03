@@ -172,6 +172,10 @@ The gateway also keeps a `RESERVED_LABELS` guard as defense-in-depth.
 | `worker.js` | Cloudflare Worker entrypoint |
 | `server.js` | Node / Railway / Render entrypoint |
 | `wrangler.toml` | Worker config + `*.wei.limo` route |
+| `posts.js` | The post index ([posts/SPEC.md](../posts/SPEC.md)): WeiPosts events, blob checks (KZG via `../dapp/vendor/kzg.bundle.mjs`), uploads, optional `POSTS_DIR` persistence |
+| `posts-page.js` | The posts host (`/api`, recent posts, `/<name>.wei/…`) and a name's posts on its own host |
+| `posts-format.js`, `markdown.js`, `math.js` | Post and blob byte formats, the escaping Markdown renderer and TeX→MathML, ported from gwei-names and kept in their style so the two diff cleanly |
+| `keccak.js` | keccak-256 on 32-bit lane halves (fast enough for a 127 KB post) |
 
 ## Config (env vars)
 
@@ -196,6 +200,10 @@ The gateway also keeps a `RESERVED_LABELS` guard as defense-in-depth.
 | `RATE_LIMIT_BURST` | `100` | Requests a client may make back-to-back before the sustained rate applies. Generous because one page load pulls many assets |
 | `ZONE` | `wei.limo,wei.is,wei.domains` | Comma-separated zones this gateway serves. Must include every zone whose `*.<zone>` wildcard points here |
 | `PORT` | `8080` | Node server only |
+| `POSTS_CONTRACT` | — | WeiPosts address. Unset: posts are off and nothing below applies |
+| `POSTS_FROM_BLOCK` | `0` | WeiPosts deployment block, where the index starts reading events |
+| `POSTS_HOST` | `posts.wei.domains` | The host that serves the post API (the only place `POST` is accepted) and every name's posts by path. Covered by the `*.wei.domains` cert; it shadows a `posts.wei` site on that zone only |
+| `POSTS_DIR` | — | Node only: a directory (a persistent disk) that keeps the index and post bytes across restarts. Without it the index is rebuilt from chain, Blobscan and IPFS on start, and bytes still waiting for their blob are lost until re-uploaded |
 
 There is deliberately **no `SUBDOMAIN_PARENTS`**. It was an allowlist of parents
 permitted to serve `<x>.<parent>.<zone>`, and it was wrong twice over: it was a

@@ -8,11 +8,13 @@
 // Runtime-agnostic: takes a standard `Request`, returns a standard `Response`.
 // Used by both worker.js (Cloudflare) and server.js (Node/Railway).
 
-import { computeId, contenthashOf, localComputeId, normalizeName, registryRecords, resolveAddress, resolveMode, rpcIdle, WEB3_MODES } from './wns.js'
+import { computeId, contenthashOf, localComputeId, normalizeName, registryRecords, resolveAddress, resolveMode, rpcIdle, WEB3_MODES, WNS_CONTRACT } from './wns.js'
 import { namesFromPunycode } from './punycode.js'
 import { decodeContenthash } from './contenthash.js'
 import { fetchErc5219, fetchErc8244 } from './onchain.js'
 import { TtlCache, singleFlight, parseCacheControl } from './cache.js'
+import { postIndex } from './posts.js'
+import { POSTS_HOST, serveNamePosts, servePostsHost } from './posts-page.js'
 
 // Zones this gateway serves. Comma-separated; a request to <label>.<zone>
 // resolves the IPFS content of <label>.wei for ANY listed zone.
@@ -953,11 +955,26 @@ async function resolveTarget(sub, opts) {
   return { resolved: content ? { kind: content.ns, id: content.id } : null }
 }
 
+// The process's post index (posts.js), or null while POSTS_CONTRACT is unset.
+// Posts are checked against the registry the gateway resolves names from.
+export function postsIndexFor(env) {
+  return postIndex(env, readEnv, readEnv(env, 'WNS_CONTRACT', WNS_CONTRACT))
+}
+
+// A name's token id as the index keys it, or null where the contract has none.
+function postsToken(name) {
+  const id = localComputeId(normalizeName(name))
+  return id ? '0x' + id.toString(16).padStart(64, '0') : null
+}
+
 export async function handleRequest(request, env, { clientIp = 'unknown' } = {}) {
   const url = new URL(request.url)
   const zones = String(readEnv(env, 'ZONE', ZONE)).split(',').map((s) => s.trim()).filter(Boolean)
+  // The posts host (posts-page.js) takes uploads, so it alone accepts POST.
+  const posts = postsIndexFor(env)
+  const onPostsHost = !!posts && url.hostname.toLowerCase() === String(readEnv(env, 'POSTS_HOST', POSTS_HOST)).toLowerCase()
 
-  if (request.method !== 'GET' && request.method !== 'HEAD') {
+  if (request.method !== 'GET' && request.method !== 'HEAD' && !(onPostsHost && (request.method === 'POST' || request.method === 'OPTIONS'))) {
     return new Response('Method Not Allowed', { status: 405, headers: { allow: 'GET, HEAD' } })
   }
 
@@ -993,6 +1010,20 @@ export async function handleRequest(request, env, { clientIp = 'unknown' } = {})
   }
 
   if (rateLimited(client, Date.now(), rps, burst)) return tooManyRequests()
+
+  if (onPostsHost) {
+    const run = () =>
+      servePostsHost(posts, request, url, { client, tokenOf: postsToken, postsHost: url.hostname.toLowerCase() }).catch((e) =>
+        upstreamError(e, 'reading posts'),
+      )
+    if (rps <= 0) return run()
+    if (!(await clientAcquire(client))) return tooManyRequests()
+    try {
+      return await run()
+    } finally {
+      clientRelease(client)
+    }
+  }
 
   // The host the request was routed on. On the Worker x-forwarded-host is
   // client-controlled; server.js already folds its proxy's header into the URL.
@@ -1149,6 +1180,21 @@ async function serve(request, env, url, sub) {
   }
 
   if (!resolved) {
+    // A name with no website shows its posts (posts-page.js), if it has any.
+    // Free for a name the index has never seen authorized: no RPC.
+    const posts = postsIndexFor(env)
+    if (posts && !ADDRESS_LABEL.test(sub) && !contentLabel(sub) && !contract) {
+      const name = normalizeName(namesFromPunycode(sub))
+      const token = postsToken(name)
+      if (token && posts.knows(token)) {
+        try {
+          const page = await serveNamePosts(posts, { name, token, path: url.pathname, base: '' })
+          if (page) return page
+        } catch (e) {
+          return upstreamError(e, 'reading posts for ' + sub)
+        }
+      }
+    }
     // Registered names without servable content, unregistered names, and
     // address labels that aren't a page.
     return new Response(

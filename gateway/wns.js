@@ -338,15 +338,20 @@ function decodeBytes32Ascii(data) {
 // documents (hundreds of KB) and want longer than a plain registry lookup.
 export async function ethCall(data, opts) {
   const to = opts?.contract || WNS_CONTRACT
+  return rpcSend('eth_call', [{ to, data }, 'latest'], opts, isHexResult)
+}
+
+const isHexResult = (r) => typeof r === 'string' && /^0x(?:[0-9a-fA-F]{2})*$/.test(r)
+
+// Any JSON-RPC method over the same pool, failover and benching as ethCall.
+// `valid(result)` says whether an answer is well-formed; one that isn't is a
+// broken node, benched like a timeout. The posts index (posts.js) reads logs
+// and blocks through this.
+export async function rpcSend(method, params, opts, valid = (r) => r !== undefined) {
   const endpoints = opts?.rpc?.length ? opts.rpc : DEFAULT_RPCS
   const timeoutMs = opts?.timeoutMs || RPC_TIMEOUT_MS
   const maxBytes = opts?.maxResponseBytes || RPC_MAX_RESPONSE_BYTES
-  const body = JSON.stringify({
-    jsonrpc: '2.0',
-    id: 1,
-    method: 'eth_call',
-    params: [{ to, data }, 'latest'],
-  })
+  const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method, params })
 
   // A configured list (RPC_URLS) goes first; the built-in public endpoints
   // back it up, so a dead or exhausted key degrades to public RPC instead of
@@ -409,8 +414,8 @@ export async function ethCall(data, opts) {
           }
           continue
         }
-        // A reply with no hex result is a broken node, not an empty answer
-        if (typeof json?.result !== 'string' || !/^0x(?:[0-9a-fA-F]{2})*$/.test(json.result)) {
+        // A reply with no well-formed result is a broken node, not an empty answer
+        if (!valid(json?.result)) {
           penalize(ep, 'malformed result')
           lastErr = new Error('rpc: malformed result')
           continue

@@ -23,6 +23,7 @@ A simple namespace on Ethereum named after the smallest unit of ether.
 WNS provides `.wei` names as NFTs (ERC-721). Names can:
 - Resolve to an Ethereum address (receive payments)
 - Host a website via IPFS contenthash
+- Publish blog posts carried by Ethereum blobs ([posts/SPEC.md](posts/SPEC.md))
 - Have unlimited free subdomains
 - Store multi-coin addresses and text records (ENS-compatible resolver)
 - Display as your wallet's identity (reverse resolution)
@@ -895,6 +896,43 @@ WeiDAO funds it with an ordinary proposal targeting the contract with a `value` 
 ### Caveats
 
 Weight is snapshotted at `enter` and drifts down as runway burns — normally by at most one `ROUND_LENGTH`, but a round that keeps reopening for want of tickets or funding carries its tickets with it, so the drift is bounded only by how long funding takes to arrive. A ticket whose name lapses meanwhile keeps its odds and can't claim if drawn; the prize rolls over. Nobody profits from that, but it wastes a round. Odds track the **current** fee schedule, which WeiDAO governs: raising a length tier lifts the odds of everyone already holding that length without their paying anything — the same caveat WeiDAO carries for voting weight. (Buying odds stays fairly priced: weight is linear in the fee you'd pay today, so registering or renewing never beats its cost.) The boost is available to anyone willing to back a proposal and pay the gas, so it confers no edge — it doesn't differentiate so much as tax the unengaged, which is the safe failure mode. A name whose supported runway elapses makes its DAO position prunable by anyone, so a boosted winner in that state must re-`support` before claiming. `NameNFT` blocks transfers of inactive names, so a lapsed `roll.wei` freezes every badge under it — renewal is left outside the contract because `renew` is permissionless and badge holders are motivated. `draw` is permissionless and its caller pays the VRF fee out of their own pocket, so the pot is entirely prize money. There's no keeper reward, but every entrant has one waiting for them — and the caller picks the moment, so they pick what the fee costs.
+
+---
+
+## Posts (`WeiPosts`)
+
+Blogs on `.wei` names and subnames. A post's text travels in an EIP-4844 blob, and a small ownerless
+contract records that the name's owner vouched for it. This is forked back from
+[gwei-names](https://github.com/lucadonnoh/gwei-names), who forked WNS and built it. The events and
+byte formats are the same, so a post makes the same blob, versioned hash and IPFS CIDs on both, and
+their publisher and mirror run against WeiPosts with only the contract address changed. Full
+protocol: [posts/SPEC.md](posts/SPEC.md).
+
+**Contract:** `src/WeiPosts.sol`, not deployed yet (`script/DeployWeiPosts.s.sol`). Its constructor
+takes the NameNFT address. It has no owner, and its only balance is fees in escrow.
+
+| Function | Purpose |
+|---|---|
+| `authorize(uint256 tokenId, bytes32 postHash, bytes32 blobHash, address publisher) payable` | The owner of an active name vouches for a post carried by blob `blobHash`, optionally escrowing a fee for `publisher` |
+| `publish()` | In a blob transaction: records every attached blob, and pays the caller what was escrowed for it for those exact blobs |
+| `post(uint256 tokenId, bytes32 postHash, uint256 blobIndex)` | Authorize and publish in one blob transaction (self-publishing) |
+| `refund(bytes32 blobHash, address publisher)` | Takes back a fee that wasn't delivered for within `REFUND_DELAY` (1 day) |
+| `remove(uint256 tokenId, bytes32 postHash)` | Takes a post off the name's page (the blob keeps the bytes) |
+
+A fee is paid only for the blob whose versioned hash the author computed in advance, and a post's
+blob follows from its bytes alone, so delivery needs no trust or proof. "Active" is
+`resolve(tokenId) != 0`, so an expired name, or a subname whose parent moved on, can't post. A sold
+name doesn't carry its previous owner's posts.
+
+**Reading:** `https://posts.wei.domains/<name>.wei/` lists a name's posts, subnames at any depth
+included, with an Atom feed at `/feed.xml`. A top-level name with no website set also shows them at
+`<name>.wei.limo`. The gateway's index (`gateway/posts.js`) is rebuilt from the contract's events and
+the blobs they name, and it checks every fetched blob against its versioned hash with KZG. Its API is
+at `https://posts.wei.domains/api`.
+
+**Writing:** the dapp's Posts button builds the blob, computes its versioned hash
+(`dapp/vendor/kzg.bundle.mjs`), uploads the bytes and calls `authorize` with three times the current
+cost of a one-blob transaction. The publisher in [posts/poster/](posts/poster/) then delivers it.
 
 ---
 

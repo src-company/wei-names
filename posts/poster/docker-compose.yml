@@ -1,0 +1,29 @@
+# The publisher, on any host with Docker. It shares the host network so it can reach a node and an
+# IPFS API on 127.0.0.1 if the host runs them; it has no inbound port. The key and the ntfy token are
+# files only it can read. Set POSTER_RPC (a node that takes blob transactions), POSTER_CONTRACT and
+# POSTER_FROM_BLOCK in .env; POSTER_IPFS_API is optional (pins delivered blobs).
+services:
+  wei-poster:
+    build: .
+    image: wei-poster:local
+    container_name: wei-poster
+    restart: unless-stopped
+    network_mode: host
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 512m
+    pids_limit: 64
+    environment:
+      POSTER_RPC: ${POSTER_RPC:?set POSTER_RPC in .env}
+      POSTER_API: https://posts.wei.domains/api
+      POSTER_CONTRACT: ${POSTER_CONTRACT:?set POSTER_CONTRACT in .env}
+      POSTER_FROM_BLOCK: ${POSTER_FROM_BLOCK:?set POSTER_FROM_BLOCK in .env}
+      POSTER_KEY_FILE: /run/secrets/poster-key
+      POSTER_IPFS_API: ${POSTER_IPFS_API:-}
+      POSTER_NTFY_URL: ${POSTER_NTFY_URL:-}
+      POSTER_NTFY_TOKEN_FILE: ${POSTER_NTFY_TOKEN_FILE:-}
+    volumes:
+      - /var/lib/wei-poster:/data
+      - /etc/wei-poster/key:/run/secrets/poster-key:ro
+      - /etc/wei-poster/ntfy-token:/run/secrets/ntfy-token:ro

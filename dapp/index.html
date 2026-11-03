@@ -514,6 +514,23 @@ body.modal-open { overflow: hidden; }
   text-decoration: none;
 }
 .view-link a:hover { opacity: 1; text-decoration: underline; }
+/* Posts */
+.post-hint { font-size: 11px; color: var(--fg-muted); line-height: 1.5; margin: 0 0 14px; }
+.post-hint a { color: inherit; }
+.post-section { font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--fg-muted); margin: 22px 0 12px; }
+.manage-form textarea.post-editor {
+  width: 100%; margin-bottom: 8px; padding: 10px; border: 1px solid var(--border); background: transparent; color: var(--fg);
+  font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; line-height: 1.5; min-height: 240px; resize: vertical; border-radius: 0;
+}
+.post-preview { display: none; width: 100%; height: 420px; border: 1px solid var(--border-muted); background: #fff; margin: 4px 0 14px; }
+.post-list { margin-bottom: 8px; font-size: 13px; }
+.post-row { display: flex; align-items: baseline; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border-muted); }
+.post-row .post-date { flex: none; font-size: 11px; color: var(--fg-muted); font-variant-numeric: tabular-nums; }
+.post-row a { flex: 1; color: var(--fg); overflow-wrap: anywhere; }
+.post-row .post-state { flex: none; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--fg-muted); }
+.manage-form .post-row button { width: auto; margin: 0; padding: 4px 10px; font-size: 10px; }
+#postsPanel { display: none; margin-top: 12px; }
+#postsPanel.show { display: block; }
 
 /* Scrolling names */
 .scroll-names {
@@ -1155,6 +1172,14 @@ try{if(localStorage.getItem('wns_dao_banner')==='1'){var _db=document.getElement
   </div>
 </div>
 
+<div id="postsSection" class="send-section" style="display:none;">
+  <a href="#" onclick="togglePosts(event)" class="send-toggle" id="postsToggle" role="button" aria-expanded="false">posts →</a>
+  <div id="postsPanel">
+    <div class="panel-intro">Blogs on .wei names and subnames, stored in Ethereum blobs. Write yours from your name's Posts button. <a href="https://posts.wei.domains/" target="_blank" rel="noopener" style="color:inherit;">All posts →</a></div>
+    <div id="postsList" class="post-list"></div>
+  </div>
+</div>
+
 <div class="featured">
   <span class="featured-label">featured on</span>
   <a href="https://www.bankless.com/read/getting-started-with-the-wei-name-service" target="_blank" rel="noopener" class="featured-card">
@@ -1274,6 +1299,27 @@ const REGISTRAR_ABI = [
 // Gateway for .wei websites - resolves name.wei.domains to IPFS contenthash
 // URL pattern: https://name.wei.domains (not name.wei.wei.domains)
 const WEI_GATEWAY = 'wei.domains';
+// Posts (posts/SPEC.md). Both stay empty until WeiPosts is deployed and a publisher runs for it;
+// the Posts button and the home page's posts panel only show once both are set.
+const POSTS_CONTRACT = '';
+const POSTS_PUBLISHER = '';
+const POSTS_HOST = 'posts.wei.domains';
+const POSTS_API = `https://${POSTS_HOST}/api`; // the gateway's post index, readable from any origin
+const POSTS_ABI = [
+  'function authorize(uint256 tokenId, bytes32 postHash, bytes32 blobHash, address publisher) payable',
+  'function remove(uint256 tokenId, bytes32 postHash)',
+  'function refund(bytes32 blobHash, address publisher)',
+  'function deposits(bytes32 key, address payer) view returns (uint128 amount, uint64 refundableAt)',
+  'function delivered(bytes32 key) view returns (bool)',
+  'error AlreadyDelivered(bytes32 blobHash, address publisher)',
+  'error RefundNotDue(uint256 refundableAt)',
+  'error NothingToRefund()',
+  'error NotNameOwner(uint256 tokenId)',
+  'error InactiveName(uint256 tokenId)',
+];
+function postsEnabled() {
+  return /^0x[0-9a-fA-F]{40}$/.test(POSTS_CONTRACT) && /^0x[0-9a-fA-F]{40}$/.test(POSTS_PUBLISHER);
+}
 // Tacit (tacit.finance): a name's `finance.tacit` text record holds its owner's
 // tacit1… address, so Tacit apps can pay the name privately.
 const TACIT_RECORD_KEY = 'finance.tacit';
@@ -3931,6 +3977,7 @@ async function showManage(tokenId, name, prefetched) {
         ${tacitNameOk(name) ? `<button onclick="showManageForm('tacit')">Tacit Address</button>` : ''}
         <button onclick="showManageForm('subdomain')">Subdomain</button>
         <button onclick="showManageForm('subSales')">Subdomain Sales</button>
+        ${postsEnabled() ? `<button onclick="showManageForm('posts')">Posts</button>` : ''}
         ${unsetBtn || `<button onclick="doSetPrimary()">Set as Display Name</button>`}
       `;
       if (isTopLevel) {
@@ -4034,6 +4081,9 @@ function showManageForm(action) {
     case 'subSales':
       showSubSalesForm();
       return;
+    case 'posts':
+      html = postsFormHtml();
+      break;
     case 'renew':
       html = termsAvailable()
         ? `
@@ -4055,8 +4105,367 @@ function showManageForm(action) {
 
   form.innerHTML = html;
   form.classList.add('show');
+  form.oninput = action === 'posts' ? updatePostCost : null;
   if (action === 'renew' && termsAvailable()) initRenewTerms();
+  if (action === 'posts') { loadOwnPosts(); refreshPostQuote(); }
 }
+
+// ── Posts (posts/SPEC.md): blogs on .wei names and subnames, their text carried by EIP-4844 blobs.
+// A post is JSON bytes named by their keccak-256 hash and carried in its own blob. The dapp builds
+// that blob, computes its versioned hash with KZG (vendor/kzg.bundle.mjs) and authorizes the post
+// against it on WeiPosts, putting the fee in escrow; WeiPosts pays the publisher only when it
+// delivers exactly that blob, and the owner can take the fee back if nobody does within a day.
+// Forked from gwei-names (gwei.domains), with the same blob format. ──
+const POST_MAX_BYTES = 126968;
+const POST_FEE_GAS = 54500n; // the publisher's expected gas for a one-blob publish() (posts/poster expected_gas(1))
+const BLOB_GAS = 131072n;
+// A post's own blob, byte for byte as the gateway and publisher build it (gateway/posts-format.js):
+// "gwei", version 1, a 3-byte length and the post, zero-padded, 31 bytes per 32-byte field element.
+// The "gwei" magic is the shared format's, so a post makes the same blob on both name services.
+function postBlobFrom(bytes) {
+  const payload = new Uint8Array(4096 * 31);
+  payload.set([0x67, 0x77, 0x65, 0x69, 1, bytes.length >> 16, (bytes.length >> 8) & 0xff, bytes.length & 0xff], 0);
+  payload.set(bytes, 8);
+  const blob = new Uint8Array(131072);
+  for (let i = 0; i < 4096; i++) blob.set(payload.subarray(i * 31, i * 31 + 31), i * 32 + 1);
+  return blob;
+}
+// The bytes the gateway and publisher expect: v, title, body, in that order, no whitespace. A post
+// has no date of its own: it is dated by the block of the blob that carries it.
+function postBytesFrom(title, body) {
+  return new TextEncoder().encode(JSON.stringify({ v: 1, title, body }));
+}
+// Same slug as the gateway (gateway/posts-format.js postPath).
+function postPathFor(hash, title) {
+  const slug = (title || '').normalize('NFKD').toLowerCase().replace(/[̀-ͯ]/g, '')
+    .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60).replace(/-+$/, '');
+  return `/posts/${hash.slice(2, 14)}${slug ? '-' + slug : ''}`;
+}
+// Every name's posts, subnames at any depth included, live on the posts host by path.
+function postsHomeOf(name) {
+  return `https://${POSTS_HOST}/${encodeURIComponent(name)}`;
+}
+// What the dapp pays the publisher per post: three times a one-post blob transaction at current
+// prices, rounded up to a gwei (the publisher's quote). The publisher only sends a blob its
+// deposits cover, so this headroom is what gets a post through a price spike.
+function postFeeFrom(baseFee, tip, blobBaseFee) {
+  const MIN_TIP = 50000000n, MAX_TIP = 2000000000n;
+  const t = tip < MIN_TIP ? MIN_TIP : tip > MAX_TIP ? MAX_TIP : tip;
+  const fee = 3n * (POST_FEE_GAS * (baseFee + t) + BLOB_GAS * blobBaseFee);
+  return (fee + 999999999n) / 1000000000n * 1000000000n;
+}
+function tokenHexOf(tokenId) {
+  return '0x' + BigInt(tokenId).toString(16).padStart(64, '0');
+}
+const escrowKeyOf = (blob, publisher) => ethers.keccak256(ethers.concat([blob, ethers.zeroPadValue(publisher, 32)]));
+
+let currentPostFee = null;
+async function refreshPostQuote() {
+  try {
+    const rpc = await getRpc();
+    const [block, blobFee, tip] = await Promise.all([
+      rpc.getBlock('latest'),
+      rpc.send('eth_blobBaseFee', []),
+      rpc.send('eth_maxPriorityFeePerGas', []).catch(() => '0x0'),
+    ]);
+    currentPostFee = postFeeFrom(BigInt(block.baseFeePerGas ?? 0n), BigInt(tip), BigInt(blobFee));
+  } catch (e) {
+    currentPostFee = null;
+  }
+  updatePostCost();
+}
+function readPostForm() {
+  const title = ($('ppTitle')?.value || '').trim();
+  const body = $('ppBody')?.value || '';
+  return { title, body, bytes: postBytesFrom(title, body) };
+}
+function updatePostCost() {
+  // An error about the form ("give the post a title") is stale as soon as the form changes.
+  const status = $('status');
+  if (status?.classList.contains('error')) status.classList.remove('show');
+  const el = $('ppCost');
+  if (!el) return;
+  const { bytes } = readPostForm();
+  const size = `${bytes.length.toLocaleString()} of ${POST_MAX_BYTES.toLocaleString()} bytes`;
+  if (bytes.length > POST_MAX_BYTES) { el.textContent = `Too long: ${size}.`; return; }
+  el.textContent = currentPostFee == null
+    ? `${size}. Checking the publishing fee…`
+    : `${size}. Publishing costs ${ethers.formatEther(currentPostFee)} ETH plus gas for one transaction. The contract holds the fee and pays it to the publisher only once it puts this exact post in a blob. If that hasn't happened within a day, you can take the fee back.`;
+}
+
+function postsFormHtml() {
+  const home = postsHomeOf(currentTokenName + '.wei');
+  const own = /^[a-z0-9-]+$/.test(currentTokenName) ? `https://${currentTokenName}.wei.limo` : null;
+  return `<div class="post-hint">Posts appear at <a href="${escapeHtml(home + '/')}" target="_blank" rel="noopener">${escapeHtml(home.replace('https://', '') + '/')}</a>` +
+    (own ? ` and on <a href="${escapeHtml(own)}" target="_blank" rel="noopener">${escapeHtml(own.replace('https://', ''))}</a> while it has no website set` : '') +
+    `. Their text is stored in Ethereum blobs and is public. You can take a post off your page, but you can't erase it. <a href="https://github.com/src-company/wei-names/blob/main/posts/SPEC.md" target="_blank" rel="noopener">How it works</a></div>` +
+    '<div class="post-list" id="ppList" aria-live="polite"></div>' +
+    '<div class="post-section">New post</div>' +
+    '<label for="ppTitle">Title</label><input type="text" id="ppTitle" maxlength="200">' +
+    '<label for="ppBody">Text</label><textarea id="ppBody" class="post-editor" rows="14" spellcheck="true"></textarea>' +
+    '<div class="post-hint">Markdown: # heading, **bold**, *italic*, [link](https://…), ![image](https://… or ipfs://…), - list, &gt; quote, `code`, $math$.</div>' +
+    '<div class="post-hint" id="ppCost" aria-live="polite"></div>' +
+    '<button onclick="doPublishPost()">Publish</button>' +
+    '<button class="secondary" onclick="previewPost()">Preview</button>' +
+    `<button class="secondary" onclick="$('manageForm').classList.remove('show')">Cancel</button>` +
+    '<iframe id="ppPreview" class="post-preview" sandbox title="Post preview"></iframe>';
+}
+
+// Posts this browser paid to publish that may not have been delivered yet, so their fee can be
+// taken back after the refund delay: { hash, blob, publisher, title } per name.
+const paidPostsKey = (tokenId) => `wns_paid_posts_${tokenHexOf(tokenId)}`;
+function paidPosts(tokenId) {
+  try { return JSON.parse(localStorage.getItem(paidPostsKey(tokenId)) || '[]'); } catch (e) { return []; }
+}
+function savePaidPosts(tokenId, list) {
+  try { localStorage.setItem(paidPostsKey(tokenId), JSON.stringify(list)); } catch (e) {}
+}
+
+async function loadOwnPosts() {
+  const el = $('ppList');
+  if (!el || !currentTokenId) return;
+  const tokenId = currentTokenId;
+  const home = postsHomeOf(currentTokenName + '.wei');
+  try {
+    const res = await fetch(`${POSTS_API}/names/${tokenHexOf(tokenId)}/posts`, { cache: 'no-store' });
+    const { posts } = await res.json();
+    if (tokenId !== currentTokenId || !$('ppList')) return;
+    let html = (posts || []).map((p) => `<div class="post-row"><span class="post-date">${new Date(p.time * 1000).toISOString().slice(0, 10)}</span>` +
+      `<a href="${escapeHtml(home + postPathFor(p.hash, p.title))}" target="_blank" rel="noopener">${escapeHtml(p.title)}</a>` +
+      `<span class="post-state">${p.onchain ? 'in a blob' : 'publishing'}</span>` +
+      `<button class="secondary" onclick="doRemovePost('${p.hash}')">Remove</button></div>`).join('');
+    html += await refundRows(tokenId);
+    if (tokenId !== currentTokenId || !$('ppList')) return;
+    el.innerHTML = html || '<div class="post-hint" style="margin:0;">No posts yet.</div>';
+  } catch (e) {
+    el.innerHTML = '<div class="post-hint" style="margin:0;">Couldn’t load your posts right now.</div>';
+  }
+}
+
+// Fees this wallet put in escrow for the name's posts whose blob wasn't delivered: once the refund
+// delay has passed, a Refund button. They come from this browser and from the index, so another
+// browser (or a closed tab) still finds them; the contract says what is really there to take back.
+async function refundRows(tokenId) {
+  if (!_connectedAddress) return '';
+  let indexed = [];
+  try {
+    const res = await fetch(`${POSTS_API}/authors/${_connectedAddress.toLowerCase()}/paid`, { cache: 'no-store' });
+    if (res.ok) indexed = ((await res.json()).paid || []).filter((a) => a.tokenId === tokenHexOf(tokenId) && !a.delivered);
+  } catch (e) {}
+  const seen = new Set();
+  const list = [...paidPosts(tokenId), ...indexed].filter((p) => {
+    if (!/^0x[0-9a-fA-F]{64}$/.test(p?.blob || '') || !/^0x[0-9a-fA-F]{40}$/.test(p?.publisher || '')) return false;
+    const id = `${p.blob}|${p.publisher}`.toLowerCase();
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+  if (!list.length) return '';
+  const posts = new ethers.Contract(POSTS_CONTRACT, POSTS_ABI, await getRpc());
+  const keep = [];
+  let html = '';
+  for (const p of list) {
+    try {
+      const key = escrowKeyOf(p.blob, p.publisher);
+      const [delivered, deposit] = await Promise.all([posts.delivered(key), posts.deposits(key, _connectedAddress)]);
+      if (delivered || deposit.amount === 0n) continue; // published (and paid), or already refunded
+      keep.push(p);
+      const due = Number(deposit.refundableAt) * 1000 <= Date.now();
+      const title = p.title || `Post ${String(p.hash || '').slice(0, 10)}`;
+      html += `<div class="post-row"><span class="post-date">unpublished</span><span style="flex:1;overflow-wrap:anywhere;">${escapeHtml(title)}</span>` +
+        (due
+          ? `<button class="secondary" onclick="doRefundPost('${p.blob}', '${p.publisher}')">Refund ${ethers.formatEther(deposit.amount)} ETH</button>`
+          : `<span class="post-state">refundable ${new Date(Number(deposit.refundableAt) * 1000).toLocaleString()}</span>`) + '</div>';
+    } catch (e) {
+      keep.push(p);
+    }
+  }
+  savePaidPosts(tokenId, keep);
+  return html;
+}
+
+async function previewPost() {
+  const { title, bytes } = readPostForm();
+  const frame = $('ppPreview');
+  if (!frame) return;
+  if (!title) { showStatus('Give the post a title first', 'error'); return; }
+  try {
+    const res = await fetch(`${POSTS_API}/posts/preview`, { method: 'POST', body: bytes });
+    const out = await res.json();
+    if (!res.ok) throw new Error(out.error || 'Preview failed');
+    // A sandboxed frame with no scripts, showing the markup the post page will serve.
+    frame.srcdoc = '<!doctype html><meta charset="utf-8"><style>' +
+      'body{font-family:Helvetica,Arial,sans-serif;font-size:15px;line-height:1.6;margin:20px;color:#000;overflow-wrap:anywhere}' +
+      'h1{font-size:24px;line-height:1.25;margin:0 0 20px}h2{font-size:19px;margin:28px 0 10px}h3{font-size:16px}' +
+      'img{max-width:100%;height:auto}pre{background:#f9f9f9;border:1px solid #ddd;padding:12px;overflow-x:auto;font-size:13px}' +
+      'code{font-family:ui-monospace,Menlo,monospace;font-size:.9em;background:#f9f9f9;padding:1px 4px}pre code{padding:0}' +
+      'blockquote{border-left:2px solid #000;margin:0 0 16px;padding-left:14px;color:#666}a{color:#000}</style>' +
+      `<h1>${escapeHtml(out.title)}</h1>${out.html}`;
+    frame.style.display = 'block';
+    frame.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  } catch (e) {
+    showStatus(e.message || 'Preview failed', 'error');
+  }
+}
+
+// Upload the bytes. Returns false if the gateway is turning anonymous uploads away right now; those
+// bytes are accepted again once the post is authorized on-chain.
+async function uploadPost(bytes, hash) {
+  const res = await fetch(`${POSTS_API}/posts`, { method: 'POST', body: bytes });
+  const out = await res.json().catch(() => ({}));
+  if (res.status === 429 || res.status === 503) return false;
+  if (!res.ok) throw new Error(out.error || `Upload failed (${res.status})`);
+  if (out.hash !== hash) throw new Error('The gateway stored different bytes than this post');
+  return true;
+}
+async function waitForPostIndexed(hash, timeoutMs = 120000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await fetch(`${POSTS_API}/sync`, { method: 'POST' }).catch(() => {});
+    const res = await fetch(`${POSTS_API}/posts/${hash}`, { cache: 'no-store' }).catch(() => null);
+    const detail = res?.ok ? await res.json().catch(() => null) : null;
+    if (detail?.authorizations?.length) return true;
+    await new Promise((resolve) => setTimeout(resolve, 6000));
+  }
+  return false;
+}
+
+async function doPublishPost() {
+  if (isProcessing || !_signer || !currentTokenId || !postsEnabled()) return;
+  const { title, bytes } = readPostForm();
+  if (!title) { showStatus('Give the post a title', 'error'); return; }
+  if (bytes.length > POST_MAX_BYTES) { showStatus(`The post is too long: ${bytes.length} bytes, the most is ${POST_MAX_BYTES}`, 'error'); return; }
+  const hash = ethers.keccak256(bytes);
+  const name = currentTokenName + '.wei';
+  const tokenId = currentTokenId;
+  isProcessing = true;
+  const btn = (typeof event !== 'undefined' && event?.target) || null; if (btn) btn.disabled = true;
+  try {
+    showStatus('Preparing the blob...', '');
+    // The publisher is only paid for exactly this blob, so its hash is computed here, not taken from anyone.
+    const { blobVersionedHash } = await import('./vendor/kzg.bundle.mjs');
+    const blob = blobVersionedHash(postBlobFrom(bytes));
+    showStatus('Uploading the post...', '');
+    const uploaded = await uploadPost(bytes, hash);
+    // The same post always makes the same blob. If the publisher already delivered it (say, the post
+    // was removed and is posted again), it is in a blob already and needs no fee; the contract would refuse one.
+    const delivered = await new ethers.Contract(POSTS_CONTRACT, POSTS_ABI, await getRpc()).delivered(escrowKeyOf(blob, POSTS_PUBLISHER));
+    if (!delivered) {
+      await refreshPostQuote();
+      if (currentPostFee == null) throw new Error('Couldn’t read current gas prices to price the post');
+    }
+    const fee = delivered ? 0n : currentPostFee;
+    const posts = new ethers.Contract(POSTS_CONTRACT, POSTS_ABI, _signer);
+    showStatus(delivered ? 'Approve the post. It is already in a blob, so there is no fee' : `Approve the post: ${ethers.formatEther(fee)} ETH, held until the publisher delivers its blob`, '');
+    const tx = await wcTransaction(posts.authorize(tokenId, hash, blob, POSTS_PUBLISHER, { value: fee }), 'Approve the post');
+    // Remembered as soon as it is sent, so the refund is offered even if this tab closes now.
+    if (fee > 0n) savePaidPosts(tokenId, [...paidPosts(tokenId).filter((p) => p.blob !== blob), { hash, blob, publisher: POSTS_PUBLISHER, title }]);
+    showStatus('Waiting for confirmation...', '', tx.hash);
+    await waitForTx(tx);
+    showStatus('Confirmed. Adding it to your page...', '', tx.hash);
+    const indexed = await waitForPostIndexed(hash);
+    if (!uploaded) {
+      for (let i = 0; i < 12 && !(await uploadPost(bytes, hash)); i++) await new Promise((resolve) => setTimeout(resolve, 10000));
+    }
+    const url = postsHomeOf(name) + postPathFor(hash, title);
+    $('status').innerHTML = escapeHtml(indexed ? 'Posted! It is on your page now and goes into an Ethereum blob within a few minutes. ' : 'Posted! It will appear on your page within a few minutes. ') +
+      `<a href="${escapeHtml(url)}" target="_blank" rel="noopener" style="color:inherit;">View post →</a>`;
+    $('status').className = 'status show success';
+    if ($('ppTitle')) { $('ppTitle').value = ''; $('ppBody').value = ''; $('ppPreview').style.display = 'none'; }
+    loadOwnPosts();
+  } catch (e) {
+    handleError(e);
+  } finally {
+    isProcessing = false;
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function doRefundPost(blob, publisher) {
+  if (isProcessing || !_signer || !currentTokenId || !postsEnabled()) return;
+  const tokenId = currentTokenId;
+  if (!/^0x[0-9a-fA-F]{64}$/.test(blob) || !/^0x[0-9a-fA-F]{40}$/.test(publisher)) return;
+  isProcessing = true;
+  try {
+    const posts = new ethers.Contract(POSTS_CONTRACT, POSTS_ABI, _signer);
+    const tx = await wcTransaction(posts.refund(blob, publisher), 'Approve the refund');
+    showStatus('Waiting for confirmation...', '', tx.hash);
+    await waitForTx(tx);
+    const id = `${blob}|${publisher}`.toLowerCase();
+    savePaidPosts(tokenId, paidPosts(tokenId).filter((x) => `${x.blob}|${x.publisher}`.toLowerCase() !== id));
+    showStatus('Refunded. The fee is back in your wallet.', 'success', tx.hash);
+    loadOwnPosts();
+  } catch (e) {
+    handleError(e);
+  } finally {
+    isProcessing = false;
+  }
+}
+
+async function doRemovePost(hash) {
+  if (isProcessing || !_signer || !currentTokenId || !postsEnabled()) return;
+  if (!/^0x[0-9a-f]{64}$/.test(hash)) return;
+  const tokenId = currentTokenId;
+  if (!confirm('Take this post off your page? Its text stays in the Ethereum blob.')) return;
+  isProcessing = true;
+  try {
+    const posts = new ethers.Contract(POSTS_CONTRACT, POSTS_ABI, _signer);
+    const tx = await wcTransaction(posts.remove(tokenId, hash), 'Approve removing the post');
+    showStatus('Waiting for confirmation...', '', tx.hash);
+    await waitForTx(tx);
+    fetch(`${POSTS_API}/sync`, { method: 'POST' }).catch(() => {});
+    showStatus('Removed. It leaves your page within a minute.', 'success', tx.hash);
+    setTimeout(loadOwnPosts, 30000);
+  } catch (e) {
+    handleError(e);
+  } finally {
+    isProcessing = false;
+  }
+}
+
+// The home page's "posts →" panel: the newest posts across every name, from the post index.
+let recentPostsLoaded = false;
+async function loadRecentPosts() {
+  const list = $('postsList');
+  if (!list || recentPostsLoaded) return;
+  try {
+    const res = await fetch(POSTS_API + '/posts/recent?limit=12');
+    const { posts } = await res.json();
+    list.innerHTML = '';
+    for (const p of posts || []) {
+      if (!/^0x[0-9a-f]{64}$/.test(p.hash || '') || !/\.wei$/.test(p.name || '')) continue;
+      const row = document.createElement('div');
+      row.className = 'post-row';
+      const date = document.createElement('span');
+      date.className = 'post-date';
+      date.textContent = new Date(p.time * 1000).toISOString().slice(0, 10);
+      const a = document.createElement('a');
+      a.href = postsHomeOf(p.name) + postPathFor(p.hash, p.title);
+      a.target = '_blank'; a.rel = 'noopener';
+      a.textContent = p.title;
+      const by = document.createElement('span');
+      by.className = 'post-state';
+      by.textContent = p.name;
+      row.append(date, a, by);
+      list.appendChild(row);
+    }
+    if (!list.children.length) list.innerHTML = '<div class="post-hint" style="margin:0;">No posts yet.</div>';
+    recentPostsLoaded = true;
+  } catch (e) {
+    list.innerHTML = '<div class="post-hint" style="margin:0;">Couldn’t load posts right now.</div>';
+  }
+}
+function togglePosts(event) {
+  event.preventDefault();
+  const panel = $('postsPanel');
+  const toggle = $('postsToggle');
+  const open = !panel.classList.contains('show');
+  panel.classList.toggle('show', open);
+  toggle.textContent = open ? 'posts · hide' : 'posts →';
+  toggle.setAttribute('aria-expanded', String(open));
+  if (open) loadRecentPosts();
+}
+if (postsEnabled()) $('postsSection').style.display = '';
 
 // Renewal extends from the record's own expiry, not from now, so the new date is the stored
 // expiry plus the terms bought — early renewal loses nothing, and grace months are not forfeited.

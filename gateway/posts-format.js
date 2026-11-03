@@ -1,0 +1,117 @@
+// The byte formats of posts (posts/SPEC.md): a post is a small JSON document named by its
+// keccak-256 hash, and a blob carries one or more posts in a length-prefixed container.
+//
+// Ported from gwei-names (github.com/lucadonnoh/gwei-names, gateway/posts-format.js, MIT) and kept
+// byte-for-byte compatible: the container's "gwei" magic included, so a post makes the same blob,
+// the same versioned hash and the same IPFS CIDs on both name services, and their publisher and
+// mirror work against WeiPosts unchanged.
+
+import { keccak256 } from './keccak.js';
+
+export const hexToBytes = (hex) => Uint8Array.from(hex.match(/../g) || [], (h) => parseInt(h, 16));
+
+export const BLOB_BYTES = 131072; // 4096 field elements of 32 bytes
+const FIELD_ELEMENTS = 4096;
+const FE_DATA = 31; // byte 0 of every field element is zero, which keeps it below the BLS modulus
+export const BLOB_PAYLOAD_BYTES = FIELD_ELEMENTS * FE_DATA; // 126976
+const MAGIC = [0x67, 0x77, 0x65, 0x69]; // "gwei"
+const VERSION = 1;
+const HEADER = MAGIC.length + 1;
+// One post fits in one blob: the payload minus the header and its own 3-byte length.
+export const MAX_POST_BYTES = BLOB_PAYLOAD_BYTES - HEADER - 3;
+export const MAX_TITLE_CHARS = 200;
+
+const toHex = (b) => [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
+export const postHash = (bytes) => '0x' + toHex(keccak256(bytes));
+
+// IPFS addresses (CIDv1, raw codec, base32). A post's is its keccak-256 hash, the one PostAuthorized
+// records, so it follows from Ethereum alone; a blob's is its sha-256, as `ipfs add --cid-version=1
+// --raw-leaves` pins it. See "Mirroring" in posts/SPEC.md.
+const BASE32 = 'abcdefghijklmnopqrstuvwxyz234567';
+function rawCid(hashCode, digest) {
+  let out = 'b', value = 0, bits = 0;
+  for (const byte of [0x01, 0x55, hashCode, digest.length, ...digest]) {
+    value = ((value << 8) | byte) & 0xffff;
+    for (bits += 8; bits >= 5; bits -= 5) out += BASE32[(value >> (bits - 5)) & 31];
+  }
+  return bits ? out + BASE32[(value << (5 - bits)) & 31] : out;
+}
+export const postCid = (hash) => rawCid(0x1b, hexToBytes(hash.slice(2)));
+export const blobCid = async (blob) => rawCid(0x12, new Uint8Array(await crypto.subtle.digest('SHA-256', blob)));
+
+// A v1 post: { "v": 1, "title": string, "body": string }, and optionally "replies": true to take
+// replies (replies-format.js): a post that doesn't say so, like every post written before replies
+// existed, doesn't. Unknown fields are ignored, so later versions can add some. A post
+// has no date of its own: it is dated by the block of the blob that carries it. Returns null for
+// anything else.
+export function parsePost(bytes) {
+  if (!(bytes instanceof Uint8Array) || bytes.length === 0 || bytes.length > MAX_POST_BYTES) return null;
+  let doc;
+  try {
+    doc = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+  } catch (_) {
+    return null;
+  }
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc) || doc.v !== 1) return null;
+  if (typeof doc.title !== 'string' || typeof doc.body !== 'string') return null;
+  const title = doc.title.trim();
+  if (!title || [...title].length > MAX_TITLE_CHARS) return null;
+  return doc.replies === true ? { title, body: doc.body, replies: true } : { title, body: doc.body };
+}
+
+// Serialize a post the way the dapp does: fixed key order, no whitespace, "replies" only when on.
+export function encodePost({ title, body, replies }) {
+  return new TextEncoder().encode(JSON.stringify(replies === true ? { v: 1, title, body, replies: true } : { v: 1, title, body }));
+}
+
+// Blob → payload bytes, or null if any field element has a nonzero top byte (not this encoding).
+function blobPayload(blob) {
+  if (!(blob instanceof Uint8Array) || blob.length !== BLOB_BYTES) return null;
+  const payload = new Uint8Array(BLOB_PAYLOAD_BYTES);
+  for (let i = 0; i < FIELD_ELEMENTS; i++) {
+    if (blob[i * 32] !== 0) return null;
+    payload.set(blob.subarray(i * 32 + 1, i * 32 + 32), i * FE_DATA);
+  }
+  return payload;
+}
+
+// The posts a blob carries, as raw byte strings. A blob in any other format carries none.
+export function decodeBlob(blob) {
+  const payload = blobPayload(blob);
+  if (!payload || !MAGIC.every((b, i) => payload[i] === b) || payload[MAGIC.length] !== VERSION) return [];
+  const entries = [];
+  let at = HEADER;
+  while (at + 3 <= payload.length) {
+    const length = (payload[at] << 16) | (payload[at + 1] << 8) | payload[at + 2];
+    if (length === 0 || at + 3 + length > payload.length) break;
+    entries.push(payload.slice(at + 3, at + 3 + length));
+    at += 3 + length;
+  }
+  return entries;
+}
+
+// Posts → one blob, or null if they don't fit. Used by tests and by tools that publish their own blobs.
+export function encodeBlob(entries) {
+  const size = HEADER + entries.reduce((n, e) => n + 3 + e.length, 0);
+  if (!entries.length || size > BLOB_PAYLOAD_BYTES || entries.some((e) => !e.length)) return null;
+  const payload = new Uint8Array(BLOB_PAYLOAD_BYTES);
+  payload.set(MAGIC, 0);
+  payload[MAGIC.length] = VERSION;
+  let at = HEADER;
+  for (const entry of entries) {
+    payload.set([entry.length >> 16, (entry.length >> 8) & 0xff, entry.length & 0xff], at);
+    payload.set(entry, at + 3);
+    at += 3 + entry.length;
+  }
+  const blob = new Uint8Array(BLOB_BYTES);
+  for (let i = 0; i < FIELD_ELEMENTS; i++) blob.set(payload.subarray(i * FE_DATA, (i + 1) * FE_DATA), i * 32 + 1);
+  return blob;
+}
+
+// URL path for a post: a 12-hex-digit hash prefix, then the title as a readable slug.
+export function postPath(hash, title) {
+  const slug = (title || '').normalize('NFKD').toLowerCase().replace(/[̀-ͯ]/g, '')
+    .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60).replace(/-+$/, '');
+  return `/posts/${hash.slice(2, 14)}${slug ? '-' + slug : ''}`;
+}
+export const POST_PATH = /^\/posts\/([0-9a-f]{12})(?:-[a-z0-9-]*)?\/?$/;
