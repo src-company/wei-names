@@ -252,3 +252,49 @@ services:
         value: "26335211"
       - key: POSTS_DIR
         sync: false
+
+  # 3) Posts publisher (posts/poster, posts/SPEC.md). Delivers the blobs authors
+  #    paid it for on WeiPosts and is paid back in the same transaction. Its
+  #    address is the dapp's POSTS_PUBLISHER.
+  #
+  #    The key is made on this worker's disk on first start (start.sh) and never
+  #    leaves it; the address is in the start log. Keep a little ETH there: a
+  #    batch needs its worst-case cost up front before the fees reimburse it.
+  #    The disk also holds the SQLite state, which is bound to the contract.
+  - type: worker
+    name: wei-poster
+    runtime: python
+    region: oregon
+    plan: starter
+    rootDir: posts/poster
+    # The KZG trusted setup (c-kzg-4844), pinned by hash as in the Dockerfile.
+    buildCommand: >-
+      pip install -r requirements.txt &&
+      curl -fsSL https://raw.githubusercontent.com/ethereum/c-kzg-4844/main/src/trusted_setup.txt -o trusted_setup.txt &&
+      echo "d39b9f2d047cc9dca2de58f264b6a09448ccd34db967881a6713eacacf0f26b7  trusted_setup.txt" | sha256sum -c -
+    startCommand: sh start.sh
+    disk:
+      name: wei-poster-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.7"
+      - key: POSTER_CONTRACT
+        value: "0xDDe00Ec43095fA81d615B61e668eA8a5EF1c9Fad"
+      - key: POSTER_FROM_BLOCK
+        value: "26335211"
+      - key: POSTER_API
+        value: https://posts.wei.domains/api
+      - key: POSTER_DB
+        value: /var/data/poster.db
+      - key: POSTER_KEY_FILE
+        value: /var/data/key
+      - key: POSTER_TRUSTED_SETUP
+        value: trusted_setup.txt
+      # A mainnet node that takes Fusaka (EIP-7594) blob transactions. Set in
+      # the dashboard: an authenticated endpoint carries its key in the URL.
+      # Checked 2026-11-03: Tenderly and publicnode decode the wrapper,
+      # mevblocker does not.
+      - key: POSTER_RPC
+        sync: false
