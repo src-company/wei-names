@@ -76,7 +76,28 @@ Bodies are untrusted, so clients must never render HTML from them. The gateway's
 break), `**bold**`, `*italic*`, `~~strike~~`, `` `code` ``, fenced code blocks, `>` quotes, `-` and
 `1.` lists, `---`, `[links](url)`, `![images](url)`, bare `https://` links, and TeX math as `$…$` and
 `$$…$$`. Links may be `https`, `http`, `mailto`, `ipfs://`, a `/path` or a `#anchor`. Images may be
-`https`, `ipfs://` or a `data:image` URL.
+`https`, `ipfs://` or a base64 `data:image` URL (png, jpeg, gif, webp or svg+xml).
+
+A `data:image` URL puts the picture inside the post, so it lives in the blob with the text and
+needs nothing pinned anywhere. The dapp's editor stores attached pictures this way, resized to fit.
+They share the post's 126,968 bytes with the text, and cost nothing extra, since a blob costs the
+same full or not. gwei-names' renderer caps every link and image destination at 2,000 characters,
+so gwei.domains currently shows a stored picture as text; `https` and `ipfs://` images render on
+both.
+
+### Cover image
+
+An image alone on the body's first line, followed by a blank line or nothing, is the post's
+**cover**: wei.domains shows it as a banner above the title, uses it as the post's thumbnail in
+lists, and gives it to link previews (`og:image`; a stored cover is served at
+`/posts/<id>/cover`). It needs no field of its own, so a reader that doesn't know covers shows it
+as the post's first image.
+
+```
+![](data:image/webp;base64,UklGR…)
+
+The post starts here.
+```
 
 ## Blob format
 

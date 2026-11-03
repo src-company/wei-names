@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { blobVersionedHash } from '../dapp/vendor/kzg.bundle.mjs'
 import { PostIndex, T_AUTHORIZED, T_PUBLISHED, T_REMOVED } from './posts.js'
-import { serveNamePosts, servePostsHost, POST_CSP } from './posts-page.js'
+import { serveNamePosts, servePostsHost, splitCover, POST_CSP } from './posts-page.js'
 import { decodeBlob, encodeBlob, encodePost, parsePost, postCid, postHash, postPath, MAX_POST_BYTES } from './posts-format.js'
 import { renderMarkdown } from './markdown.js'
 import { handleRequest } from './handler.js'
@@ -53,6 +53,9 @@ eq('format: not a post', parsePost(new TextEncoder().encode('{"v":2,"title":"x",
 eq('format: empty title refused', parsePost(new TextEncoder().encode('{"v":1,"title":"  ","body":""}')), null)
 eq('markdown: html is escaped, never passed through', renderMarkdown('<img src=x onerror=alert(1)>').includes('<img'), false)
 eq('markdown: javascript: links stay text', renderMarkdown('[x](javascript:alert(1))').includes('href'), false)
+const photo = 'data:image/webp;base64,' + 'Ab+/'.repeat(25000) // a 100 KB inline picture, as the editor stores one
+eq('markdown: an inline picture stored in the post renders', renderMarkdown(`Text\n\n![harbour](${photo})`).includes(`<img src="${photo}" alt="harbour"`), true)
+eq('markdown: a data: URL is an image source only, never a link', renderMarkdown('[a](data:image/png;base64,AAAA)').includes('<a '), false)
 
 // --- a scripted chain -------------------------------------------------------------------------
 
@@ -241,6 +244,35 @@ res = await serveNamePosts(index, { name: 'alice.wei', token: T_ALICE, path: '/'
 page = await res.text()
 eq('name host: the name page links posts relatively', page.includes(`href="${postPath(firstHash, 'Exploring the blobspace')}"`), true)
 eq('name host: unknown name answers null (the caller 404s as before)', await serveNamePosts(index, { name: 'x.wei', token: token(1), path: '/', base: '' }), null)
+
+// --- covers: an image alone on the body's first line ----------------------------------------------
+
+eq('cover: an image line first is the cover', splitCover('![sky](https://x.test/a.jpg)\n\nHello'), { cover: { url: 'https://x.test/a.jpg', alt: 'sky' }, body: 'Hello' })
+eq('cover: an image inside a sentence is not', splitCover('![a](https://x.test/a.jpg) and text').cover, null)
+eq('cover: an image later in the post is not', splitCover('Hello\n\n![a](https://x.test/a.jpg)').cover, null)
+eq('cover: a source the renderer refuses is not', splitCover('![a](javascript:alert(1))\n\nx').cover, null)
+const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII='
+const covered = encodePost({ title: 'With a cover', body: `![the view](${PNG})\n\nBelow the banner.` })
+const coveredHash = postHash(covered)
+const coveredBlob = blobVersionedHash(encodeBlob([covered]))
+index.upload(covered, 'ip3')
+authorize(40, T_ALICE, coveredHash, ALICE, coveredBlob)
+published(41, coveredBlob)
+await sync()
+const coveredPath = `/alice.wei${postPath(coveredHash, 'With a cover')}`
+page = await (await host(coveredPath)).text()
+eq('cover: shown as a banner above the title', /<figure class="cover"><img src="data:image\/png;base64,[^"]+" alt="the view"[^>]*><\/figure><div class="byline">/.test(page), true)
+eq('cover: … and not again in the body', (page.match(/data:image\/png/g) || []).length, 1)
+eq('cover: link previews get it as a large image', page.includes(`<meta property="og:image" content="https://posts.wei.domains/alice.wei/posts/${coveredHash.slice(2, 14)}/cover">`) && page.includes('summary_large_image'), true)
+res = await host(`/alice.wei/posts/${coveredHash.slice(2, 14)}/cover`)
+eq('cover: served as the image itself', [res.status, res.headers.get('content-type'), (await res.arrayBuffer()).byteLength], [200, 'image/png', Buffer.from(PNG.split(',')[1], 'base64').length])
+eq('cover: a post without one has no cover image', (await host(`/alice.wei/posts/${firstHash.slice(2, 14)}/cover`)).status, 404)
+page = await (await host('/alice.wei/')).text()
+eq('cover: lists show it as a thumbnail, by URL rather than inline', page.includes(`<img src="https://posts.wei.domains/alice.wei/posts/${coveredHash.slice(2, 14)}/cover"`) && !page.includes('data:image'), true)
+res = await host('/api/posts/preview?name=alice.wei', { method: 'POST', body: covered })
+body = await res.json()
+eq('preview: the cover comes apart from the body', [body.cover === PNG, body.html.includes('data:image')], [true, false])
+eq('preview: a draft rendered as its page, pending, with the name', body.page.includes('<figure class="cover">') && body.page.includes('alice.wei') && body.page.includes('class="pending"'), true)
 
 // --- the handler -------------------------------------------------------------------------------
 

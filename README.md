@@ -931,9 +931,12 @@ included, with an Atom feed at `/feed.xml`. A top-level name with no website set
 the blobs they name, and it checks every fetched blob against its versioned hash with KZG. Its API is
 at `https://posts.wei.domains/api`.
 
-**Writing:** the dapp's Posts button builds the blob, computes its versioned hash
-(`dapp/vendor/kzg.bundle.mjs`), uploads the bytes and calls `authorize` with three times the current
-cost of a one-blob transaction. The publisher in [posts/poster/](posts/poster/) then delivers it.
+**Writing:** the dapp's Posts button opens an editor with a formatting toolbar, a cover image,
+pictures you attach, paste or drop (stored inside the post, so nothing is pinned anywhere), a live
+preview of the real post page and a draft kept per name. Publishing builds the blob, computes its
+versioned hash (`dapp/vendor/kzg.bundle.mjs`), uploads the bytes and calls `authorize` with three
+times the current cost of a one-blob transaction. The publisher in [posts/poster/](posts/poster/)
+then delivers it.
 
 ---
 

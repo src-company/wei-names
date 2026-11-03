@@ -10,8 +10,8 @@
 // Bodies are rendered by markdown.js, which escapes everything. Pages run no scripts at all (the
 // CSP says so), and follow the reader's light/dark preference with CSS alone.
 
-import { renderMarkdown, excerpt } from './markdown.js'
-import { MAX_POST_BYTES, POST_PATH, parsePost, postPath } from './posts-format.js'
+import { renderMarkdown, excerpt, imageUrl } from './markdown.js'
+import { MAX_POST_BYTES, POST_PATH, parsePost, postHash, postPath } from './posts-format.js'
 
 export const POSTS_HOST = 'posts.wei.domains'
 const DAPP = 'https://wei.domains'
@@ -61,7 +61,11 @@ h2.title{font-size:28px;font-weight:700;line-height:1.25;margin-bottom:6px;lette
 .panel div{display:flex;gap:12px;padding:2px 0}
 .panel span{min-width:96px;color:var(--dim)}
 .panel a{font-family:ui-monospace,Menlo,monospace}
+.cover{margin:0 0 28px}
+.cover img{display:block;width:100%;height:auto;aspect-ratio:5/2;object-fit:cover;background:var(--surface)}
 .list{list-style:none}
+.list a.thumb{display:block;margin-bottom:10px}
+.list a.thumb img{display:block;width:100%;aspect-ratio:5/2;object-fit:cover;background:var(--surface)}
 .list li{padding:14px 0;border-bottom:1px solid var(--line)}
 .list li:first-child{border-top:1px solid var(--line)}
 .list a.t{font-size:17px;font-weight:700;text-decoration:none}
@@ -79,12 +83,44 @@ function layout({ title, head = '', body, nav = '' }) {
     `<p class="note">Posts on .wei names live in Ethereum blobs, vouched for by the name's owner. <a href="${SPEC}">How it works</a></p></html>`
 }
 
-function metaTags({ title, description, url, type = 'website' }) {
+function metaTags({ title, description, url, type = 'website', image = null }) {
   const tag = (attr, key, value) => `<meta ${attr}="${key}" content="${escapeHtml(value)}">`
   return `<link rel="canonical" href="${escapeHtml(url)}">` + tag('name', 'description', description) +
     tag('property', 'og:type', type) + tag('property', 'og:site_name', 'wei name service') +
     tag('property', 'og:title', title) + tag('property', 'og:description', description) + tag('property', 'og:url', url) +
-    tag('name', 'twitter:card', 'summary') + tag('name', 'twitter:title', title) + tag('name', 'twitter:description', description)
+    (image ? tag('property', 'og:image', image) + tag('name', 'twitter:image', image) : '') +
+    tag('name', 'twitter:card', image ? 'summary_large_image' : 'summary') + tag('name', 'twitter:title', title) + tag('name', 'twitter:description', description)
+}
+
+// A post's cover (posts/SPEC.md, "Cover image"): an image alone on the body's first line, followed by
+// a blank line or nothing. It needs no field of its own, so a reader that doesn't know covers still
+// shows it, as the post's first image. Returns { cover: { url, alt } | null, body: the rest }.
+const COVER_LINE = /^[ \t]*!\[([^\]\n]{0,300})\]\([ \t]*([^\s()<>]{1,200000})[ \t]*\)[ \t]*(?:\n[ \t]*\n|\n?$)/
+export function splitCover(body) {
+  const m = COVER_LINE.exec(String(body || '').replace(/^\s*\n/, ''))
+  const url = m && imageUrl(m[2])
+  if (!url) return { cover: null, body }
+  return { cover: { url, alt: m[1].trim() }, body: String(body).replace(/^\s*\n/, '').slice(m[0].length) }
+}
+// A cover stored inside the post, decoded for /posts/<id>/cover (link previews, list thumbnails).
+// Raster types only: an SVG document served at its own URL is a page, not a picture.
+const COVER_DATA = /^data:(image\/(?:png|jpeg|gif|webp));base64,([A-Za-z0-9+/]+={0,2})$/
+function coverBytes(url) {
+  const m = COVER_DATA.exec(url)
+  if (!m) return null
+  try {
+    return { type: m[1], bytes: Uint8Array.from(atob(m[2]), (c) => c.charCodeAt(0)) }
+  } catch {
+    return null
+  }
+}
+// Where a list or a link preview finds a post's cover: an https cover is its own URL, one inside the
+// post is served from /posts/<id>/cover, and an ipfs:// one goes through the path gateway.
+function coverSrc(post, base) {
+  const { cover } = splitCover(post.body)
+  if (!cover) return null
+  if (cover.url.startsWith('data:')) return coverBytes(cover.url) ? `${base}/posts/${post.hash.slice(2, 14)}/cover` : null
+  return cover.url
 }
 
 // Where a name's posts live, as `base` + postPath(): its own host on a name host, else POSTS_HOST.
@@ -104,24 +140,32 @@ function renderPost({ name, base, canonical, post }) {
       ]
     : [['Status', 'Authorized by the owner, waiting for its blob']]
   rows.push(['Post hash', `<a href="https://${POSTS_HOST}/api/posts/${post.hash}">${short(post.hash)}</a>`])
+  const { cover, body: text } = splitCover(post.body)
   const body =
+    (cover ? `<figure class="cover"><img src="${escapeHtml(cover.url)}" alt="${escapeHtml(cover.alt)}" referrerpolicy="no-referrer"></figure>` : '') +
     `<div class="byline"><a href="${escapeHtml(base || '/')}">${escapeHtml(name)}</a></div>` +
     `<h2 class="title">${escapeHtml(post.title)}</h2><div class="meta">${dateLine(post)}</div>` +
-    `<article class="body">${renderMarkdown(post.body)}</article>` +
+    `<article class="body">${renderMarkdown(text)}</article>` +
     `<div class="panel">${rows.map(([k, v]) => `<div><span>${k}</span>${v}</div>`).join('')}</div>`
   return layout({
     title: `${post.title} · ${name}`,
     nav: `<a href="${escapeHtml((base || '') + '/feed.xml')}">feed</a>`,
     head: `<link rel="alternate" type="application/atom+xml" title="${escapeHtml(name)}" href="${escapeHtml((base || '') + '/feed.xml')}">` +
-      metaTags({ title: `${post.title} · ${name}`, description: excerpt(post.body) || `A post by ${name}.`, url: canonical, type: 'article' }),
+      metaTags({
+        title: `${post.title} · ${name}`, description: excerpt(text) || `A post by ${name}.`, url: canonical, type: 'article',
+        // Previews fetch from the canonical host, so a cover inside the post is addressed there.
+        image: coverSrc(post, canonical.replace(/\/posts\/[^/]*$/, '')),
+      }),
     body,
   })
 }
 
-function listItems(posts, link) {
+function listItems(posts, link, baseOf) {
   return '<ul class="list">' + posts.map((p) => {
-    const ex = excerpt(p.body, 160)
-    return `<li><a class="t" href="${escapeHtml(link(p))}">${escapeHtml(p.title)}</a>` +
+    const ex = excerpt(splitCover(p.body).body, 160)
+    const thumb = coverSrc(p, baseOf(p))
+    return '<li>' + (thumb ? `<a class="thumb" href="${escapeHtml(link(p))}" tabindex="-1"><img src="${escapeHtml(thumb)}" alt="" loading="lazy" referrerpolicy="no-referrer"></a>` : '') +
+      `<a class="t" href="${escapeHtml(link(p))}">${escapeHtml(p.title)}</a>` +
       `<div class="d">${p.name ? escapeHtml(p.name) + ' · ' : ''}${dateLine(p)}</div>${ex ? `<p>${escapeHtml(ex)}</p>` : ''}</li>`
   }).join('') + '</ul>'
 }
@@ -134,7 +178,7 @@ function renderName({ name, base, canonical, posts }) {
     head: `<link rel="alternate" type="application/atom+xml" title="${escapeHtml(name)}" href="${escapeHtml(base + '/feed.xml')}">` +
       metaTags({ title: name, description: `Posts by ${name}.`, url: canonical }),
     body: `<h2 class="title">${escapeHtml(name)}</h2><div class="meta">${posts.length} post${posts.length === 1 ? '' : 's'}</div>` +
-      listItems(posts, (p) => base + postPath(p.hash, p.title)),
+      listItems(posts, (p) => base + postPath(p.hash, p.title), () => base),
   })
 }
 
@@ -144,7 +188,9 @@ function renderRecent({ posts, postsHost }) {
     head: metaTags({ title: 'posts on .wei names', description: 'Blogs on .wei names and subnames, stored in Ethereum blobs.', url: `https://${postsHost}/` }),
     body: '<h2 class="title">posts</h2><div class="meta">blogs on .wei names and subnames, stored in Ethereum blobs. ' +
       `Write yours from your name's Posts button on <a href="${DAPP}">wei.domains</a>.</div>` +
-      (posts.length ? listItems(posts, (p) => canonicalBase(p.name, postsHost) + postPath(p.hash, p.title)) : '<p class="empty">No posts yet.</p>'),
+      (posts.length
+        ? listItems(posts, (p) => canonicalBase(p.name, postsHost) + postPath(p.hash, p.title), (p) => canonicalBase(p.name, postsHost))
+        : '<p class="empty">No posts yet.</p>'),
   })
 }
 
@@ -225,6 +271,17 @@ export async function serveNamePosts(index, { name, token, path, base, canonical
       headers: { 'content-type': 'application/atom+xml; charset=utf-8', 'cache-control': 'public, max-age=300', 'x-content-type-options': 'nosniff', ...CORS },
     })
   }
+  const c = /^\/posts\/([0-9a-f]{12})\/cover$/.exec(path)
+  if (c) {
+    const found = findPost(posts, c[1])
+    const cover = found && splitCover(found.body).cover
+    const img = cover && coverBytes(cover.url)
+    if (!img) return notFound()
+    // A post's bytes never change under its hash; only whether it shows does.
+    return new Response(img.bytes, {
+      headers: { 'content-type': img.type, 'cache-control': 'public, max-age=3600', 'x-content-type-options': 'nosniff', 'content-security-policy': "default-src 'none'", ...CORS },
+    })
+  }
   const m = POST_PATH.exec(path)
   const post = m && findPost(posts, m[1])
   if (!post) return notFound()
@@ -267,10 +324,20 @@ async function serveApi(index, request, path, url, { client }) {
     return json(out.status, out.error ? { error: out.error } : { hash: out.hash })
   }
   if (post && path === '/api/posts/preview') {
+    // A draft rendered as its post page will be (pending, dated now), so the author sees exactly
+    // what readers will before paying for anything. `?name=` puts the name in the byline.
     const bytes = await readBody(request)
     const doc = bytes && parsePost(bytes)
     if (!doc) return json(400, { error: 'Not a post.' })
-    return json(200, { title: doc.title, html: renderMarkdown(doc.body) })
+    const { cover, body } = splitCover(doc.body)
+    const name = /^[^/?#]{1,1024}\.wei$/i.test(url.searchParams.get('name') || '') ? url.searchParams.get('name').toLowerCase() : 'yourname.wei'
+    const hash = postHash(bytes)
+    const draft = { hash, ...doc, time: Math.floor(Date.now() / 1000), onchain: null }
+    const base = canonicalBase(name)
+    return json(200, {
+      title: doc.title, cover: cover && cover.url, html: renderMarkdown(body),
+      page: renderPost({ name, base, canonical: base + postPath(hash, doc.title), post: draft }),
+    })
   }
   if (post && path === '/api/sync') {
     const run = index.maybeSync(true)

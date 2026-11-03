@@ -12,7 +12,7 @@
 import { texToMathml } from './math.js';
 
 // An image source: ipfs:// through the path gateway the gateway itself uses, an inline image, or https.
-function imageUrl(value) {
+export function imageUrl(value) {
   const v = (value || '').trim();
   if (v.includes('\u0000')) return null;
   const ipfs = /^ipfs:\/\/(?:ipfs\/)?([a-zA-Z0-9]{46,100})(\/[^\s?#"'<>]*)?$/.exec(v);
@@ -52,6 +52,10 @@ export function linkUrl(value) {
 
 // A link destination: no spaces or angle brackets, parentheses only in balanced pairs (one level).
 const DEST = '(?:[^\\s()<>]|\\([^\\s()<>]*\\)){1,2000}';
+// An image may also be an inline data: URL, which is far longer than any link: a picture stored in
+// the post itself (the dapp's editor puts them there). One character class, so it can't backtrack.
+// Not in gwei-names' renderer, which caps every destination at DEST's 2,000 characters.
+const IMG_DEST = `(?:data:image\\/(?:png|jpeg|gif|webp|svg\\+xml);base64,[A-Za-z0-9+/]{1,200000}={0,2}|${DEST})`;
 
 // Inline markup. Code spans, links, images and backslash escapes are cut out first as placeholders,
 // the rest is escaped, emphasis is applied to the escaped text, then the placeholders go back in.
@@ -68,7 +72,7 @@ function inline(text) {
     // Inline math: no space just inside the dollars and no digit after, so "$5 and $10" stays text.
     .replace(/(^|[^\\$\w])\$(?=[^\s$])([^$\n]{0,2000}?[^\s$\\])\$(?![\w$])/g, (_, lead, tex) => lead + math(tex, false))
     .replace(/\\([\\`*_{}[\]()#+\-.!~>|$])/g, (_, c) => hold(escapeHtml(c)))
-    .replace(new RegExp(`!\\[([^\\]\\n]{0,300})\\]\\(\\s*(${DEST})(?:\\s+"[^"\\n]{0,200}")?\\s*\\)`, 'g'), (_, alt, src) => {
+    .replace(new RegExp(`!\\[([^\\]\\n]{0,300})\\]\\(\\s*(${IMG_DEST})(?:\\s+"[^"\\n]{0,200}")?\\s*\\)`, 'g'), (_, alt, src) => {
       const text = plain(alt);
       const url = src.includes('\u0000') ? null : imageUrl(src);
       return url ? hold(`<img src="${escapeHtml(url)}" alt="${escapeHtml(text)}" loading="lazy" referrerpolicy="no-referrer">`) : hold(escapeHtml(text));

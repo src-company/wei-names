@@ -13,6 +13,8 @@ import path from 'node:path';
 import url from 'node:url';
 import vm from 'node:vm';
 import { encodeBlob, encodePost, postHash, postPath } from '../gateway/posts-format.js';
+import { splitCover } from '../gateway/posts-page.js';
+import { renderMarkdown } from '../gateway/markdown.js';
 import { blobVersionedHash } from './vendor/kzg.bundle.mjs';
 
 const here = path.dirname(url.fileURLToPath(import.meta.url));
@@ -37,11 +39,11 @@ const liftConst = (name) => {
   return line;
 };
 
-const ctx = vm.createContext({ TextEncoder, Uint8Array, BigInt, JSON });
+const ctx = vm.createContext({ TextEncoder, Uint8Array, BigInt, JSON, String, Map });
 vm.runInContext([
   liftConst('POST_MAX_BYTES'), liftConst('POST_FEE_GAS'), liftConst('BLOB_GAS'),
-  lift('postBlobFrom'), lift('postBytesFrom'), lift('postPathFor'), lift('postFeeFrom'), lift('tokenHexOf'),
-  'this.out = { postBlobFrom, postBytesFrom, postPathFor, postFeeFrom, tokenHexOf, POST_MAX_BYTES };',
+  lift('postBlobFrom'), lift('postBytesFrom'), lift('postPathFor'), lift('postFeeFrom'), lift('tokenHexOf'), lift('expandPostBody'),
+  'this.out = { postBlobFrom, postBytesFrom, postPathFor, postFeeFrom, tokenHexOf, expandPostBody, POST_MAX_BYTES };',
 ].join('\n'), ctx);
 const dapp = ctx.out;
 
@@ -75,6 +77,20 @@ eq('token: a name id as the index keys it', dapp.tokenHexOf(0xa11ce), '0x' + 'a1
 // 3 x (54,500 gas at base + tip, plus a blob at the blob base fee), rounded up to a gwei.
 eq('fee: three one-blob publishes', dapp.postFeeFrom(10n ** 9n, 10n ** 8n, 1n), (3n * (54500n * 1_100_000_000n + 131072n) + 999999999n) / 1000000000n * 1000000000n);
 eq('fee: the tip is clamped to the publisher\'s ceiling', dapp.postFeeFrom(0n, 10n ** 12n, 0n), 3n * 54500n * 2_000_000_000n);
+
+// The editor keeps images out of the text as img:N tags and the cover out of it entirely. What it
+// builds must be what the gateway reads: the cover found as the cover, the images rendered as images.
+const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+// A realistically sized picture (~100 KB), not just a 1x1: the renderer once capped image sources at 2,000 characters.
+const PHOTO = 'data:image/webp;base64,' + 'Ab+/'.repeat(25000);
+const images = new Map([['1', PHOTO]]);
+const built = dapp.expandPostBody('Intro.\n\n![a photo](img:1)\n\nOutro.', images, PNG);
+const split = splitCover(built);
+eq('editor: the cover becomes the cover the gateway finds', split.cover && split.cover.url, PNG);
+eq('editor: an attached image renders as an image', renderMarkdown(split.body).includes(`<img src="${PHOTO}" alt="a photo"`), true);
+eq('editor: no cover, no cover line', splitCover(dapp.expandPostBody('Just text.', images, null)).cover, null);
+eq('editor: an unknown image tag is left as text, never a broken URL', dapp.expandPostBody('![x](img:9)', images, null), '![x](img:9)');
+eq('editor: a tag in prose is not an image tag', dapp.expandPostBody('see (img:1) here', images, null), 'see (img:1) here');
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
