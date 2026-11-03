@@ -4249,9 +4249,12 @@ function updatePostCost() {
   if (bar) { bar.style.width = used + '%'; bar.classList.toggle('full', bytes.length > POST_MAX_BYTES); }
   const size = `${(bytes.length / 1000).toFixed(1)} of ${(POST_MAX_BYTES / 1000).toFixed(0)} KB used`;
   if (bytes.length > POST_MAX_BYTES) { el.textContent = `Too long: ${size}. Shorten the text or remove an image.`; return; }
-  el.textContent = currentPostFee == null
+  // The Link button leaves "https://" for the address; left as it is, the link shows as plain text.
+  const blank = ($('ppBody')?.value.match(/\]\(\s*(?:https?:\/\/)?\s*\)/g) || []).length;
+  const linkNote = blank ? ` ${blank === 1 ? 'A link has' : `${blank} links have`} no address yet, so ${blank === 1 ? 'it shows' : 'they show'} as plain text.` : '';
+  el.textContent = (currentPostFee == null
     ? `${size}. Checking the publishing fee…`
-    : `${size}. Publishing costs ${ethers.formatEther(currentPostFee)} ETH plus gas for one transaction, whatever the size. The contract holds the fee and pays it to the publisher only once it puts this exact post in a blob. If that hasn't happened within a day, you can take the fee back.`;
+    : `${size}. Publishing costs ${ethers.formatEther(currentPostFee)} ETH plus gas for one transaction, whatever the size. The contract holds the fee and pays it to the publisher only once it puts this exact post in a blob. If that hasn't happened within a day, you can take the fee back.`) + linkNote;
 }
 function onPostInput() {
   updatePostCost();
@@ -4520,7 +4523,8 @@ function postsFormHtml() {
     `<button type="button" class="post-tool-right" onclick="$('ppMdFile').click()" title="Open a Markdown file">Open .md</button></div>` +
     '<textarea id="ppBody" class="post-editor" rows="14" spellcheck="true" aria-label="Post text" placeholder="Write your post. Markdown works too: **bold**, *italic*, ## headings, - lists, [links](https://…). Paste or drop images right in."></textarea>' +
     '</div>' +
-    '<iframe id="ppPreview" class="post-preview" sandbox title="Post preview"></iframe>' +
+    // No scripts run in the preview; links may open, in a new tab, so they can be checked.
+    '<iframe id="ppPreview" class="post-preview" sandbox="allow-popups allow-popups-to-escape-sandbox" title="Post preview"></iframe>' +
     `<input type="file" id="ppImageFile" accept="image/*" multiple hidden onchange="[...this.files].forEach(attachPostImage); this.value=''">` +
     `<input type="file" id="ppMdFile" accept=".md,.markdown,.txt,text/markdown,text/plain" hidden onchange="loadMarkdownFile(this.files[0]); this.value=''">` +
     '<div class="post-room"><div id="ppRoom"></div></div>' +
@@ -4614,7 +4618,8 @@ async function renderPostPreview() {
     const out = await res.json();
     if (!res.ok) throw new Error(out.error || 'Preview failed');
     if ($('ppPreview') !== frame) return;
-    frame.srcdoc = out.page;
+    // Links open in a new tab: inside the frame they would navigate the preview away.
+    frame.srcdoc = out.page.replace('<meta charset="utf-8">', '<meta charset="utf-8"><base target="_blank">');
   } catch (e) {
     frame.srcdoc = `<p style="font:13px Helvetica,Arial,sans-serif;color:#666;padding:20px">${escapeHtml(e.message || 'Preview failed')}</p>`;
   }

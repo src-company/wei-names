@@ -56,6 +56,10 @@ eq('markdown: javascript: links stay text', renderMarkdown('[x](javascript:alert
 const photo = 'data:image/webp;base64,' + 'Ab+/'.repeat(25000) // a 100 KB inline picture, as the editor stores one
 eq('markdown: an inline picture stored in the post renders', renderMarkdown(`Text\n\n![harbour](${photo})`).includes(`<img src="${photo}" alt="harbour"`), true)
 eq('markdown: a data: URL is an image source only, never a link', renderMarkdown('[a](data:image/png;base64,AAAA)').includes('<a '), false)
+eq('markdown: a link typed without https:// still links', renderMarkdown('[my site](example.com)').includes('href="https://example.com/"'), true)
+eq('markdown: … www. and a path too', renderMarkdown('[a](www.example.com/page?x=1)').includes('href="https://www.example.com/page?x=1"'), true)
+eq('markdown: <https://…> links to itself', renderMarkdown('<https://example.com/x>').includes('<a href="https://example.com/x"'), true)
+eq('markdown: no scheme-less guess for what isn\'t a web address', ['[a](localhost)', '[a](//evil.com)', '<javascript:alert(1)>', '[a](example.com"x=1)'].map((t) => renderMarkdown(t).includes('href')), [false, false, false, false])
 
 // --- a scripted chain -------------------------------------------------------------------------
 

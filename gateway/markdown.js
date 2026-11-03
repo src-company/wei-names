@@ -33,7 +33,7 @@ const escapeHtml = (s) =>
 const MAX_QUOTE_DEPTH = 4;
 
 export function linkUrl(value) {
-  const v = (value || '').trim();
+  let v = (value || '').trim();
   // A held span (\u0000N\u0000) inside a destination would be expanded inside the attribute later.
   if (v.includes('\u0000')) return null;
   // Same-page anchors and paths on the name's own site, which keep working wherever a post is shown.
@@ -41,6 +41,9 @@ export function linkUrl(value) {
   if (/^mailto:[^\s@<>"']{1,64}@[^\s@<>"']{1,190}$/i.test(v)) return v;
   const ipfs = /^ipfs:\/\/(?:ipfs\/)?([a-zA-Z0-9]{46,100})(\/[^\s?#"'<>]*)?$/.exec(v);
   if (ipfs) return `https://ipfs.filebase.io/ipfs/${ipfs[1]}${ipfs[2] || ''}`;
+  // A web address written without its scheme ("example.com", "www.example.com/page"), the way people
+  // usually type one, is an https link. (Not in gwei-names' renderer, where it stays plain text.)
+  if (/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}(?::\d{1,5})?(?:[/?#][^\s"'<>]*)?$/i.test(v)) v = 'https://' + v;
   if (!/^https?:\/\//i.test(v)) return null;
   try {
     const url = new URL(v);
@@ -72,6 +75,11 @@ function inline(text) {
     // Inline math: no space just inside the dollars and no digit after, so "$5 and $10" stays text.
     .replace(/(^|[^\\$\w])\$(?=[^\s$])([^$\n]{0,2000}?[^\s$\\])\$(?![\w$])/g, (_, lead, tex) => lead + math(tex, false))
     .replace(/\\([\\`*_{}[\]()#+\-.!~>|$])/g, (_, c) => hold(escapeHtml(c)))
+    // <https://…>: an address in angle brackets is a link to itself, as in CommonMark.
+    .replace(/<(https?:\/\/[^\s<>\u0000]{1,2000})>/g, (m, href) => {
+      const url = linkUrl(href);
+      return url ? hold(`<a href="${escapeHtml(url)}" rel="nofollow ugc noopener">${escapeHtml(href)}</a>`) : m;
+    })
     .replace(new RegExp(`!\\[([^\\]\\n]{0,300})\\]\\(\\s*(${IMG_DEST})(?:\\s+"[^"\\n]{0,200}")?\\s*\\)`, 'g'), (_, alt, src) => {
       const text = plain(alt);
       const url = src.includes('\u0000') ? null : imageUrl(src);
