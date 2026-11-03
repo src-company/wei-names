@@ -4379,10 +4379,12 @@ async function postImageType() {
   }
   return postWebpOk ? 'image/webp' : 'image/jpeg'; // Safari can't encode WebP
 }
-// An image as a data URL of at most `maxChars`: as it is if it already fits (an animated GIF stays
-// animated), else cropped to `ratio` if one is given, scaled down and re-encoded until it fits.
+// An image as a data URL of at most `maxChars`: cropped to `ratio` if one is given, then scaled
+// down and re-encoded until it fits. Re-encoding through a canvas also drops the file's metadata
+// (a phone photo's EXIF can hold where it was taken), which matters in a post that can't be erased.
+// Only a GIF that already fits goes in as it is, so an animation stays animated.
 async function fitPostImage(file, maxChars, ratio = null) {
-  if (!ratio && /^image\/(png|jpeg|gif|webp)$/.test(file.type) && file.size * 1.4 < maxChars) {
+  if (!ratio && file.type === 'image/gif' && file.size * 1.4 < maxChars) {
     const url = await readAsDataUrl(file);
     if (url.length <= maxChars) return url;
   }
