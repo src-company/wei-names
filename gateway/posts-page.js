@@ -12,6 +12,7 @@
 
 import { renderMarkdown, excerpt, imageUrl } from './markdown.js'
 import { MAX_POST_BYTES, POST_PATH, parsePost, postHash, postPath } from './posts-format.js'
+import { renderCard } from './share-card.js'
 
 export const POSTS_HOST = 'posts.wei.domains'
 const DAPP = 'https://wei.domains'
@@ -83,12 +84,14 @@ function layout({ title, head = '', body, nav = '' }) {
     `<p class="note">Posts on .wei names live in Ethereum blobs, vouched for by the name's owner. <a href="${SPEC}">How it works</a></p></html>`
 }
 
-function metaTags({ title, description, url, type = 'website', image = null }) {
+function metaTags({ title, description, url, type = 'website', image = null, imageWidth, imageHeight, imageAlt }) {
   const tag = (attr, key, value) => `<meta ${attr}="${key}" content="${escapeHtml(value)}">`
   return `<link rel="canonical" href="${escapeHtml(url)}">` + tag('name', 'description', description) +
     tag('property', 'og:type', type) + tag('property', 'og:site_name', 'wei name service') +
     tag('property', 'og:title', title) + tag('property', 'og:description', description) + tag('property', 'og:url', url) +
     (image ? tag('property', 'og:image', image) + tag('name', 'twitter:image', image) : '') +
+    (imageWidth ? tag('property', 'og:image:type', 'image/png') + tag('property', 'og:image:width', imageWidth) + tag('property', 'og:image:height', imageHeight) : '') +
+    (imageAlt ? tag('property', 'og:image:alt', imageAlt) + tag('name', 'twitter:image:alt', imageAlt) : '') +
     tag('name', 'twitter:card', image ? 'summary_large_image' : 'summary') + tag('name', 'twitter:title', title) + tag('name', 'twitter:description', description)
 }
 
@@ -123,6 +126,36 @@ function coverSrc(post, base) {
   return cover.url
 }
 
+// --- link-preview cards (share-card.js) -------------------------------------------------------------
+// Every page gets a 1200x630 PNG: a post's title with its name's generated mark, a name with its post
+// count, the posts host's own. The URL carries a hash of what the card shows (?v=), so a changed card
+// is a new URL to previews, and drawn cards are kept by that hash.
+const CARD_VERSION = 1 // bump with any change to how cards look
+function cardVersion(card) { // FNV-1a: a cache key, not a security boundary
+  let h = 0x811c9dc5
+  for (const byte of new TextEncoder().encode(JSON.stringify([CARD_VERSION, card]))) h = Math.imul(h ^ byte, 0x01000193)
+  return (h >>> 0).toString(16).padStart(8, '0')
+}
+const cardCache = new Map()
+const CARD_CACHE_MAX = 200
+async function cardResponse(card) {
+  const key = cardVersion(card)
+  let png = cardCache.get(key)
+  if (!png) {
+    png = await renderCard(card)
+    cardCache.set(key, png)
+    if (cardCache.size > CARD_CACHE_MAX) cardCache.delete(cardCache.keys().next().value)
+  }
+  return new Response(png, {
+    headers: { 'content-type': 'image/png', 'cache-control': 'public, max-age=86400', 'x-content-type-options': 'nosniff', ...CORS },
+  })
+}
+const cardMeta = (card, url, alt) => ({ image: `${url}?v=${cardVersion(card)}`, imageWidth: 1200, imageHeight: 630, imageAlt: alt })
+const hostOf = (canonical) => canonical.replace(/^https:\/\//, '').replace(/\/$/, '')
+const postCard = (name, seed, post, base) => ({ kind: 'post', name, title: post.title, date: humanDate(post.time), seed, mark: true, host: hostOf(base) })
+const nameCard = (name, seed, posts, base) => ({ kind: 'name', name, bio: `${posts.length} post${posts.length === 1 ? '' : 's'}, stored in Ethereum blobs`, seed, mark: true, host: hostOf(base) })
+const siteCard = (postsHost) => ({ kind: 'site', title: 'posts', lead: 'blogs on .wei names and subnames, stored in Ethereum blobs', footer: postsHost })
+
 // Where a name's posts live, as `base` + postPath(): its own host on a name host, else POSTS_HOST.
 export const canonicalBase = (name, postsHost = POSTS_HOST) => `https://${postsHost}/${encodeURIComponent(name)}`
 
@@ -131,7 +164,7 @@ function dateLine(post) {
     (post.onchain ? '' : '<span class="pending" title="Authorized by the owner, waiting for its blob">pending</span>')
 }
 
-function renderPost({ name, base, canonical, post }) {
+function renderPost({ name, base, canonical, post, seed = null }) {
   const rows = post.onchain
     ? [
         ['Status', `In a blob since block <a href="https://etherscan.io/block/${post.onchain.block}">${post.onchain.block}</a>`],
@@ -153,11 +186,18 @@ function renderPost({ name, base, canonical, post }) {
     head: `<link rel="alternate" type="application/atom+xml" title="${escapeHtml(name)}" href="${escapeHtml((base || '') + '/feed.xml')}">` +
       metaTags({
         title: `${post.title} · ${name}`, description: excerpt(text) || `A post by ${name}.`, url: canonical, type: 'article',
-        // Previews fetch from the canonical host, so a cover inside the post is addressed there.
-        image: coverSrc(post, canonical.replace(/\/posts\/[^/]*$/, '')),
+        // A cover is the post's preview image, as an article's banner is; without one, its card.
+        // Previews fetch from the canonical host, so both are addressed there.
+        ...previewImage(post, canonical.replace(/\/posts\/[^/]*$/, ''), name, seed),
       }),
     body,
   })
+}
+
+function previewImage(post, home, name, seed) {
+  const cover = coverSrc(post, home)
+  if (cover) return { image: cover, imageAlt: splitCover(post.body).cover.alt || post.title }
+  return cardMeta(postCard(name, seed, post, home), `${home}/posts/${post.hash.slice(2, 14)}/card.png`, `${post.title}, a post by ${name}`)
 }
 
 function listItems(posts, link, baseOf) {
@@ -170,13 +210,16 @@ function listItems(posts, link, baseOf) {
   }).join('') + '</ul>'
 }
 
-function renderName({ name, base, canonical, posts }) {
+function renderName({ name, base, canonical, posts, seed = null }) {
   const manage = `${DAPP}/#${encodeURIComponent(name.replace(/\.wei$/, ''))}`
   return layout({
     title: name,
     nav: `<a href="${escapeHtml(base + '/feed.xml')}">feed</a> · <a href="${escapeHtml(manage)}">${escapeHtml(name)} on wei.domains</a>`,
     head: `<link rel="alternate" type="application/atom+xml" title="${escapeHtml(name)}" href="${escapeHtml(base + '/feed.xml')}">` +
-      metaTags({ title: name, description: `Posts by ${name}.`, url: canonical }),
+      metaTags({
+        title: name, description: `Posts by ${name}.`, url: canonical,
+        ...cardMeta(nameCard(name, seed, posts, canonical), `${canonical.replace(/\/$/, '')}/card.png`, `Posts by ${name}`),
+      }),
     body: `<h2 class="title">${escapeHtml(name)}</h2><div class="meta">${posts.length} post${posts.length === 1 ? '' : 's'}</div>` +
       listItems(posts, (p) => base + postPath(p.hash, p.title), () => base),
   })
@@ -185,7 +228,10 @@ function renderName({ name, base, canonical, posts }) {
 function renderRecent({ posts, postsHost }) {
   return layout({
     title: 'posts · wei name service',
-    head: metaTags({ title: 'posts on .wei names', description: 'Blogs on .wei names and subnames, stored in Ethereum blobs.', url: `https://${postsHost}/` }),
+    head: metaTags({
+      title: 'posts on .wei names', description: 'Blogs on .wei names and subnames, stored in Ethereum blobs.', url: `https://${postsHost}/`,
+      ...cardMeta(siteCard(postsHost), `https://${postsHost}/card.png`, 'Posts on .wei names'),
+    }),
     body: '<h2 class="title">posts</h2><div class="meta">blogs on .wei names and subnames, stored in Ethereum blobs. ' +
       `Write yours from your name's Posts button on <a href="${DAPP}">wei.domains</a>.</div>` +
       (posts.length
@@ -265,7 +311,13 @@ export async function serveNamePosts(index, { name, token, path, base, canonical
   const posts = await index.postsFor(token)
   if (!posts.length) return null
   const canonical = canonicalBase(name, canonicalHost)
-  if (path === '/' || path === '') return html(200, renderName({ name, base, canonical: canonical + '/', posts }))
+  if (path === '/' || path === '') return html(200, renderName({ name, base, canonical: canonical + '/', posts, seed: token }))
+  if (path === '/card.png') return cardResponse(nameCard(name, token, posts, canonical))
+  const pc = /^\/posts\/([0-9a-f]{12})\/card\.png$/.exec(path)
+  if (pc) {
+    const found = findPost(posts, pc[1])
+    return found ? cardResponse(postCard(name, token, found, canonical)) : notFound()
+  }
   if (path === '/feed.xml') {
     return new Response(renderFeed({ name, base: base || canonical, posts }), {
       headers: { 'content-type': 'application/atom+xml; charset=utf-8', 'cache-control': 'public, max-age=300', 'x-content-type-options': 'nosniff', ...CORS },
@@ -285,7 +337,7 @@ export async function serveNamePosts(index, { name, token, path, base, canonical
   const m = POST_PATH.exec(path)
   const post = m && findPost(posts, m[1])
   if (!post) return notFound()
-  return html(200, renderPost({ name, base, canonical: canonical + postPath(post.hash, post.title), post }))
+  return html(200, renderPost({ name, base, canonical: canonical + postPath(post.hash, post.title), post, seed: token }))
 }
 
 // The posts host: the API, recent posts, and every name by path.
@@ -298,6 +350,7 @@ export async function servePostsHost(index, request, url, { client, tokenOf, pos
     index.maybeSync()
     return html(200, renderRecent({ posts: await index.recent(30), postsHost }))
   }
+  if (path === '/card.png') return cardResponse(siteCard(postsHost))
   // /<name>.wei[/rest]: the name as its owner wrote it, percent-encoded where it isn't ASCII.
   const m = /^\/([^/]{1,1024}\.wei)(\/.*)?$/i.exec(path)
   if (!m) return notFound()

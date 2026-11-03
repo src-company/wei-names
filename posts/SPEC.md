@@ -166,7 +166,8 @@ every published post. Pointed at WeiPosts and at `https://posts.wei.domains`, it
 feed at `/feed.xml`. A top-level name with no website set also shows them on its own host
 (`alice.wei.limo/`). A subname such as `blog.alice.wei` has no host of its own unless its parent has a
 wildcard certificate, which is why the posts host serves every name by path. Post pages run no
-scripts.
+scripts. Shared links show a 1200x630 card (the post's title and the name's generated mark), or a
+post's cover when it has one.
 
 **API.** The gateway serves its index at `https://posts.wei.domains/api`, readable from any origin:
 

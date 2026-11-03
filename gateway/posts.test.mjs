@@ -274,6 +274,23 @@ body = await res.json()
 eq('preview: the cover comes apart from the body', [body.cover === PNG, body.html.includes('data:image')], [true, false])
 eq('preview: a draft rendered as its page, pending, with the name', body.page.includes('<figure class="cover">') && body.page.includes('alice.wei') && body.page.includes('class="pending"'), true)
 
+// --- link-preview cards ------------------------------------------------------------------------------
+
+const isPng = async (r) => { const b = new Uint8Array(await r.arrayBuffer()); return r.headers.get('content-type') === 'image/png' && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47 }
+page = await (await host(`/alice.wei${postPath(firstHash, 'Exploring the blobspace')}`)).text()
+const cardUrl = /<meta property="og:image" content="([^"]+)">/.exec(page)?.[1] || ''
+eq('card: a post without a cover previews as its card', cardUrl.startsWith(`https://posts.wei.domains/alice.wei/posts/${firstHash.slice(2, 14)}/card.png?v=`), true)
+eq('card: … at 1200x630, as a large card', page.includes('<meta property="og:image:width" content="1200">') && page.includes('summary_large_image'), true)
+res = await host(new URL(cardUrl).pathname)
+eq('card: the post card is a PNG', await isPng(res), true)
+page = await (await host(coveredPath)).text()
+eq('card: a post with a cover previews as its cover', /og:image" content="[^"]+\/cover"/.test(page), true)
+page = await (await host('/alice.wei/')).text()
+eq('card: a name page has its card', page.includes('content="https://posts.wei.domains/alice.wei/card.png?v='), true)
+eq('card: … served', await isPng(await host('/alice.wei/card.png')), true)
+eq('card: the posts host has its own', await isPng(await host('/card.png')), true)
+eq('card: none for a post the name does not show', (await host('/alice.wei/posts/000000000000/card.png')).status, 404)
+
 // --- the handler -------------------------------------------------------------------------------
 
 const env = { POSTS_CONTRACT: POSTS, RATE_LIMIT_RPS: '0' }
