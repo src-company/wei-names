@@ -40,7 +40,8 @@ docker compose up -d
 docker compose run --rm wei-poster status
 ```
 
-Then put the printed address in `POSTS_PUBLISHER` in `dapp/index.html`.
+Then put the printed address in `POSTS_PUBLISHER` in `dapp/index.html`. wei.domains runs this as the
+`wei-poster` Render worker (`render.yaml`, `start.sh`), at `0xB63Cb6f9D921C1C2639bEb587046584fcF181EDF`.
 
 **Test:** `POSTER_TRUSTED_SETUP=trusted_setup.txt python -m unittest test_poster` (from this
 directory; the end-to-end tests need anvil, cast, node and `forge build`). They run the publisher
