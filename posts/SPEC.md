@@ -14,7 +14,9 @@ wei.domains runs one publisher and one index, described at the end. Neither is s
 
 ## Contract
 
-`WeiPosts` ([src/WeiPosts.sol](../src/WeiPosts.sol)) has no owner, admin or upgrades, and its only
+`WeiPosts` ([src/WeiPosts.sol](../src/WeiPosts.sol), mainnet
+[`0xDDe00Ec43095fA81d615B61e668eA8a5EF1c9Fad`](https://etherscan.io/address/0xDDe00Ec43095fA81d615B61e668eA8a5EF1c9Fad),
+deployed in block 26335211) has no owner, admin or upgrades, and its only
 balance is fees in escrow. It checks name ownership against NameNFT
 (`0x0000000000696760E15f265e828DB644A0c242EB`) and emits events. Clients rebuild everything from
 those events, so no archive state is needed.

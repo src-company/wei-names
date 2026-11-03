@@ -236,8 +236,8 @@ services:
       # resolves www.wei unless you list `www` here (applies to every zone).
       - key: RESERVED_LABELS
         sync: false
-      # Posts (posts/SPEC.md). Off until POSTS_CONTRACT is set: the WeiPosts
-      # address, with POSTS_FROM_BLOCK its deployment block. Then
+      # Posts (posts/SPEC.md): the WeiPosts address and its deployment block
+      # (both public, so set here rather than in the dashboard). With them,
       # posts.wei.domains (POSTS_HOST; covered by the *.wei.domains entry above,
       # so no new cert or DNS) serves the post API and every name's posts, and a
       # name with no website shows its posts on its own host.
@@ -247,8 +247,8 @@ services:
       # including uploaded bytes still waiting for their blob, which a restart
       # otherwise drops until the author's dapp uploads them again.
       - key: POSTS_CONTRACT
-        sync: false
+        value: "0xDDe00Ec43095fA81d615B61e668eA8a5EF1c9Fad"
       - key: POSTS_FROM_BLOCK
-        sync: false
+        value: "26335211"
       - key: POSTS_DIR
         sync: false

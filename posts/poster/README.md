@@ -27,9 +27,9 @@ pays three times the cost at quote time, so this takes a sustained price spike.)
 SQLite file. A batch needs its worst-case cost up front, before the posts' fees reimburse it. Fees
 accumulate on the same address. The database is bound to the contract it was started for.
 
-**Run it:** put this directory on the host, with an `.env` setting `POSTER_RPC`, `POSTER_CONTRACT`
-and `POSTER_FROM_BLOCK` (the WeiPosts deployment block), and optionally `POSTER_IPFS_API`,
-`POSTER_NTFY_URL` and `POSTER_NTFY_TOKEN_FILE=/run/secrets/ntfy-token`.
+**Run it:** put this directory on the host, with an `.env` setting `POSTER_RPC`,
+`POSTER_CONTRACT=0xDDe00Ec43095fA81d615B61e668eA8a5EF1c9Fad` and `POSTER_FROM_BLOCK=26335211`, and
+optionally `POSTER_IPFS_API`, `POSTER_NTFY_URL` and `POSTER_NTFY_TOKEN_FILE=/run/secrets/ntfy-token`.
 
 ```sh
 sudo install -d -m 0750 -o 10088 /etc/wei-poster /var/lib/wei-poster

@@ -529,8 +529,22 @@ body.modal-open { overflow: hidden; }
 .post-row a { flex: 1; color: var(--fg); overflow-wrap: anywhere; }
 .post-row .post-state { flex: none; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--fg-muted); }
 .manage-form .post-row button { width: auto; margin: 0; padding: 4px 10px; font-size: 10px; }
-#postsPanel { display: none; margin-top: 12px; }
-#postsPanel.show { display: block; }
+/* Recent posts on the home page, centred like "featured on" below it */
+.posts-home { margin-top: 56px; text-align: center; }
+.posts-home-note { font-size: 11px; color: var(--fg-muted); letter-spacing: 0.02em; margin: -6px 0 12px; }
+.posts-home-list { display: flex; flex-direction: column; }
+.posts-home-list a { font-size: 13px; line-height: 24px; color: var(--fg); text-decoration: none; letter-spacing: 0.01em; overflow-wrap: anywhere; }
+.posts-home-list a:hover { text-decoration: underline; }
+.posts-home-list a span { color: var(--fg-muted); }
+.posts-home-all { display: inline-block; margin-top: 10px; font-size: 11px; color: var(--fg-muted); text-decoration: none; }
+.posts-home-all:hover { color: var(--fg); }
+/* A new feature's tag (as gwei.domains marks theirs): pops in, then a sheen sweeps across. */
+.new-badge { --new-shine: rgba(255,255,255,0.6); position: relative; clip-path: inset(0); display: inline-block; margin-left: 7px; padding: 2px 6px; background: var(--fg); color: var(--bg); font-size: 9px; font-weight: 600; letter-spacing: 0.14em; line-height: 1.3; vertical-align: 0.5px; opacity: 1; animation: newPop 0.5s cubic-bezier(.3, 1.6, .5, 1) both; }
+.dark .new-badge { --new-shine: rgba(255,255,255,0.95); }
+.new-badge::after { content: ''; position: absolute; top: 0; bottom: 0; left: 0; width: 60%; background: linear-gradient(100deg, transparent, var(--new-shine), transparent); transform: translateX(-120%) skewX(-20deg); animation: newShine 3.6s ease-in-out 0.6s infinite; }
+@keyframes newPop { from { transform: scale(0.4); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes newShine { 0% { transform: translateX(-120%) skewX(-20deg); } 35%, 100% { transform: translateX(260%) skewX(-20deg); } }
+@media (prefers-reduced-motion: reduce) { .new-badge, .new-badge::after { animation: none; } }
 
 /* Scrolling names */
 .scroll-names {
@@ -1172,12 +1186,12 @@ try{if(localStorage.getItem('wns_dao_banner')==='1'){var _db=document.getElement
   </div>
 </div>
 
-<div id="postsSection" class="send-section" style="display:none;">
-  <a href="#" onclick="togglePosts(event)" class="send-toggle" id="postsToggle" role="button" aria-expanded="false">posts →</a>
-  <div id="postsPanel">
-    <div class="panel-intro">Blogs on .wei names and subnames, stored in Ethereum blobs. Write yours from your name's Posts button. <a href="https://posts.wei.domains/" target="_blank" rel="noopener" style="color:inherit;">All posts →</a></div>
-    <div id="postsList" class="post-list"></div>
-  </div>
+<!-- Recent posts: shown once the post index answers with some -->
+<div class="posts-home" id="postsSection" style="display:none;">
+  <span class="featured-label">recent posts <span class="new-badge">new</span></span>
+  <div class="posts-home-note">blogs on .wei names and subnames, stored in Ethereum blobs. Write yours from your name's Posts button.</div>
+  <div class="posts-home-list" id="postsList"></div>
+  <a class="posts-home-all" href="https://posts.wei.domains/" target="_blank" rel="noopener">all posts →</a>
 </div>
 
 <div class="featured">
@@ -1299,9 +1313,9 @@ const REGISTRAR_ABI = [
 // Gateway for .wei websites - resolves name.wei.domains to IPFS contenthash
 // URL pattern: https://name.wei.domains (not name.wei.wei.domains)
 const WEI_GATEWAY = 'wei.domains';
-// Posts (posts/SPEC.md). Both stay empty until WeiPosts is deployed and a publisher runs for it;
-// the Posts button and the home page's posts panel only show once both are set.
-const POSTS_CONTRACT = '';
+// Posts (posts/SPEC.md). Reading (recent posts, a name's Blog row) needs only the contract; the
+// Posts form also needs a publisher, since browser wallets can't send blob transactions.
+const POSTS_CONTRACT = '0xDDe00Ec43095fA81d615B61e668eA8a5EF1c9Fad';
 const POSTS_PUBLISHER = '';
 const POSTS_HOST = 'posts.wei.domains';
 const POSTS_API = `https://${POSTS_HOST}/api`; // the gateway's post index, readable from any origin
@@ -1317,8 +1331,11 @@ const POSTS_ABI = [
   'error NotNameOwner(uint256 tokenId)',
   'error InactiveName(uint256 tokenId)',
 ];
+function postsReadable() {
+  return /^0x[0-9a-fA-F]{40}$/.test(POSTS_CONTRACT);
+}
 function postsEnabled() {
-  return /^0x[0-9a-fA-F]{40}$/.test(POSTS_CONTRACT) && /^0x[0-9a-fA-F]{40}$/.test(POSTS_PUBLISHER);
+  return postsReadable() && /^0x[0-9a-fA-F]{40}$/.test(POSTS_PUBLISHER);
 }
 // Tacit (tacit.finance): a name's `finance.tacit` text record holds its owner's
 // tacit1… address, so Tacit apps can pay the name privately.
@@ -3957,7 +3974,9 @@ async function showManage(tokenId, name, prefetched) {
     if (isOwner && !isExpiredInGrace && !isSubInactive && tacitNameOk(name) && !textRecords[TACIT_RECORD_KEY]) {
       infoHtml += `<div style="font-size:11px;opacity:0.55;margin:8px 0 0;"><a href="https://tacit.finance" target="_blank" rel="noopener"><img src="${TACIT_LOGO}" alt="Tacit" width="12" height="12" style="vertical-align:-2px;margin-right:5px;"></a><a href="#" onclick="showManageForm('tacit');return false;" style="color:inherit;">Get paid privately at ${escapeHtml(name)}.wei on Bitcoin, Ethereum &amp; L2s →</a></div>`;
     }
+    if (postsReadable()) infoHtml += '<div id="nameBlog" style="display:none;"></div>';
     $('manageInfo').innerHTML = infoHtml;
+    loadNameBlog(tokenId, name);
 
     // setPrimaryName(0) is the one write that always succeeds — it touches only the
     // caller's own row — so it is offered wherever this name is the display name,
@@ -4423,49 +4442,43 @@ async function doRemovePost(hash) {
   }
 }
 
-// The home page's "posts →" panel: the newest posts across every name, from the post index.
-let recentPostsLoaded = false;
+// The home page's recent posts: the newest across every name, from the post index. The section
+// stays hidden until the index answers with at least one.
 async function loadRecentPosts() {
-  const list = $('postsList');
-  if (!list || recentPostsLoaded) return;
+  const sec = $('postsSection'), list = $('postsList');
+  if (!sec || !list || !postsReadable()) return;
   try {
     const res = await fetch(POSTS_API + '/posts/recent?limit=12');
     const { posts } = await res.json();
     list.innerHTML = '';
     for (const p of posts || []) {
-      if (!/^0x[0-9a-f]{64}$/.test(p.hash || '') || !/\.wei$/.test(p.name || '')) continue;
-      const row = document.createElement('div');
-      row.className = 'post-row';
-      const date = document.createElement('span');
-      date.className = 'post-date';
-      date.textContent = new Date(p.time * 1000).toISOString().slice(0, 10);
+      if (!/^0x[0-9a-f]{64}$/.test(p.hash || '') || !/\.wei$/.test(p.name || '') || typeof p.title !== 'string') continue;
       const a = document.createElement('a');
       a.href = postsHomeOf(p.name) + postPathFor(p.hash, p.title);
       a.target = '_blank'; a.rel = 'noopener';
-      a.textContent = p.title;
       const by = document.createElement('span');
-      by.className = 'post-state';
-      by.textContent = p.name;
-      row.append(date, a, by);
-      list.appendChild(row);
+      by.textContent = ' · ' + p.name;
+      a.append(p.title, by);
+      list.appendChild(a);
     }
-    if (!list.children.length) list.innerHTML = '<div class="post-hint" style="margin:0;">No posts yet.</div>';
-    recentPostsLoaded = true;
-  } catch (e) {
-    list.innerHTML = '<div class="post-hint" style="margin:0;">Couldn’t load posts right now.</div>';
-  }
+    sec.style.display = list.children.length ? '' : 'none';
+  } catch (e) {}
 }
-function togglePosts(event) {
-  event.preventDefault();
-  const panel = $('postsPanel');
-  const toggle = $('postsToggle');
-  const open = !panel.classList.contains('show');
-  panel.classList.toggle('show', open);
-  toggle.textContent = open ? 'posts · hide' : 'posts →';
-  toggle.setAttribute('aria-expanded', String(open));
-  if (open) loadRecentPosts();
+loadRecentPosts();
+
+// A name's Blog row in the panel, for anyone viewing it: how many posts it has and where they are.
+async function loadNameBlog(tokenId, name) {
+  const el = $('nameBlog');
+  if (!el || !postsReadable()) return;
+  try {
+    const res = await fetch(`${POSTS_API}/names/${tokenHexOf(tokenId)}/posts`);
+    const { posts } = await res.json();
+    if (!posts?.length || $('nameBlog') !== el || currentTokenId !== tokenId) return;
+    const home = postsHomeOf(name + '.wei') + '/';
+    el.innerHTML = `<span>Blog:</span><a href="${escapeHtml(home)}" target="_blank" rel="noopener" style="color:inherit;">${posts.length} post${posts.length === 1 ? '' : 's'} →</a>`;
+    el.style.display = '';
+  } catch (e) {}
 }
-if (postsEnabled()) $('postsSection').style.display = '';
 
 // Renewal extends from the record's own expiry, not from now, so the new date is the stored
 // expiry plus the terms bought — early renewal loses nothing, and grace months are not forfeited.

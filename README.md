@@ -908,8 +908,9 @@ byte formats are the same, so a post makes the same blob, versioned hash and IPF
 their publisher and mirror run against WeiPosts with only the contract address changed. Full
 protocol: [posts/SPEC.md](posts/SPEC.md).
 
-**Contract:** `src/WeiPosts.sol`, not deployed yet (`script/DeployWeiPosts.s.sol`). Its constructor
-takes the NameNFT address. It has no owner, and its only balance is fees in escrow.
+**Contract:** [`0xDDe00Ec43095fA81d615B61e668eA8a5EF1c9Fad`](https://etherscan.io/address/0xDDe00Ec43095fA81d615B61e668eA8a5EF1c9Fad)
+(Ethereum Mainnet, block 26335211; `src/WeiPosts.sol`). Its constructor took the NameNFT address. It
+has no owner, and its only balance is fees in escrow.
 
 | Function | Purpose |
 |---|---|
@@ -968,6 +969,7 @@ That bug was in WeiRoll, not NameNFT — NameNFT behaved as designed. The lesson
 - **Dapp:** https://wei.domains
 - **Contract:** https://etherscan.io/address/0x0000000000696760E15f265e828DB644A0c242EB
 - **Subdomain Registrar:** https://etherscan.io/address/0x53745292f0d30d68204a63002C17bDa16C772bf7
+- **Posts (WeiPosts):** https://etherscan.io/address/0xDDe00Ec43095fA81d615B61e668eA8a5EF1c9Fad
 - **OpenSea:** https://opensea.io/collection/wei-name-service
 - **ENSIP-15:** https://docs.ens.domains/ensip/15/
 - **ens-normalize:** https://github.com/adraffy/ens-normalize.js
