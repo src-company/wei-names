@@ -91,6 +91,8 @@ eq('editor: an attached image renders as an image', renderMarkdown(split.body).i
 eq('editor: no cover, no cover line', splitCover(dapp.expandPostBody('Just text.', images, null)).cover, null);
 eq('editor: an unknown image tag is left as text, never a broken URL', dapp.expandPostBody('![x](img:9)', images, null), '![x](img:9)');
 eq('editor: a tag in prose is not an image tag', dapp.expandPostBody('see (img:1) here', images, null), 'see (img:1) here');
+eq('editor: a link pasted inside a link\'s address publishes as the link meant', dapp.expandPostBody('[Ethereum]([https://](https://ethereum.org/))', images, null), '[Ethereum](https://ethereum.org/)');
+eq('editor: … and renders as one link', renderMarkdown(dapp.expandPostBody('see [Ethereum]([https://](https://ethereum.org/)) now', images, null)), '<p>see <a href="https://ethereum.org/" rel="nofollow ugc noopener">Ethereum</a> now</p>');
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

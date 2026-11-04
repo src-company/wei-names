@@ -4229,7 +4229,11 @@ let postEditorToken = null; // the name the editor's images and draft belong to
 // The textarea's text with its image tags put in, and the cover as the body's first line: an image
 // alone on the first line is the post's cover (posts/SPEC.md), so no field is needed for it.
 function expandPostBody(text, images, cover) {
-  const body = String(text).replace(/\]\(img:(\d{1,6})\)/g, (m, id) => (images.has(id) ? `](${images.get(id)})` : m));
+  const body = String(text)
+    // A link pasted inside a link's address ("[a]([https://](https://b))", which an earlier editor
+    // made) is the link that was meant.
+    .replace(/\]\(\s*\[[^\]\n]*\]\((https?:\/\/[^\s()]+)\)\s*\)/g, ']($1)')
+    .replace(/\]\(img:(\d{1,6})\)/g, (m, id) => (images.has(id) ? `](${images.get(id)})` : m));
   return cover ? `![](${cover})\n\n${body}` : body;
 }
 function readPostForm() {
@@ -4305,9 +4309,12 @@ function initPostEditor() {
   ta.addEventListener('paste', (e) => {
     const files = [...(e.clipboardData?.files || [])].filter((f) => f.type.startsWith('image/'));
     if (files.length) { e.preventDefault(); files.forEach(attachPostImage); return; }
-    // A URL pasted over selected text makes it a link.
+    // A URL pasted over selected text makes it a link, unless the selection is already where a link's
+    // address goes (the Link button selects "https://" there): then the URL simply replaces it.
     const text = e.clipboardData?.getData('text/plain') || '';
-    if (ta.selectionStart !== ta.selectionEnd && /^https?:\/\/\S+$/.test(text.trim())) {
+    const selected = ta.value.slice(ta.selectionStart, ta.selectionEnd);
+    const inAddress = /\]\(\s*$/.test(ta.value.slice(0, ta.selectionStart)) || /^\s*(?:https?:\/\/\S*)?\s*$/i.test(selected);
+    if (selected && !inAddress && /^https?:\/\/\S+$/.test(text.trim())) {
       e.preventDefault();
       ta.setRangeText(`[${ta.value.slice(ta.selectionStart, ta.selectionEnd)}](${text.trim()})`, ta.selectionStart, ta.selectionEnd, 'end');
       onPostInput();
