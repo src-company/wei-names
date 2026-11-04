@@ -118,7 +118,12 @@ server.listen(PORT, () => {
 // Keep the post index current between visits, so a publisher reading bytes
 // and a reader opening a page both find the latest events already applied.
 if (posts) {
-  posts.maybeSync()
+  // One line once the first sync is in, so a deploy (the private archive's especially, which nothing
+  // can reach from outside) shows its index came up.
+  posts.maybeSync().then(() => console.log(JSON.stringify({
+    event: 'posts_index_ready', block: Number(posts.cursor), posts: posts.byHash.size, held: posts.bytes.size,
+    disk: !!posts.dir, archive: posts.archiveUrl || null,
+  })))
   setInterval(() => posts.maybeSync(), 60_000).unref()
 }
 

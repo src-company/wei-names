@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { blobVersionedHash } from '../dapp/vendor/kzg.bundle.mjs'
 import { PostIndex, T_AUTHORIZED, T_PUBLISHED, T_REMOVED } from './posts.js'
-import { serveNamePosts, servePostsHost, splitCover, POST_CSP } from './posts-page.js'
+import { serveNamePosts, servePostsHost, splitCover, ownImages, POST_CSP } from './posts-page.js'
 import { decodeBlob, encodeBlob, encodePost, parsePost, postCid, postHash, postPath, MAX_POST_BYTES } from './posts-format.js'
 import { renderMarkdown } from './markdown.js'
 import { handleRequest } from './handler.js'
@@ -299,6 +299,33 @@ await sync()
 const big = encodePost({ title: 'Big draft', body: Array.from({ length: 3 }, () => `![p](data:image/webp;base64,${'Ab+/'.repeat(25000)})`).join('\n\n') })
 res = await host('/api/posts/preview?name=alice.wei', { method: 'POST', body: big })
 eq('preview: a draft bigger than one post still previews (its pictures go into image posts)', [big.length > MAX_POST_BYTES, res.status], [true, 200])
+
+// --- durability: portable picture addresses, and our archive ----------------------------------------
+
+eq('img: an address naming any host is served from this gateway\'s copy', ownImages(`<img src="https://old-host.example/img/${coveredHash}/1" alt="">`), `<img src="https://posts.wei.domains/img/${coveredHash}/1" alt="">`)
+eq('img: … other images are left alone', ownImages('<img src="https://x.test/a.jpg">'), '<img src="https://x.test/a.jpg">')
+{
+  // A fresh index that kept nothing (a restart), whose blob sources have nothing either: the archive's
+  // copy brings the post back, but only bytes that hash to it and rebuild its recorded blob are kept.
+  const archived = new Map([[firstHash, first], [secondHash, encodePost({ title: 'forged by a bad archive', body: '' })]])
+  let archiveCalls = 0
+  const fresh = new PostIndex({
+    contract: POSTS, nameNFT: NFT, fromBlock: 1, rpc, call, now: () => clock, ipfs: null,
+    blobSources: { blobscan: 'https://blobscan.test', beacons: [] }, archive: 'https://archive.internal',
+    fetchImpl: async (url) => {
+      const m = /^https:\/\/archive\.internal\/api\/posts\/(0x[0-9a-f]{64})\/raw$/.exec(url)
+      if (m) { archiveCalls++; return archived.has(m[1]) ? new Response(archived.get(m[1])) : new Response('', { status: 404 }) }
+      return new Response('not found', { status: 404 })
+    },
+  })
+  const savedBlobscan = blobscan; blobscan = {}
+  await fresh.maybeSync()
+  await fresh.maybeSync(true)
+  blobscan = savedBlobscan
+  eq('archive: a post this index lost comes back from the archive, proven in its blob', fresh.isCarried(firstBlob, firstHash), true)
+  eq('archive: bytes that don\'t hash to the post are refused', fresh.bytes.has(secondHash), false)
+  eq('archive: … and asked for only what was missing', archiveCalls > 0, true)
+}
 
 // --- link-preview cards ------------------------------------------------------------------------------
 

@@ -44,6 +44,8 @@ const REBUILDS_PER_SYNC = 12 // each is a KZG commitment, ~200 ms
 const BLOB_MAX_TRIES = 60 // with the 6-hour backoff cap, about two weeks
 const BLOB_TIMEOUT_MS = 15_000
 const IPFS_TIMEOUT_MS = 8_000
+const ARCHIVE_TIMEOUT_MS = 8_000
+const ARCHIVE_FETCHES_PER_SYNC = 50
 const BEACON_GENESIS = 1606824023 // mainnet beacon genesis; slots are 12 s
 export const DEFAULT_BLOB_SOURCES = {
   blobscan: 'https://api.blobscan.com',
@@ -100,7 +102,7 @@ export class PostIndex {
   // `rpc(method, params)` and `call(to, data)` talk to Ethereum; `fetchImpl` reaches blob sources
   // and IPFS; `dir` (Node only) keeps the index across restarts. Injected so tests run offline.
   constructor({ contract, fromBlock = 0, nameNFT, rpc, call, fetchImpl = fetch, now = () => Date.now(), dir = null,
-    blobSources = DEFAULT_BLOB_SOURCES, ipfs = DEFAULT_IPFS, versionedHash = versionedHashOf }) {
+    blobSources = DEFAULT_BLOB_SOURCES, ipfs = DEFAULT_IPFS, archive = null, versionedHash = versionedHashOf }) {
     this.contract = contract.toLowerCase()
     this.nameNFT = nameNFT
     this.rpc = rpc
@@ -110,6 +112,7 @@ export class PostIndex {
     this.dir = dir
     this.blobSources = blobSources
     this.ipfs = ipfs
+    this.archiveUrl = archive
     this.versionedHash = versionedHash
     this.cursor = BigInt(fromBlock) - 1n
     this.auths = [] // every PostAuthorized, in chain order
@@ -257,7 +260,7 @@ export class PostIndex {
   // holds is checked by rebuilding that post's own blob (no network). The rest need the blob itself,
   // from Blobscan or a beacon node, kept only if it matches its versioned hash.
   async checkBlobs() {
-    let fetches = 0, rebuilds = 0
+    let fetches = 0, rebuilds = 0, archived = 0
     for (const [blob, claims] of this.byBlob) {
       const pub = this.published.get(blob)
       if (!pub) continue
@@ -265,6 +268,16 @@ export class PostIndex {
       const checked = this.checked.get(blob)
       const open = [...claims].filter((h) => !checked.has(h))
       if (!open.length) continue
+      // Bytes this index lost (a restart, say) come back from our archive first (POSTS_ARCHIVE: a copy
+      // of this index that keeps everything on disk), and are checked like any others: they must
+      // hash to the post, then rebuild the very blob Ethereum recorded.
+      if (this.archiveUrl) {
+        for (const hash of open) {
+          if (this.bytes.has(hash) || archived >= ARCHIVE_FETCHES_PER_SYNC) continue
+          archived++
+          await this.fetchArchive(hash)
+        }
+      }
       const needBlob = []
       for (const hash of open) {
         const held = this.bytes.get(hash)
@@ -340,6 +353,15 @@ export class PostIndex {
       console.error(JSON.stringify({ event: 'posts_blob_mismatch', blob }))
     }
     return null
+  }
+
+  async fetchArchive(hash) {
+    try {
+      const res = await this.fetchImpl(`${this.archiveUrl}/api/posts/${hash}/raw`, { signal: AbortSignal.timeout(ARCHIVE_TIMEOUT_MS) })
+      if (!res.ok) { res.body?.cancel().catch(() => {}); return }
+      const bytes = await readCapped(res, MAX_POST_BYTES)
+      if (bytes && postHash(bytes) === hash && parsePost(bytes)) this.keep(hash, bytes, 'upload')
+    } catch {}
   }
 
   async fetchIpfs(hash) {
@@ -609,6 +631,7 @@ export function postIndex(env, read, nameNFT) {
     fromBlock: Number(read(env, 'POSTS_FROM_BLOCK', 0)) || 0,
     dir: read(env, 'POSTS_DIR', '') || null,
     ipfs: String(read(env, 'IPFS_PATH_GATEWAY', DEFAULT_IPFS)).split(',')[0].trim() || null,
+    archive: String(read(env, 'POSTS_ARCHIVE', '')).replace(/\/+$/, '') || null,
     rpc: (method, params) => rpcSend(method, params, opts),
     call: (to, data) => ethCall(data, { rpc: rpcUrls, contract: to }),
   })

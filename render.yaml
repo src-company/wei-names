@@ -252,6 +252,12 @@ services:
         value: "26335211"
       - key: POSTS_DIR
         sync: false
+      # The private archive below (wei-posts-archive), at its internal address
+      # (http://<its host>:10000). Lost post bytes come back from it first,
+      # checked against Ethereum like any other copy. Set from the dashboard:
+      # the internal host is only known once the service exists.
+      - key: POSTS_ARCHIVE
+        sync: false
 
   # 3) Posts publisher (posts/poster, posts/SPEC.md). Delivers the blobs authors
   #    paid it for on WeiPosts and is paid back in the same transaction. Its
@@ -297,4 +303,39 @@ services:
       # Checked 2026-11-03: Tenderly and publicnode decode the wrapper,
       # mevblocker does not.
       - key: POSTER_RPC
+        sync: false
+
+  # 4) Posts archive: a private copy of the post index that keeps every post's
+  #    bytes on its own disk, for good. Ethereum keeps each post's fingerprint
+  #    forever, but its bytes ride in a blob that nodes drop after ~18 days;
+  #    this copy (and Blobscan behind it) is what the public gateway recovers
+  #    lost bytes from, each checked against Ethereum before use. Private: no
+  #    public URL, and its disk doesn't cost the public gateway its
+  #    zero-downtime deploys. Same code as the gateway, posts only.
+  - type: pserv
+    name: wei-posts-archive
+    runtime: node
+    region: oregon
+    plan: starter
+    rootDir: gateway
+    buildCommand: echo "no build — plain ESM, zero deps"
+    startCommand: node server.js
+    disk:
+      name: wei-posts-archive-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: POSTS_CONTRACT
+        value: "0xDDe00Ec43095fA81d615B61e668eA8a5EF1c9Fad"
+      - key: POSTS_FROM_BLOCK
+        value: "26335211"
+      - key: POSTS_DIR
+        value: /var/data/posts
+      # Its own internal host name, so requests to it reach the post API.
+      - key: POSTS_HOST
+        sync: false
+      # Only the gateway talks to it.
+      - key: RATE_LIMIT_RPS
+        value: "0"
+      - key: RPC_URLS
         sync: false

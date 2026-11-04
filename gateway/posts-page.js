@@ -274,8 +274,15 @@ function json(status, value, cache = 'no-store') {
   })
 }
 
+// A picture address names a host, but the picture is the n-th one in the post whose hash it gives, so
+// any gateway holding that post can serve it (posts/SPEC.md, "Images in other posts"). Every page
+// points such addresses at this gateway's own /img, so a post's pictures don't depend on the host
+// that wrote them still being there.
+const IMG_ADDRESS = /(src="|content=")https:\/\/[a-z0-9.-]{1,253}(?::\d{1,5})?\/img\/(0x[0-9a-f]{64})\/(\d{1,3})"/g
+export const ownImages = (page) => page.replace(IMG_ADDRESS, (_, attr, hash, n) => `${attr}https://${POSTS_HOST}/img/${hash}/${n}"`)
+
 function html(status, body, cache = 'public, max-age=60') {
-  return new Response(body, {
+  return new Response(ownImages(body), {
     status,
     headers: {
       'content-type': 'text/html; charset=utf-8', 'cache-control': cache, 'content-security-policy': POST_CSP,
@@ -427,7 +434,7 @@ async function serveApi(index, request, path, url, { client }) {
     const base = canonicalBase(name)
     return json(200, {
       title: doc.title, cover: cover && cover.url, html: renderMarkdown(body),
-      page: renderPost({ name, base, canonical: base + postPath(hash, doc.title), post: draft, bodyHtml: await postBodyHtml(doc.body) }),
+      page: ownImages(renderPost({ name, base, canonical: base + postPath(hash, doc.title), post: draft, bodyHtml: await postBodyHtml(doc.body) })),
     })
   }
   if (post && path === '/api/sync') {

@@ -100,8 +100,19 @@ https://posts.wei.domains/img/<image post hash>/<n>
 the picture only if some owner authorized that post (an upload alone is never served), whether or not
 the post is listed, and caches it for good, since a post's bytes never change. The address follows
 from public data alone, so any gateway can serve the same one, and to every reader it is an ordinary
-`https` image: gwei.domains and anything else that shows `https` images shows these too. The dapp's
-editor does all of this when a post's pictures outgrow it.
+`https` image: gwei.domains and anything else that shows `https` images shows these too. The host in
+an address is only a hint: a gateway that holds the image post serves the picture whatever host the
+address names, and ours points every such address at its own copy. The dapp's editor does all of
+this when a post's pictures outgrow it.
+
+### Keeping the bytes
+
+Ethereum keeps a post's fingerprint for good: its hash in `PostAuthorized`, and its blob's versioned
+hash in the block. The bytes themselves ride in a blob, which ordinary nodes drop after about 18 days.
+wei.domains keeps them in a private archive, a copy of the index with its own disk, and the gateway
+recovers anything it lost from there first, then from Blobscan and beacon nodes, then IPFS. Every copy
+is checked the same way, whoever holds it: the bytes must hash to the post, and the post must rebuild
+the blob Ethereum recorded.
 
 ### Image captions
 
