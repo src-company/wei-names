@@ -57,6 +57,9 @@ eq('markdown: javascript: links stay text', renderMarkdown('[x](javascript:alert
 const photo = 'data:image/webp;base64,' + 'Ab+/'.repeat(25000) // a 100 KB inline picture, as the editor stores one
 eq('markdown: an inline picture stored in the post renders', renderMarkdown(`Text\n\n![harbour](${photo})`).includes(`<img src="${photo}" alt="harbour"`), true)
 eq('markdown: a data: URL is an image source only, never a link', renderMarkdown('[a](data:image/png;base64,AAAA)').includes('<a '), false)
+eq('markdown: a line right under an image captions it', renderMarkdown('![cat](https://x.test/c.jpg)\nPOV you are **sentient**.'), '<figure><img src="https://x.test/c.jpg" alt="cat" loading="lazy" referrerpolicy="no-referrer"><figcaption>POV you are <strong>sentient</strong>.</figcaption></figure>')
+eq('markdown: … not across a blank line, nor an image inside a sentence', ['![c](https://x.test/c.jpg)\n\ntext', '![c](https://x.test/c.jpg) and words\nmore', 'text\n![c](https://x.test/c.jpg)'].map((t) => renderMarkdown(t).includes('<figure>')), [false, false, false])
+eq('markdown: a refused image source never makes a figure', renderMarkdown('![x](javascript:1)\ncaption').includes('<figure>'), false)
 eq('markdown: a link typed without https:// still links', renderMarkdown('[my site](example.com)').includes('href="https://example.com/"'), true)
 eq('markdown: … www. and a path too', renderMarkdown('[a](www.example.com/page?x=1)').includes('href="https://www.example.com/page?x=1"'), true)
 eq('markdown: <https://…> links to itself', renderMarkdown('<https://example.com/x>').includes('<a href="https://example.com/x"'), true)

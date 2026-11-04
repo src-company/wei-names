@@ -57,6 +57,9 @@ h2.title{font-size:28px;font-weight:700;line-height:1.25;margin-bottom:6px;lette
 .body pre{background:var(--surface);border:1px solid var(--line);padding:12px;overflow-x:auto}
 .body pre code{background:none;padding:0}
 .body img{max-width:100%;height:auto}
+.body figure{margin:1.4em 0}
+.body figure img{display:block;width:100%}
+.body figcaption{margin-top:8px;font-size:14px;line-height:1.45;color:var(--muted)}
 .body hr{border:0;border-top:1px solid var(--line)}
 .body math{font-size:1.05em}
 .panel{margin-top:48px;border-top:1px solid var(--line);padding-top:16px;font-size:12px;color:var(--muted)}

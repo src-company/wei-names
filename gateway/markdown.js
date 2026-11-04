@@ -213,6 +213,14 @@ function blocks(lines, depth, used = new Set()) {
       // A trailing backslash is CommonMark's explicit line break; lines break here anyway.
       paragraph.push(lines[i].trim().replace(/(^|[^\\])\\$/, '$1').trimEnd());
     }
+    // An image alone on a line with text right under it (no blank line between) is a captioned
+    // figure, as X articles show one. Elsewhere it reads the same: the image, then its caption.
+    // (Not in gwei-names' renderer.)
+    const lead = paragraph.length > 1 ? inline(paragraph[0]) : null;
+    if (lead && /^<img [^<>]*>$/.test(lead)) {
+      out.push(`<figure>${lead}<figcaption>${paragraph.slice(1).map(inline).join('<br>')}</figcaption></figure>`);
+      continue;
+    }
     out.push(`<p>${paragraph.map(inline).join('<br>')}</p>`);
   }
   return out.join('');

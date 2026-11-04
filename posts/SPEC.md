@@ -85,6 +85,17 @@ same full or not. gwei-names' renderer caps every link and image destination at 
 so gwei.domains currently shows a stored picture as text; `https` and `ipfs://` images render on
 both.
 
+### Image captions
+
+A line written directly under an image, with no blank line between them, is that image's caption:
+wei.domains shows the two as a figure with the caption beneath. Anywhere else they read the same, as
+the image with a line of text under it.
+
+```
+![A phone running Pokémon Emerald](https://…)
+POV you are a sentient being in 2026.
+```
+
 ### Embedded X posts
 
 A link to an X post (`https://x.com/<handle>/status/<id>`, or on twitter.com) alone on its own line
