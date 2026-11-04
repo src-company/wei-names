@@ -57,9 +57,9 @@ eq('markdown: javascript: links stay text', renderMarkdown('[x](javascript:alert
 const photo = 'data:image/webp;base64,' + 'Ab+/'.repeat(25000) // a 100 KB inline picture, as the editor stores one
 eq('markdown: an inline picture stored in the post renders', renderMarkdown(`Text\n\n![harbour](${photo})`).includes(`<img src="${photo}" alt="harbour"`), true)
 eq('markdown: a data: URL is an image source only, never a link', renderMarkdown('[a](data:image/png;base64,AAAA)').includes('<a '), false)
-eq('markdown: a line right under an image captions it', renderMarkdown('![cat](https://x.test/c.jpg)\nPOV you are **sentient**.'), '<figure><img src="https://x.test/c.jpg" alt="cat" loading="lazy" referrerpolicy="no-referrer"><figcaption>POV you are <strong>sentient</strong>.</figcaption></figure>')
-eq('markdown: … not across a blank line, nor an image inside a sentence', ['![c](https://x.test/c.jpg)\n\ntext', '![c](https://x.test/c.jpg) and words\nmore', 'text\n![c](https://x.test/c.jpg)'].map((t) => renderMarkdown(t).includes('<figure>')), [false, false, false])
-eq('markdown: a refused image source never makes a figure', renderMarkdown('![x](javascript:1)\ncaption').includes('<figure>'), false)
+eq('markdown: a line right under an image captions it', renderMarkdown('![cat](https://x.test/c.jpg)\nPOV you are **sentient**.'), '<figure class="pic"><img src="https://x.test/c.jpg" alt="cat" loading="lazy" referrerpolicy="no-referrer"><figcaption>POV you are <strong>sentient</strong>.</figcaption></figure>')
+eq('markdown: … not across a blank line, nor an image inside a sentence', ['![c](https://x.test/c.jpg)\n\ntext', '![c](https://x.test/c.jpg) and words\nmore', 'text\n![c](https://x.test/c.jpg)'].map((t) => renderMarkdown(t).includes('<figure')), [false, false, false])
+eq('markdown: a refused image source never makes a figure', renderMarkdown('![x](javascript:1)\ncaption').includes('<figure'), false)
 eq('markdown: a link typed without https:// still links', renderMarkdown('[my site](example.com)').includes('href="https://example.com/"'), true)
 eq('markdown: … www. and a path too', renderMarkdown('[a](www.example.com/page?x=1)').includes('href="https://www.example.com/page?x=1"'), true)
 eq('markdown: <https://…> links to itself', renderMarkdown('<https://example.com/x>').includes('<a href="https://example.com/x"'), true)
@@ -335,6 +335,9 @@ embedded = await embedXPosts(renderMarkdown(Array.from({ length: MAX_EMBEDS + 3 
 eq('x: at most MAX_EMBEDS cards a post; the rest stay links', (embedded.match(/class="xpost/g) || []).length, MAX_EMBEDS)
 res = await host('/api/posts/preview?name=alice.wei', { method: 'POST', body: encodePost({ title: 'Embeds', body: `https://x.com/z0r0zzz/status/${TWEET.id_str}` }) })
 eq('x: the preview shows the card too', (await res.json()).page.includes('<figure class="xpost">'), true)
+res = await host('/api/posts/preview?name=alice.wei', { method: 'POST', body: encodePost({ title: 'Both', body: `https://x.com/z0r0zzz/status/${TWEET.id_str}\n\n![p](https://pbs.twimg.com/media/shot.jpg)\nA caption.` }) })
+page = (await res.json()).page
+eq('x: caption styles reach captioned images only, never an embedded post (its avatar once stretched)', /\.body figure(?!\.pic)[ {]/.test(page) === false && page.includes('<figure class="pic">') && page.includes('.xpost .xpost-av{width:40px;height:40px'), true)
 
 // --- the handler -------------------------------------------------------------------------------
 

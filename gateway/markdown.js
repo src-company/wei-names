@@ -218,7 +218,7 @@ function blocks(lines, depth, used = new Set()) {
     // (Not in gwei-names' renderer.)
     const lead = paragraph.length > 1 ? inline(paragraph[0]) : null;
     if (lead && /^<img [^<>]*>$/.test(lead)) {
-      out.push(`<figure>${lead}<figcaption>${paragraph.slice(1).map(inline).join('<br>')}</figcaption></figure>`);
+      out.push(`<figure class="pic">${lead}<figcaption>${paragraph.slice(1).map(inline).join('<br>')}</figcaption></figure>`);
       continue;
     }
     out.push(`<p>${paragraph.map(inline).join('<br>')}</p>`);

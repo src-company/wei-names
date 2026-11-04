@@ -135,7 +135,8 @@ export const XPOST_STYLE = `
 .xpost{margin:1.4em 0;border:1px solid var(--line);border-radius:14px;padding:14px 16px;font-size:15px;line-height:1.45}
 .xpost a{text-decoration:none}
 .xpost-head{display:flex;align-items:center;gap:10px;color:inherit}
-.xpost-av{width:40px;height:40px;border-radius:50%;flex:none;background:var(--surface)}
+/* Scoped under .xpost so the post's own image rules (.body img, captioned figures) can't resize it. */
+.xpost .xpost-av{width:40px;height:40px;max-width:none;border-radius:50%;flex:none;background:var(--surface)}
 .xpost-who{display:flex;flex-direction:column;min-width:0;flex:1}
 .xpost-name{font-weight:700;display:flex;align-items:center;gap:3px;overflow-wrap:anywhere}
 .xpost-badge{flex:none}
