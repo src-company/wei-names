@@ -4217,9 +4217,11 @@ async function refreshPostQuote() {
 // attached images, a live preview of the real post page, and a draft kept per name. Images (the
 // cover too) travel inside the post as data: URLs, so they live in its blob with nothing to pin
 // anywhere; in the textarea they are short tags (img:N), put in only when the post is built. ──
-const POST_IMAGE_MAX_PX = 1600;
+const POST_IMAGE_MAX_PX = 1400; // twice the post column, so sharp on a retina screen
 const POST_COVER_RATIO = 5 / 2; // the banner shape, cropped to on attach, as X articles show theirs
-const POST_IMAGE_MAX_CHARS = 110000; // one image's share, so a single photo can't leave no room for text
+const POST_IMAGE_MAX_CHARS = 60000; // the most one image takes, alone; with more, they share (fitPostImages)
+const POST_IMAGE_MIN_CHARS = 6000; // below this an image isn't worth showing: refuse another instead
+let postImageSources = new Map(); // tag id or 'cover' -> the File it came from, kept while editing to re-fit from
 let postImages = new Map(); // tag id -> data URL
 let postCover = null; // data URL, or null
 let postImageSeq = 0;
@@ -4282,13 +4284,13 @@ function savePostDraft() {
 }
 function clearPostDraft(tokenId) {
   try { localStorage.removeItem(postDraftKey(tokenId)); } catch (e) {}
-  if (tokenId === postEditorToken) { postImages = new Map(); postCover = null; postImageSeq = 0; }
+  if (tokenId === postEditorToken) { postImages = new Map(); postCover = null; postImageSeq = 0; postImageSources = new Map(); }
 }
 function initPostEditor() {
   const ta = $('ppBody');
   if (!ta) return;
   postEditorToken = currentTokenId;
-  postImages = new Map(); postCover = null; postImageSeq = 0;
+  postImages = new Map(); postCover = null; postImageSeq = 0; postImageSources = new Map();
   try {
     const draft = JSON.parse(localStorage.getItem(postDraftKey(currentTokenId)) || 'null');
     if (draft) {
@@ -4393,12 +4395,15 @@ async function postImageType() {
 // down and re-encoded until it fits. Re-encoding through a canvas also drops the file's metadata
 // (a phone photo's EXIF can hold where it was taken), which matters in a post that can't be erased.
 // Only a GIF that already fits goes in as it is, so an animation stays animated.
-async function fitPostImage(file, maxChars, ratio = null) {
-  if (!ratio && file.type === 'image/gif' && file.size * 1.4 < maxChars) {
-    const url = await readAsDataUrl(file);
+// `source` is a File, or a data URL already in the post (a restored draft's), which only ever shrinks.
+async function fitPostImage(source, maxChars, ratio = null) {
+  const isFile = typeof source !== 'string';
+  if (!isFile && source.length <= maxChars) return source;
+  if (isFile && !ratio && source.type === 'image/gif' && source.size * 1.4 < maxChars) {
+    const url = await readAsDataUrl(source);
     if (url.length <= maxChars) return url;
   }
-  const src = URL.createObjectURL(file);
+  const src = isFile ? URL.createObjectURL(source) : source;
   try {
     const img = new Image();
     img.src = src;
@@ -4411,10 +4416,11 @@ async function fitPostImage(file, maxChars, ratio = null) {
     const type = await postImageType();
     const canvas = document.createElement('canvas'), ctx = canvas.getContext('2d');
     let scale = Math.min(1, POST_IMAGE_MAX_PX / Math.max(sw, sh));
-    for (let round = 0; round < 10; round++) {
+    // Small steps in size and quality, so the image lands near its budget at the best quality that fits.
+    for (let round = 0; round < 16; round++) {
       canvas.width = Math.max(1, Math.round(sw * scale));
       canvas.height = Math.max(1, Math.round(sh * scale));
-      for (const quality of [0.82, 0.68, 0.52]) {
+      for (const quality of [0.82, 0.72, 0.62, 0.52]) {
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         if (type === 'image/jpeg') { ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, canvas.width, canvas.height); }
         ctx.drawImage(img, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
@@ -4423,56 +4429,83 @@ async function fitPostImage(file, maxChars, ratio = null) {
         const url = await readAsDataUrl(blob);
         if (url.length <= maxChars) return url;
       }
-      scale *= 0.75;
+      scale *= 0.85;
     }
     return null;
   } finally {
-    URL.revokeObjectURL(src);
+    if (isFile) URL.revokeObjectURL(src);
   }
 }
-// What's left of the post for an image, keeping some room for the text around it.
-const postRoomFor = (cap) => Math.min(cap, POST_MAX_BYTES - readPostForm().bytes.length - 1024);
+// The images in the post share what the text leaves: each gets an equal share (up to
+// POST_IMAGE_MAX_CHARS), and one over its share is re-fitted, from its original file where this tab
+// still has it. `fresh` is the one just added, which is always fitted from its file.
+async function fitPostImages(fresh) {
+  const text = $('ppBody')?.value || '';
+  const ids = [...new Set([...text.matchAll(/\]\(img:(\d{1,6})\)/g)].map((m) => m[1]))].filter((id) => postImages.has(id) || postImageSources.has(id));
+  const slots = ids.map((id) => ({ id, ratio: null }));
+  if (postCover || postImageSources.has('cover')) slots.push({ id: 'cover', ratio: POST_COVER_RATIO });
+  if (!slots.length) return;
+  const title = ($('ppTitle')?.value || '').trim();
+  const textOnly = postBytesFrom(title, expandPostBody(text, new Map(), null)).length;
+  const share = Math.min(POST_IMAGE_MAX_CHARS, Math.floor((POST_MAX_BYTES - textOnly - 1024) / slots.length) - 8);
+  if (share < POST_IMAGE_MIN_CHARS) throw new Error(`There isn't room for ${slots.length} images in one post: remove one, or shorten the text`);
+  let shrunk = 0;
+  for (const slot of slots) {
+    const current = slot.id === 'cover' ? postCover : postImages.get(slot.id);
+    if (slot.id !== fresh && current && current.length <= share) continue;
+    const source = (slot.id === fresh || !current ? postImageSources.get(slot.id) : postImageSources.get(slot.id) || current);
+    if (!source) continue;
+    const url = await fitPostImage(source, share, slot.ratio);
+    if (!url) throw new Error('That image could not be made small enough for the room left in this post');
+    if (slot.id !== fresh) shrunk++;
+    if (slot.id === 'cover') postCover = url; else postImages.set(slot.id, url);
+  }
+  return shrunk;
+}
 
 async function attachPostImage(file) {
   const ta = $('ppBody');
   if (!ta || !file) return;
-  const room = postRoomFor(POST_IMAGE_MAX_CHARS);
-  if (room < 4000) { showStatus('This post has no room left for another image', 'error'); return; }
   showStatus('Fitting the image into the post...', '');
+  const id = String(++postImageSeq);
+  const alt = (file.name || 'image').replace(/\.[a-z0-9]+$/i, '').replace(/[\[\]\n]+/g, ' ').trim().slice(0, 80) || 'image';
+  const at = ta.selectionStart, end = ta.selectionEnd, before = ta.value.slice(0, at), was = ta.value;
+  const lead = !before || before.endsWith('\n\n') ? '' : before.endsWith('\n') ? '\n' : '\n\n';
+  ta.setRangeText(`${lead}![${alt}](img:${id})\n\n`, at, end, 'end');
+  postImageSources.set(id, file);
   try {
-    const url = await fitPostImage(file, room);
-    if (!url) throw new Error('That image could not be made small enough for the room left in this post');
-    const id = String(++postImageSeq);
-    postImages.set(id, url);
-    const alt = (file.name || 'image').replace(/\.[a-z0-9]+$/i, '').replace(/[\[\]\n]+/g, ' ').trim().slice(0, 80) || 'image';
-    const at = ta.selectionStart, before = ta.value.slice(0, at);
-    const lead = !before || before.endsWith('\n\n') ? '' : before.endsWith('\n') ? '\n' : '\n\n';
-    ta.setRangeText(`${lead}![${alt}](img:${id})\n\n`, at, ta.selectionEnd, 'end');
-    $('status').classList.remove('show');
+    const shrunk = await fitPostImages(id);
+    if (shrunk) showStatus(`Made room: the post's images were resized to share its space.`, 'success');
+    else $('status').classList.remove('show');
     ta.focus();
     onPostInput();
   } catch (e) {
+    // Leave the post as it was.
+    ta.value = was; ta.setSelectionRange(at, end);
+    postImageSources.delete(id); postImages.delete(id);
     showStatus(e.message || 'Couldn’t attach that image', 'error');
   }
 }
 async function setPostCover(file) {
   if (!file) return;
-  const room = postRoomFor(90000) + (postCover ? postCover.length : 0);
-  if (room < 4000) { showStatus('This post has no room left for a cover image', 'error'); return; }
   showStatus('Fitting the cover into the post...', '');
+  const prev = postCover, prevSource = postImageSources.get('cover');
+  postImageSources.set('cover', file);
   try {
-    const url = await fitPostImage(file, room, POST_COVER_RATIO);
-    if (!url) throw new Error('That image could not be made small enough for a cover');
-    postCover = url;
-    $('status').classList.remove('show');
+    const shrunk = await fitPostImages('cover');
+    if (shrunk) showStatus(`Made room: the post's images were resized to share its space.`, 'success');
+    else $('status').classList.remove('show');
     renderCoverSlot();
     onPostInput();
   } catch (e) {
+    postCover = prev;
+    if (prevSource) postImageSources.set('cover', prevSource); else postImageSources.delete('cover');
     showStatus(e.message || 'Couldn’t use that image', 'error');
   }
 }
 function clearPostCover() {
   postCover = null;
+  postImageSources.delete('cover');
   renderCoverSlot();
   onPostInput();
 }
