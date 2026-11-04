@@ -60,7 +60,7 @@ h2.title{font-size:28px;font-weight:700;line-height:1.25;margin-bottom:6px;lette
 /* Captioned images only: an embedded X post is a figure too, with its own styles (x-embed.js). */
 .body figure.pic{margin:1.4em 0}
 .body figure.pic img{display:block;width:100%}
-.body figure.pic figcaption{margin-top:8px;font-size:14px;line-height:1.45;color:var(--muted)}
+.body figure.pic figcaption{margin-top:6px;font-size:13px;line-height:1.4;color:var(--muted)}
 .body hr{border:0;border-top:1px solid var(--line)}
 .body math{font-size:1.05em}
 .panel{margin-top:48px;border-top:1px solid var(--line);padding-top:16px;font-size:12px;color:var(--muted)}
