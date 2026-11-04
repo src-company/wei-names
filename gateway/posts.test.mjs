@@ -282,6 +282,24 @@ body = await res.json()
 eq('preview: the cover comes apart from the body', [body.cover === PNG, body.html.includes('data:image')], [true, false])
 eq('preview: a draft rendered as its page, pending, with the name', body.page.includes('<figure class="cover">') && body.page.includes('alice.wei') && body.page.includes('class="pending"'), true)
 
+// --- pictures kept in other posts (/img) ---------------------------------------------------------
+
+res = await host(`/img/${coveredHash}/1`)
+eq('img: an authorized post\'s n-th picture is served as an image', [res.status, res.headers.get('content-type'), res.headers.get('cache-control')], [200, 'image/png', 'public, max-age=31536000, immutable'])
+eq('img: … the exact bytes stored in the post', (await res.arrayBuffer()).byteLength, Buffer.from(PNG.split(',')[1], 'base64').length)
+eq('img: no such picture', (await host(`/img/${coveredHash}/2`)).status, 404)
+const stray = encodePost({ title: 'Not authorized', body: `![x](${PNG})` })
+index.upload(stray, 'ip9')
+eq('img: an upload nobody authorized is never served (no free image host)', (await host(`/img/${postHash(stray)}/1`)).status, 404)
+removed(45, T_ALICE, coveredHash, ALICE)
+await sync()
+eq('img: still served once its post is taken off the list (how image posts stay unlisted)', (await host(`/img/${coveredHash}/1`)).status, 200)
+authorize(46, T_ALICE, coveredHash, ALICE, coveredBlob)
+await sync()
+const big = encodePost({ title: 'Big draft', body: Array.from({ length: 3 }, () => `![p](data:image/webp;base64,${'Ab+/'.repeat(25000)})`).join('\n\n') })
+res = await host('/api/posts/preview?name=alice.wei', { method: 'POST', body: big })
+eq('preview: a draft bigger than one post still previews (its pictures go into image posts)', [big.length > MAX_POST_BYTES, res.status], [true, 200])
+
 // --- link-preview cards ------------------------------------------------------------------------------
 
 const isPng = async (r) => { const b = new Uint8Array(await r.arrayBuffer()); return r.headers.get('content-type') === 'image/png' && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47 }

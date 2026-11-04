@@ -176,6 +176,7 @@ The gateway also keeps a `RESERVED_LABELS` guard as defense-in-depth.
 | `posts-page.js` | The posts host (`/api`, recent posts, `/<name>.wei/…`) and a name's posts on its own host |
 | `posts-format.js`, `markdown.js`, `math.js` | Post and blob byte formats, the escaping Markdown renderer and TeX→MathML, ported from gwei-names and kept in their style so the two diff cleanly |
 | `keccak.js` | keccak-256 on 32-bit lane halves (fast enough for a 127 KB post) |
+| `/img/<hash>/<n>` (in `posts-page.js`) | The n-th picture stored in an authorized post, for posts whose pictures live in image posts of their own; immutable, never served for an unauthorized upload |
 | `x-embed.js` | An X post link alone on a line becomes a card (author, text, photos), from X's public syndication endpoint, cached for a day; a plain link card when X doesn't answer |
 | `share-card.js`, `card-font.js` | 1200x630 link-preview cards for post pages (`/posts/<id>/card.png`, `/card.png`), each name with its own generated mark; ported from gwei-names. The font is a GNU Unifont subset (SIL OFL, `card-font.LICENSE`), loaded on the first card |
 

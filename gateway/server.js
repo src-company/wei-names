@@ -15,8 +15,9 @@ import { handleRequest, postsIndexFor } from './handler.js'
 import { createClientIdentity } from './client-ip.js'
 
 const PORT = Number(process.env.PORT) || 8080
-// A post is at most 126,968 bytes (posts-format.js); anything bigger is refused unread.
-const MAX_BODY_BYTES = 256 * 1024
+// A post is at most 126,968 bytes (posts-format.js), but a draft's preview, with every picture
+// inline before they move into image posts, can be a few MB (posts-page.js). Bigger is refused unread.
+const MAX_BODY_BYTES = 4 * 1024 * 1024
 const POSTS_HOST_NAME = String(process.env.POSTS_HOST || 'posts.wei.domains').toLowerCase()
 const clientIdentity = createClientIdentity(process.env)
 // The post index (posts.js), or null while POSTS_CONTRACT is unset.

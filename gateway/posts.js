@@ -472,6 +472,25 @@ export class PostIndex {
     return this.recentCache.posts.slice(0, limit)
   }
 
+  // The n-th picture stored in a post (1-based, in the order its body has them), for /img: the way a
+  // post shows pictures kept in another post's blob (posts/SPEC.md, "Images in other posts"). Only an
+  // authorized post's pictures are served, so uploads alone never make this an image host. Whether the
+  // post is shown doesn't matter: an image post is usually removed from its name's list on purpose.
+  imageOf(hash, n) {
+    if (!this.byHash.has(hash)) return null
+    const held = this.bytes.get(hash)
+    const post = held && parsePost(held.bytes)
+    if (!post) return null
+    const images = [...post.body.matchAll(/!\[[^\]\n]{0,300}\]\(\s*data:(image\/(?:png|jpeg|gif|webp));base64,([A-Za-z0-9+/]+={0,2})\s*\)/g)]
+    const m = images[n - 1]
+    if (!m) return null
+    try {
+      return { type: m[1], bytes: Uint8Array.from(atob(m[2]), (c) => c.charCodeAt(0)) }
+    } catch {
+      return null
+    }
+  }
+
   postInfo(hash) {
     const held = this.bytes.get(hash)
     const post = held && parsePost(held.bytes)

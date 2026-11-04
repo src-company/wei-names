@@ -4220,7 +4220,12 @@ async function refreshPostQuote() {
 const POST_IMAGE_MAX_PX = 1400; // twice the post column, so sharp on a retina screen
 const POST_COVER_RATIO = 5 / 2; // the banner shape, cropped to on attach, as X articles show theirs
 const POST_IMAGE_MAX_CHARS = 60000; // the most one image takes, alone; with more, they share (fitPostImages)
-const POST_IMAGE_MIN_CHARS = 6000; // below this an image isn't worth showing: refuse another instead
+// Past this many pictures' worth of room, a post's pictures go into image posts of their own (one
+// blob each, about two pictures apiece) at full quality, instead of shrinking further to share one blob.
+const POST_IMAGE_FLOOR = 30000; // the least share a picture gets inside the post itself
+const POST_CARRIER_IMAGE_CHARS = 58000; // a picture's size in an image post: two fit in one
+const POST_IMAGE_LIMIT = 24; // pictures in one post, all told
+const POSTS_IMG_BASE = `https://${POSTS_HOST}/img/`; // + <image post hash>/<n> (gateway/posts-page.js)
 let postImageSources = new Map(); // tag id or 'cover' -> the File it came from, kept while editing to re-fit from
 let postImages = new Map(); // tag id -> data URL
 let postCover = null; // data URL, or null
@@ -4238,6 +4243,65 @@ function expandPostBody(text, images, cover) {
     .replace(/\]\(img:(\d{1,6})\)/g, (m, id) => (images.has(id) ? `](${images.get(id)})` : m));
   return cover ? `![](${cover})\n\n${body}` : body;
 }
+const POST_CARRIER_NOTE = 'Lots of pictures: they go into image posts of their own, at full quality, all on Ethereum. The cost line below says what that adds.';
+
+// The pictures in the post, in order: the cover, then each image tag as the text has them.
+function postPictures(text) {
+  const out = [];
+  if (postCover) out.push({ key: 'cover', url: postCover, alt: '' });
+  const seen = new Set();
+  for (const m of String(text).matchAll(/!\[([^\]\n]*)\]\(img:(\d{1,6})\)/g)) {
+    if (seen.has(m[2]) || !postImages.has(m[2])) continue;
+    seen.add(m[2]);
+    out.push({ key: m[2], url: postImages.get(m[2]), alt: m[1] });
+  }
+  return out;
+}
+const carrierTitleFor = (title) => `Images for “${title || 'Untitled'}”`.slice(0, 200);
+const carrierBody = (list) => list.map((p) => `![${p.alt}](${p.url})`).join('\n\n');
+// Pictures packed into image posts in order, each as full as a blob takes.
+function packCarriers(pics, title) {
+  const ct = carrierTitleFor(title), groups = [];
+  let cur = [];
+  for (const p of pics) {
+    if (cur.length && postBytesFrom(ct, carrierBody([...cur, p])).length > POST_MAX_BYTES) { groups.push(cur); cur = []; }
+    cur.push(p);
+  }
+  if (cur.length) groups.push(cur);
+  return groups;
+}
+// The post as it will be published (posts/SPEC.md, "Images in other posts"). When everything fits,
+// one post with its pictures inside. When not, the pictures go into image posts, each authorized and
+// then taken off the name's list, and the post shows them by their /img addresses, which follow
+// from the image posts' bytes. Returns { title, bytes, carriers: [{ bytes, hash, title }] }.
+function buildPostPlan() {
+  const title = ($('ppTitle')?.value || '').trim();
+  const text = $('ppBody')?.value || '';
+  const inline = postBytesFrom(title, expandPostBody(text, postImages, postCover));
+  if (inline.length <= POST_MAX_BYTES) return { title, bytes: inline, carriers: [] };
+  const ct = carrierTitleFor(title), refs = new Map();
+  const carriers = packCarriers(postPictures(text), title).map((list) => {
+    const bytes = postBytesFrom(ct, carrierBody(list));
+    const hash = ethers.keccak256(bytes);
+    list.forEach((p, i) => refs.set(p.key, `${POSTS_IMG_BASE}${hash}/${i + 1}`));
+    return { bytes, hash, title: ct };
+  });
+  const cover = refs.get('cover') || null;
+  refs.delete('cover');
+  return { title, bytes: postBytesFrom(title, expandPostBody(text, refs, cover)), carriers };
+}
+// The plan's shape without building it (no hashing), for the cost line on every keystroke.
+function postPlanShape() {
+  const title = ($('ppTitle')?.value || '').trim();
+  const text = $('ppBody')?.value || '';
+  const inline = postBytesFrom(title, expandPostBody(text, postImages, postCover)).length;
+  if (inline <= POST_MAX_BYTES) return { carriers: 0, pictures: 0, mainBytes: inline };
+  const pics = postPictures(text);
+  const ref = POSTS_IMG_BASE.length + 70;
+  const main = postBytesFrom(title, expandPostBody(text, new Map(pics.filter((p) => p.key !== 'cover').map((p) => [p.key, 'x'.repeat(ref)])), postCover ? 'x'.repeat(ref) : null)).length;
+  return { carriers: packCarriers(pics, title).length, pictures: pics.length, mainBytes: main };
+}
+
 function readPostForm() {
   const title = ($('ppTitle')?.value || '').trim();
   const body = expandPostBody($('ppBody')?.value || '', postImages, postCover);
@@ -4249,12 +4313,23 @@ function updatePostCost() {
   if (status?.classList.contains('error')) status.classList.remove('show');
   const el = $('ppCost');
   if (!el) return;
-  const { bytes } = readPostForm();
-  const used = Math.min(100, Math.round((bytes.length / POST_MAX_BYTES) * 100));
+  const shape = postPlanShape();
+  const length = shape.mainBytes;
+  const used = Math.min(100, Math.round((length / POST_MAX_BYTES) * 100));
   const bar = $('ppRoom');
-  if (bar) { bar.style.width = used + '%'; bar.classList.toggle('full', bytes.length > POST_MAX_BYTES); }
-  const size = `${(bytes.length / 1000).toFixed(1)} of ${(POST_MAX_BYTES / 1000).toFixed(0)} KB used`;
-  if (bytes.length > POST_MAX_BYTES) { el.textContent = `Too long: ${size}. Shorten the text or remove an image.`; return; }
+  if (bar) { bar.style.width = used + '%'; bar.classList.toggle('full', length > POST_MAX_BYTES); }
+  const size = `${(length / 1000).toFixed(1)} of ${(POST_MAX_BYTES / 1000).toFixed(0)} KB used`;
+  if (length > POST_MAX_BYTES) { el.textContent = `Too long: ${size}. Shorten the text.`; return; }
+  // With image posts: one more blob (and fee) each, and the wallet steps for authorizing and unlisting them.
+  if (shape.carriers) {
+    const blobs = shape.carriers + 1, steps = 2 * shape.carriers + 1;
+    const blank = ($('ppBody')?.value.match(/\]\(\s*(?:https?:\/\/)?\s*\)/g) || []).length;
+    el.textContent = `Text: ${size}. The ${shape.pictures} pictures go into ${shape.carriers} image post${shape.carriers === 1 ? '' : 's'} of their own, kept off your list, so they stay on Ethereum at full quality. ` +
+      (currentPostFee == null ? 'Checking the publishing fee…' : `Publishing takes ${blobs} blobs: ${ethers.formatEther(currentPostFee * BigInt(blobs))} ETH plus gas, `) +
+      (currentPostFee == null ? '' : (_walletSendCalls ? 'in one approval.' : `in ${steps} wallet approvals.`) + ' Each fee is held until its blob is delivered, and can be taken back after a day if not.') +
+      (blank ? ` ${blank === 1 ? 'A link has' : `${blank} links have`} no address yet.` : '');
+    return;
+  }
   // The Link button leaves "https://" for the address; left as it is, the link shows as plain text.
   const blank = ($('ppBody')?.value.match(/\]\(\s*(?:https?:\/\/)?\s*\)/g) || []).length;
   const linkNote = blank ? ` ${blank === 1 ? 'A link has' : `${blank} links have`} no address yet, so ${blank === 1 ? 'it shows' : 'they show'} as plain text.` : '';
@@ -4447,8 +4522,22 @@ async function fitPostImages(fresh) {
   if (!slots.length) return;
   const title = ($('ppTitle')?.value || '').trim();
   const textOnly = postBytesFrom(title, expandPostBody(text, new Map(), null)).length;
+  if (slots.length > POST_IMAGE_LIMIT) throw new Error(`A post takes up to ${POST_IMAGE_LIMIT} pictures`);
   const share = Math.min(POST_IMAGE_MAX_CHARS, Math.floor((POST_MAX_BYTES - textOnly - 1024) / slots.length) - 8);
-  if (share < POST_IMAGE_MIN_CHARS) throw new Error(`There isn't room for ${slots.length} images in one post: remove one, or shorten the text`);
+  // Too many to share the post well: they go into image posts at full quality (buildPostPlan). Each
+  // picture this tab still has the file for is fitted to that size, the new one and any shrunk earlier
+  // to share the post; one from a restored draft keeps the size it has.
+  if (share < POST_IMAGE_FLOOR) {
+    for (const slot of slots) {
+      const source = postImageSources.get(slot.id);
+      const current = slot.id === 'cover' ? postCover : postImages.get(slot.id);
+      if (!source || (slot.id !== fresh && current && current.length >= POST_CARRIER_IMAGE_CHARS * 0.8)) continue;
+      const url = await fitPostImage(source, POST_CARRIER_IMAGE_CHARS, slot.ratio);
+      if (!url) throw new Error('That image could not be read');
+      if (slot.id === 'cover') postCover = url; else postImages.set(slot.id, url);
+    }
+    return 'carriers';
+  }
   let shrunk = 0;
   for (const slot of slots) {
     const current = slot.id === 'cover' ? postCover : postImages.get(slot.id);
@@ -4475,7 +4564,8 @@ async function attachPostImage(file) {
   postImageSources.set(id, file);
   try {
     const shrunk = await fitPostImages(id);
-    if (shrunk) showStatus(`Made room: the post's images were resized to share its space.`, 'success');
+    if (shrunk === 'carriers') showStatus(POST_CARRIER_NOTE, 'success');
+    else if (shrunk) showStatus(`Made room: the post's images were resized to share its space.`, 'success');
     else $('status').classList.remove('show');
     ta.focus();
     onPostInput();
@@ -4493,7 +4583,8 @@ async function setPostCover(file) {
   postImageSources.set('cover', file);
   try {
     const shrunk = await fitPostImages('cover');
-    if (shrunk) showStatus(`Made room: the post's images were resized to share its space.`, 'success');
+    if (shrunk === 'carriers') showStatus(POST_CARRIER_NOTE, 'success');
+    else if (shrunk) showStatus(`Made room: the post's images were resized to share its space.`, 'success');
     else $('status').classList.remove('show');
     renderCoverSlot();
     onPostInput();
@@ -4687,43 +4778,101 @@ async function waitForPostIndexed(hash, timeoutMs = 120000) {
   return false;
 }
 
+// Several calls under one approval (ERC-5792 wallet_sendCalls) where the wallet can, as the names
+// panel enters roll.wei; else one transaction each, in order, each confirmed before the next.
+async function postSendCalls(calls, labels) {
+  if (window._walletSendCalls) {
+    try {
+      showStatus(`Approve ${calls.length} steps in one go: ${labels.join(', ')}`, '');
+      const res = await window._connectedWalletProvider.request({
+        method: 'wallet_sendCalls',
+        params: [{ version: '2.0.0', chainId: '0x1', from: window._connectedAddress, atomicRequired: false, calls }],
+      });
+      const id = typeof res === 'string' ? res : res && res.id;
+      showStatus('Submitted. Confirming...', '');
+      const st = id ? await rollPollCallsStatus(id, 40, 3000) : null;
+      const code = st && st.status;
+      if ((typeof code === 'number' && code >= 400 && code !== 600) || code === 'FAILED') throw new Error('The wallet reports the transactions failed');
+      return;
+    } catch (e) {
+      // A decline stays a decline; a wallet that can't take this bundle falls back to one at a time.
+      if (e && (e.code === 4001 || /user (rejected|denied|cancelled)/i.test(e.message || ''))) throw e;
+      if (/reports the transactions failed/.test(e?.message || '')) throw e;
+    }
+  }
+  for (let i = 0; i < calls.length; i++) {
+    showStatus(`Approve ${i + 1} of ${calls.length}: ${labels[i]}`, '');
+    const tx = await wcTransaction(_signer.sendTransaction({ to: calls[i].to, data: calls[i].data, value: BigInt(calls[i].value) }), `Approve ${i + 1} of ${calls.length}`);
+    showStatus(`Waiting for ${i + 1} of ${calls.length} to confirm...`, '', tx.hash);
+    await waitForTx(tx);
+  }
+}
+
 async function doPublishPost() {
   if (isProcessing || !_signer || !currentTokenId || !postsEnabled()) return;
-  const { title, bytes } = readPostForm();
+  const title = ($('ppTitle')?.value || '').trim();
   if (!title) { showStatus('Give the post a title', 'error'); return; }
-  if (bytes.length > POST_MAX_BYTES) { showStatus(`The post is too long: ${bytes.length} bytes, the most is ${POST_MAX_BYTES}`, 'error'); return; }
-  const hash = ethers.keccak256(bytes);
+  let plan;
+  try { plan = buildPostPlan(); } catch (e) { showStatus(e.message || 'Couldn’t build the post', 'error'); return; }
+  if (plan.bytes.length > POST_MAX_BYTES) { showStatus(`The text is too long: ${plan.bytes.length} bytes, the most is ${POST_MAX_BYTES}`, 'error'); return; }
+  const hash = ethers.keccak256(plan.bytes);
   const name = currentTokenName + '.wei';
   const tokenId = currentTokenId;
+  // Image posts first, so their pictures are there when the post that shows them is.
+  const parts = [...plan.carriers.map((c) => ({ ...c, carrier: true })), { bytes: plan.bytes, hash, title, carrier: false }];
   isProcessing = true;
   const btn = (typeof event !== 'undefined' && event?.target) || null; if (btn) btn.disabled = true;
   try {
-    showStatus('Preparing the blob...', '');
-    // The publisher is only paid for exactly this blob, so its hash is computed here, not taken from anyone.
+    showStatus(parts.length === 1 ? 'Preparing the blob...' : `Preparing ${parts.length} blobs...`, '');
+    // The publisher is only paid for exactly these blobs, so their hashes are computed here, not taken from anyone.
     const { blobVersionedHash } = await import('./vendor/kzg.bundle.mjs');
-    const blob = blobVersionedHash(postBlobFrom(bytes));
-    showStatus('Uploading the post...', '');
-    const uploaded = await uploadPost(bytes, hash);
-    // The same post always makes the same blob. If the publisher already delivered it (say, the post
-    // was removed and is posted again), it is in a blob already and needs no fee; the contract would refuse one.
-    const delivered = await new ethers.Contract(POSTS_CONTRACT, POSTS_ABI, await getRpc()).delivered(escrowKeyOf(blob, POSTS_PUBLISHER));
-    if (!delivered) {
+    for (const part of parts) part.blob = blobVersionedHash(postBlobFrom(part.bytes));
+    showStatus(parts.length === 1 ? 'Uploading the post...' : `Uploading ${parts.length} posts...`, '');
+    for (const part of parts) part.uploaded = await uploadPost(part.bytes, part.hash);
+    // The same post always makes the same blob. One the publisher already delivered (a post removed and
+    // posted again, say) is in a blob already and needs no fee; the contract would refuse one.
+    const reader = new ethers.Contract(POSTS_CONTRACT, POSTS_ABI, await getRpc());
+    for (const part of parts) part.delivered = await reader.delivered(escrowKeyOf(part.blob, POSTS_PUBLISHER));
+    if (parts.some((p) => !p.delivered)) {
       await refreshPostQuote();
       if (currentPostFee == null) throw new Error('Couldn’t read current gas prices to price the post');
     }
-    const fee = delivered ? 0n : currentPostFee;
+    for (const part of parts) part.fee = part.delivered ? 0n : currentPostFee;
     const posts = new ethers.Contract(POSTS_CONTRACT, POSTS_ABI, _signer);
-    showStatus(delivered ? 'Approve the post. It is already in a blob, so there is no fee' : `Approve the post: ${ethers.formatEther(fee)} ETH, held until the publisher delivers its blob`, '');
-    const tx = await wcTransaction(posts.authorize(tokenId, hash, blob, POSTS_PUBLISHER, { value: fee }), 'Approve the post');
-    // Remembered as soon as it is sent, so the refund is offered even if this tab closes now.
-    if (fee > 0n) savePaidPosts(tokenId, [...paidPosts(tokenId).filter((p) => p.blob !== blob), { hash, blob, publisher: POSTS_PUBLISHER, title }]);
-    showStatus('Waiting for confirmation...', '', tx.hash);
-    await waitForTx(tx);
-    showStatus('Confirmed. Adding it to your page...', '', tx.hash);
-    // Upload again now that it's authorized: the index keeps bytes that aren't in a blob yet in
+    let confirmedTx = null;
+    if (parts.length === 1) {
+      const fee = parts[0].fee;
+      showStatus(fee === 0n ? 'Approve the post. It is already in a blob, so there is no fee' : `Approve the post: ${ethers.formatEther(fee)} ETH, held until the publisher delivers its blob`, '');
+      const tx = await wcTransaction(posts.authorize(tokenId, hash, parts[0].blob, POSTS_PUBLISHER, { value: fee }), 'Approve the post');
+      if (fee > 0n) savePaidPosts(tokenId, [...paidPosts(tokenId).filter((p) => p.blob !== parts[0].blob), { hash, blob: parts[0].blob, publisher: POSTS_PUBLISHER, title }]);
+      showStatus('Waiting for confirmation...', '', tx.hash);
+      await waitForTx(tx);
+      confirmedTx = tx.hash;
+    } else {
+      // Each image post is authorized, then taken off the name's list (its pictures stay in its blob,
+      // where /img finds them); then the post itself.
+      const iface = new ethers.Interface(POSTS_ABI);
+      const calls = [], labels = [];
+      parts.forEach((part, i) => {
+        calls.push({ to: POSTS_CONTRACT, data: iface.encodeFunctionData('authorize', [tokenId, part.hash, part.blob, POSTS_PUBLISHER]), value: '0x' + part.fee.toString(16) });
+        labels.push(part.carrier ? `image post ${i + 1}` : 'the post');
+        if (part.carrier) {
+          calls.push({ to: POSTS_CONTRACT, data: iface.encodeFunctionData('remove', [tokenId, part.hash]), value: '0x0' });
+          labels.push(`keep image post ${i + 1} off your list`);
+        }
+      });
+      // Remembered before sending, so a refund is offered even if this tab closes partway.
+      savePaidPosts(tokenId, [...paidPosts(tokenId).filter((p) => !parts.some((x) => x.blob === p.blob)),
+        ...parts.filter((p) => p.fee > 0n).map((p) => ({ hash: p.hash, blob: p.blob, publisher: POSTS_PUBLISHER, title: p.title }))]);
+      await postSendCalls(calls, labels);
+    }
+    showStatus('Confirmed. Adding it to your page...', '', confirmedTx);
+    // Upload again now that they're authorized: the index keeps bytes that aren't in a blob yet in
     // memory, so a gateway restart since the first upload would otherwise leave the publisher
     // nothing to fetch. Bytes of an authorized post are always accepted.
-    for (let i = 0; i < 12 && !(await uploadPost(bytes, hash).catch(() => false)); i++) await new Promise((resolve) => setTimeout(resolve, 10000));
+    for (const part of parts) {
+      for (let i = 0; i < 12 && !(await uploadPost(part.bytes, part.hash).catch(() => false)); i++) await new Promise((resolve) => setTimeout(resolve, 10000));
+    }
     const indexed = await waitForPostIndexed(hash);
     const url = postsHomeOf(name) + postPathFor(hash, title);
     $('status').innerHTML = escapeHtml(indexed ? 'Posted! It is on your page now and goes into an Ethereum blob within a few minutes. ' : 'Posted! It will appear on your page within a few minutes. ') +

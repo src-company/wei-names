@@ -19,6 +19,9 @@ export const POSTS_HOST = 'posts.wei.domains'
 const DAPP = 'https://wei.domains'
 const SPEC = 'https://github.com/src-company/wei-names/blob/main/posts/SPEC.md'
 const MAX_BODY = MAX_POST_BYTES + 1024
+// A draft previewed with every picture inline, before the editor moves them into image posts
+// (posts/SPEC.md, "Images in other posts"), can be larger than one post.
+const MAX_PREVIEW_BODY = 4 * 1024 * 1024
 const SYNC_WAIT_MS = 8_000
 
 export const POST_CSP = "default-src 'none'; img-src https: data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
@@ -286,9 +289,9 @@ const notFound = (text = 'Not Found\n') => new Response(text, {
   headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' },
 })
 
-async function readBody(request) {
+async function readBody(request, max = MAX_BODY) {
   const declared = Number(request.headers.get('content-length') || 0)
-  if (declared > MAX_BODY) return null
+  if (declared > max) return null
   const reader = request.body?.getReader()
   if (!reader) return new Uint8Array(0)
   const chunks = []
@@ -297,13 +300,24 @@ async function readBody(request) {
     const { done, value } = await reader.read()
     if (done) break
     total += value.length
-    if (total > MAX_BODY) { reader.cancel().catch(() => {}); return null }
+    if (total > max) { reader.cancel().catch(() => {}); return null }
     chunks.push(value)
   }
   const out = new Uint8Array(total)
   let at = 0
   for (const c of chunks) { out.set(c, at); at += c.length }
   return out
+}
+
+// A draft for the preview: a post's shape at any size (parsePost also caps it at one post).
+function parseDraft(bytes) {
+  try {
+    const doc = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))
+    if (!doc || doc.v !== 1 || typeof doc.title !== 'string' || typeof doc.body !== 'string') return null
+    return { title: doc.title.trim() || 'Untitled', body: doc.body }
+  } catch {
+    return null
+  }
 }
 
 function findPost(posts, id) {
@@ -360,6 +374,21 @@ export async function servePostsHost(index, request, url, { client, tokenOf, pos
     return html(200, renderRecent({ posts: await index.recent(30), postsHost }))
   }
   if (path === '/card.png') return cardResponse(siteCard(postsHost))
+  // A picture stored in a post, by the post's hash: what a post shows when its pictures are kept in
+  // other posts' blobs. Content-addressed, so it never changes.
+  const img = /^\/img\/(0x[0-9a-f]{64})\/(\d{1,3})$/.exec(path)
+  if (img) {
+    await index.load()
+    index.maybeSync()
+    const found = index.imageOf(img[1], Number(img[2]))
+    if (!found) return notFound()
+    return new Response(found.bytes, {
+      headers: {
+        'content-type': found.type, 'cache-control': 'public, max-age=31536000, immutable',
+        'x-content-type-options': 'nosniff', 'content-security-policy': "default-src 'none'", ...CORS,
+      },
+    })
+  }
   // /<name>.wei[/rest]: the name as its owner wrote it, percent-encoded where it isn't ASCII.
   const m = /^\/([^/]{1,1024}\.wei)(\/.*)?$/i.exec(path)
   if (!m) return notFound()
@@ -388,8 +417,8 @@ async function serveApi(index, request, path, url, { client }) {
   if (post && path === '/api/posts/preview') {
     // A draft rendered as its post page will be (pending, dated now), so the author sees exactly
     // what readers will before paying for anything. `?name=` puts the name in the byline.
-    const bytes = await readBody(request)
-    const doc = bytes && parsePost(bytes)
+    const bytes = await readBody(request, MAX_PREVIEW_BODY)
+    const doc = bytes && parseDraft(bytes)
     if (!doc) return json(400, { error: 'Not a post.' })
     const { cover, body } = splitCover(doc.body)
     const name = /^[^/?#]{1,1024}\.wei$/i.test(url.searchParams.get('name') || '') ? url.searchParams.get('name').toLowerCase() : 'yourname.wei'

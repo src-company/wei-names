@@ -85,6 +85,24 @@ same full or not. gwei-names' renderer caps every link and image destination at 
 so gwei.domains currently shows a stored picture as text; `https` and `ipfs://` images render on
 both.
 
+### Images in other posts
+
+A post is at most one blob, so a post with more pictures than fit keeps them in **image posts**:
+ordinary posts whose bodies are just pictures (`data:image` URLs, about two to a blob), each
+authorized by the same owner and then removed (`PostRemoved`), so no reader lists them. Their bytes
+stay in their blobs. The post shows each picture by its address on the gateway:
+
+```
+https://posts.wei.domains/img/<image post hash>/<n>
+```
+
+`<n>` counts the `data:image` pictures in the image post's body from 1, in order. The gateway serves
+the picture only if some owner authorized that post (an upload alone is never served), whether or not
+the post is listed, and caches it for good, since a post's bytes never change. The address follows
+from public data alone, so any gateway can serve the same one, and to every reader it is an ordinary
+`https` image: gwei.domains and anything else that shows `https` images shows these too. The dapp's
+editor does all of this when a post's pictures outgrow it.
+
 ### Image captions
 
 A line written directly under an image, with no blank line between them, is that image's caption:

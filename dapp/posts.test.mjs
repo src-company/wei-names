@@ -94,5 +94,41 @@ eq('editor: a tag in prose is not an image tag', dapp.expandPostBody('see (img:1
 eq('editor: a link pasted inside a link\'s address publishes as the link meant', dapp.expandPostBody('[Ethereum]([https://](https://ethereum.org/))', images, null), '[Ethereum](https://ethereum.org/)');
 eq('editor: … and renders as one link', renderMarkdown(dapp.expandPostBody('see [Ethereum]([https://](https://ethereum.org/)) now', images, null)), '<p>see <a href="https://ethereum.org/" rel="nofollow ugc noopener">Ethereum</a> now</p>');
 
+// Pictures past what one post holds go into image posts, shown by /img address (posts/SPEC.md,
+// "Images in other posts"). Every address the post uses must find exactly its picture, by the rule
+// the gateway serves /img with (posts.js imageOf: the n-th data: image in the image post's body).
+{
+  const ethers = (await import(path.join(here, 'vendor/ethers.min.js'))).default ?? (await import(path.join(here, 'vendor/ethers.min.js')));
+  const els = { ppTitle: { value: 'A photo essay' }, ppBody: { value: '' } };
+  const pctx = vm.createContext({ TextEncoder, Uint8Array, BigInt, JSON, String, Map, Set, Math, ethers, $: (id) => els[id], postImages: new Map(), postCover: null });
+  vm.runInContext([liftConst('POST_MAX_BYTES'), liftConst('POSTS_HOST'), liftConst('POSTS_IMG_BASE'), liftConst('carrierTitleFor'), liftConst('carrierBody'),
+    lift('postBytesFrom'), lift('expandPostBody'), lift('postPictures'), lift('packCarriers'), lift('buildPostPlan'), lift('postPlanShape'),
+    'this.api = { buildPostPlan, postPlanShape, set: (imgs, cover) => { postImages = imgs; postCover = cover } };'].join('\n'), pctx);
+  const { api } = pctx;
+  const pic = (n) => 'data:image/webp;base64,' + String.fromCharCode(65 + n).repeat(4) + 'Ab+/'.repeat(14400); // ~58 KB each, distinct
+  const imgs = new Map(Array.from({ length: 6 }, (_, i) => [String(i + 1), pic(i)]));
+  const cover = pic(9);
+  els.ppBody.value = 'Intro.\n\n' + [...imgs.keys()].map((id) => `![photo ${id}](img:${id})\ncaption ${id}`).join('\n\n') + '\n\nThe end.';
+  api.set(imgs, cover);
+  const plan = api.buildPostPlan();
+  eq('image posts: too much for one post splits into image posts', plan.carriers.length, 4);
+  eq('image posts: each fits in one blob, and so does the post', [...plan.carriers.map((c) => c.bytes.length), plan.bytes.length].every((n) => n <= dapp.POST_MAX_BYTES), true);
+  const mainBody = JSON.parse(new TextDecoder().decode(plan.bytes)).body;
+  const refs = [...mainBody.matchAll(/!\[[^\]\n]*\]\((https:\/\/posts\.wei\.domains\/img\/(0x[0-9a-f]{64})\/(\d+))\)/g)];
+  eq('image posts: the post shows every picture by address, the cover too', [refs.length, mainBody.includes('data:image')], [7, false]);
+  const byHash = new Map(plan.carriers.map((c) => [c.hash, JSON.parse(new TextDecoder().decode(c.bytes)).body]));
+  const nth = (body, n) => [...body.matchAll(/!\[[^\]\n]{0,300}\]\(\s*(data:image\/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/]+={0,2})\s*\)/g)][n - 1]?.[1];
+  const want = [cover, ...imgs.values()];
+  eq('image posts: each address finds exactly its picture, as the gateway reads them', refs.map(([, , h, n]) => nth(byHash.get(h), Number(n))), want);
+  eq('image posts: each one\'s hash is of its exact bytes', plan.carriers.every((c) => c.hash === postHash(c.bytes)), true);
+  eq('image posts: captions stay with their pictures', mainBody.includes(`/1)\ncaption 1`) || /\/\d+\)\ncaption 1/.test(mainBody), true);
+  eq('image posts: the cover is still the cover', splitCover(mainBody).cover?.url, refs[0][1]);
+  const shape = api.postPlanShape();
+  eq('image posts: the cost line\'s estimate matches the plan', [shape.carriers, shape.pictures, Math.abs(shape.mainBytes - plan.bytes.length) < 600], [4, 7, true]);
+  api.set(new Map([['1', pic(1)]]), null);
+  els.ppBody.value = 'One picture.\n\n![p](img:1)';
+  eq('image posts: none when everything fits', api.buildPostPlan().carriers.length, 0);
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
