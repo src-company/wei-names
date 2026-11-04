@@ -13,6 +13,7 @@
 import { renderMarkdown, excerpt, imageUrl } from './markdown.js'
 import { MAX_POST_BYTES, POST_PATH, parsePost, postHash, postPath } from './posts-format.js'
 import { renderCard } from './share-card.js'
+import { XPOST_STYLE, embedXPosts } from './x-embed.js'
 
 export const POSTS_HOST = 'posts.wei.domains'
 const DAPP = 'https://wei.domains'
@@ -75,7 +76,7 @@ h2.title{font-size:28px;font-weight:700;line-height:1.25;margin-bottom:6px;lette
 .list p{font-size:14px;color:var(--muted);margin-top:2px}
 .note{margin-top:40px;font-size:11px;color:var(--dim)}
 .empty{font-size:14px;color:var(--muted)}
-`
+${XPOST_STYLE}`
 
 function layout({ title, head = '', body, nav = '' }) {
   return '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
@@ -126,6 +127,9 @@ function coverSrc(post, base) {
   return cover.url
 }
 
+// A post's body as its page shows it: the Markdown without the cover, with X post links as cards.
+const postBodyHtml = (body) => embedXPosts(renderMarkdown(splitCover(body).body))
+
 // --- link-preview cards (share-card.js) -------------------------------------------------------------
 // Every page gets a 1200x630 PNG: a post's title with its name's generated mark, a name with its post
 // count, the posts host's own. The URL carries a hash of what the card shows (?v=), so a changed card
@@ -164,7 +168,7 @@ function dateLine(post) {
     (post.onchain ? '' : '<span class="pending" title="Authorized by the owner, waiting for its blob">pending</span>')
 }
 
-function renderPost({ name, base, canonical, post, seed = null }) {
+function renderPost({ name, base, canonical, post, seed = null, bodyHtml }) {
   const rows = post.onchain
     ? [
         ['Status', `In a blob since block <a href="https://etherscan.io/block/${post.onchain.block}">${post.onchain.block}</a>`],
@@ -178,7 +182,7 @@ function renderPost({ name, base, canonical, post, seed = null }) {
     (cover ? `<figure class="cover"><img src="${escapeHtml(cover.url)}" alt="${escapeHtml(cover.alt)}" referrerpolicy="no-referrer"></figure>` : '') +
     `<div class="byline"><a href="${escapeHtml(base || '/')}">${escapeHtml(name)}</a></div>` +
     `<h2 class="title">${escapeHtml(post.title)}</h2><div class="meta">${dateLine(post)}</div>` +
-    `<article class="body">${renderMarkdown(text)}</article>` +
+    `<article class="body">${bodyHtml ?? renderMarkdown(text)}</article>` +
     `<div class="panel">${rows.map(([k, v]) => `<div><span>${k}</span>${v}</div>`).join('')}</div>`
   return layout({
     title: `${post.title} · ${name}`,
@@ -337,7 +341,8 @@ export async function serveNamePosts(index, { name, token, path, base, canonical
   const m = POST_PATH.exec(path)
   const post = m && findPost(posts, m[1])
   if (!post) return notFound()
-  return html(200, renderPost({ name, base, canonical: canonical + postPath(post.hash, post.title), post, seed: token }))
+  const bodyHtml = await postBodyHtml(post.body)
+  return html(200, renderPost({ name, base, canonical: canonical + postPath(post.hash, post.title), post, seed: token, bodyHtml }))
 }
 
 // The posts host: the API, recent posts, and every name by path.
@@ -389,7 +394,7 @@ async function serveApi(index, request, path, url, { client }) {
     const base = canonicalBase(name)
     return json(200, {
       title: doc.title, cover: cover && cover.url, html: renderMarkdown(body),
-      page: renderPost({ name, base, canonical: base + postPath(hash, doc.title), post: draft }),
+      page: renderPost({ name, base, canonical: base + postPath(hash, doc.title), post: draft, bodyHtml: await postBodyHtml(doc.body) }),
     })
   }
   if (post && path === '/api/sync') {

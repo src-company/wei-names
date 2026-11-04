@@ -13,6 +13,7 @@ import { serveNamePosts, servePostsHost, splitCover, POST_CSP } from './posts-pa
 import { decodeBlob, encodeBlob, encodePost, parsePost, postCid, postHash, postPath, MAX_POST_BYTES } from './posts-format.js'
 import { renderMarkdown } from './markdown.js'
 import { handleRequest } from './handler.js'
+import { embedXPosts, setEmbedFetch, xStatus, MAX_EMBEDS } from './x-embed.js'
 
 let pass = 0
 let fail = 0
@@ -294,6 +295,43 @@ eq('card: a name page has its card', page.includes('content="https://posts.wei.d
 eq('card: … served', await isPng(await host('/alice.wei/card.png')), true)
 eq('card: the posts host has its own', await isPng(await host('/card.png')), true)
 eq('card: none for a post the name does not show', (await host('/alice.wei/posts/000000000000/card.png')).status, 404)
+
+// --- embedded X posts ----------------------------------------------------------------------------
+
+const TWEET = {
+  __typename: 'Tweet', id_str: '1930000000000000001', created_at: '2026-06-04T16:20:00.000Z',
+  text: 'tfw personally deployed &gt;3k contracts on ethereum &amp; more, ask @src_co https://t.co/abc123 https://t.co/media1',
+  display_text_range: [0, 88],
+  entities: { urls: [{ url: 'https://t.co/abc123', expanded_url: 'https://wei.domains/', display_url: 'wei.domains' }] },
+  user: { screen_name: 'z0r0zzz', name: 'ross.wei <script>', is_blue_verified: true, profile_image_url_https: 'https://pbs.twimg.com/profile_images/1/a_normal.jpg' },
+  mediaDetails: [{ type: 'photo', media_url_https: 'https://pbs.twimg.com/media/shot.jpg' }, { type: 'photo', media_url_https: 'https://evil.example/x.jpg' }],
+  favorite_count: 60, conversation_count: 9,
+}
+let xCalls = 0
+setEmbedFetch(async (url) => {
+  xCalls++
+  const id = new URL(url).searchParams.get('id')
+  return id === TWEET.id_str ? new Response(JSON.stringify(TWEET)) : new Response('{}', { status: 404 })
+})
+eq('x: post links are recognized on x.com and twitter.com', [xStatus('https://x.com/z0r0zzz/status/1930000000000000001?s=20'), xStatus('https://mobile.twitter.com/a/status/5'), xStatus('https://x.com/home')].map((l) => l && l.id), ['1930000000000000001', '5', null])
+let embedded = await embedXPosts(renderMarkdown(`Above.\n\nhttps://x.com/z0r0zzz/status/${TWEET.id_str}?s=20\n\nSee https://x.com/z0r0zzz/status/${TWEET.id_str} inline.`))
+eq('x: a link alone on its line becomes a card', (embedded.match(/<figure class="xpost">/g) || []).length, 1)
+eq('x: … a link inside a sentence stays a link', embedded.includes(`<p>See <a href="https://x.com/z0r0zzz/status/${TWEET.id_str}"`), true)
+eq('x: text is decoded once and escaped once', embedded.includes('deployed &gt;3k contracts on ethereum &amp; more'), true)
+eq('x: t.co links expand to where they go; the media link is dropped', embedded.includes('<a href="https://wei.domains/" rel="nofollow noopener">wei.domains</a>') && !embedded.includes('t.co/media1'), true)
+eq('x: mentions link to X', embedded.includes('<a href="https://x.com/src_co"'), true)
+eq('x: a display name is text, never markup', embedded.includes('ross.wei &lt;script&gt;') && !embedded.includes('<script>'), true)
+eq('x: images only from X\'s image host', embedded.includes('https://pbs.twimg.com/media/shot.jpg') && !embedded.includes('evil.example'), true)
+eq('x: verified badge, handle and date', embedded.includes('aria-label="verified"') && embedded.includes('@z0r0zzz · Jun 4, 2026'), true)
+embedded = await embedXPosts(renderMarkdown('https://x.com/someone/status/42'))
+eq('x: a post X doesn\'t return stays a plain link card', embedded.startsWith('<a class="xpost xpost-link" href="https://x.com/someone/status/42"'), true)
+xCalls = 0
+await embedXPosts(renderMarkdown(`https://x.com/z0r0zzz/status/${TWEET.id_str}`))
+eq('x: a post is fetched once, then cached', xCalls, 0)
+embedded = await embedXPosts(renderMarkdown(Array.from({ length: MAX_EMBEDS + 3 }, (_, i) => `https://x.com/u/status/${100 + i}`).join('\n\n')))
+eq('x: at most MAX_EMBEDS cards a post; the rest stay links', (embedded.match(/class="xpost/g) || []).length, MAX_EMBEDS)
+res = await host('/api/posts/preview?name=alice.wei', { method: 'POST', body: encodePost({ title: 'Embeds', body: `https://x.com/z0r0zzz/status/${TWEET.id_str}` }) })
+eq('x: the preview shows the card too', (await res.json()).page.includes('<figure class="xpost">'), true)
 
 // --- the handler -------------------------------------------------------------------------------
 

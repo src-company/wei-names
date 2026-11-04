@@ -85,6 +85,15 @@ same full or not. gwei-names' renderer caps every link and image destination at 
 so gwei.domains currently shows a stored picture as text; `https` and `ipfs://` images render on
 both.
 
+### Embedded X posts
+
+A link to an X post (`https://x.com/<handle>/status/<id>`, or on twitter.com) alone on its own line
+is drawn on wei.domains as a card, the way X articles show one: the author, the text, any photos, and
+a link to the post. Post pages run no scripts, so the gateway reads the post from X's public
+syndication endpoint and writes the card itself, and keeps it for a day. The post's bytes keep only
+the link, so it reads as a link anywhere else, and if X stops answering for a post (deleted, or the
+endpoint is down) the card falls back to a plain link to it. The images load from X's image host.
+
 ### Cover image
 
 An image alone on the body's first line, followed by a blank line or nothing, is the post's
