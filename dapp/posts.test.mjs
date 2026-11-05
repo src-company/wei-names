@@ -129,6 +129,12 @@ eq('editor: … and renders as one link', renderMarkdown(dapp.expandPostBody('se
   els.ppBody.value = 'One picture.\n\n![p](img:1)';
   eq('image posts: none when everything fits', api.buildPostPlan().carriers.length, 0);
 }
+{
+  const mctx = vm.createContext({ Set, String, postImages: new Map([['1', 'data:image/webp;base64,AAAA']]), $: () => null });
+  vm.runInContext(lift('missingPostImages') + '\nthis.m = missingPostImages;', mctx);
+  eq('editor: an image tag with no picture in this browser is caught before publishing', mctx.m('![a](img:1)\n\n![b](img:2)\n\n![c](img:13)'), ['2', '13']);
+  eq('editor: … none when every tag has its picture', mctx.m('![a](img:1)'), []);
+}
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

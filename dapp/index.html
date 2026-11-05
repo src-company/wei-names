@@ -4302,6 +4302,13 @@ function postPlanShape() {
   return { carriers: packCarriers(pics, title).length, pictures: pics.length, mainBytes: main };
 }
 
+// Image tags in the text with no picture behind them in this browser: the tags only mean something
+// where the pictures were attached (pasted text from another browser, or a picture removed). Published
+// as they are, they'd show as text, so publishing waits until they're re-attached or deleted.
+function missingPostImages(text = $('ppBody')?.value || '') {
+  return [...new Set([...String(text).matchAll(/\]\(img:(\d{1,6})\)/g)].map((m) => m[1]))].filter((id) => !postImages.has(id));
+}
+
 function readPostForm() {
   const title = ($('ppTitle')?.value || '').trim();
   const body = expandPostBody($('ppBody')?.value || '', postImages, postCover);
@@ -4313,6 +4320,11 @@ function updatePostCost() {
   if (status?.classList.contains('error')) status.classList.remove('show');
   const el = $('ppCost');
   if (!el) return;
+  const missing = missingPostImages();
+  if (missing.length) {
+    el.textContent = `${missing.map((id) => `img:${id}`).join(', ')} ${missing.length === 1 ? 'has' : 'have'} no picture in this browser (attached somewhere else, or removed). Attach ${missing.length === 1 ? 'it' : 'them'} again where ${missing.length === 1 ? 'it goes' : 'they go'}, or delete ${missing.length === 1 ? 'that line' : 'those lines'}, before publishing.`;
+    return;
+  }
   const shape = postPlanShape();
   const length = shape.mainBytes;
   const used = Math.min(100, Math.round((length / POST_MAX_BYTES) * 100));
@@ -4812,6 +4824,8 @@ async function doPublishPost() {
   if (isProcessing || !_signer || !currentTokenId || !postsEnabled()) return;
   const title = ($('ppTitle')?.value || '').trim();
   if (!title) { showStatus('Give the post a title', 'error'); return; }
+  const missing = missingPostImages();
+  if (missing.length) { showStatus(`${missing.map((id) => `img:${id}`).join(', ')} ${missing.length === 1 ? 'has' : 'have'} no picture in this browser: attach ${missing.length === 1 ? 'it' : 'them'} again, or delete ${missing.length === 1 ? 'that line' : 'those lines'}`, 'error'); return; }
   let plan;
   try { plan = buildPostPlan(); } catch (e) { showStatus(e.message || 'Couldn’t build the post', 'error'); return; }
   if (plan.bytes.length > POST_MAX_BYTES) { showStatus(`The text is too long: ${plan.bytes.length} bytes, the most is ${POST_MAX_BYTES}`, 'error'); return; }
