@@ -4863,21 +4863,39 @@ async function doPublishPost() {
       await waitForTx(tx);
       confirmedTx = tx.hash;
     } else {
+      // Resuming: image posts this name already authorized (a publish that stopped partway, say, when
+      // a wallet prompt never came) are skipped, and one authorized but still listed is only unlisted.
+      // Image posts are made the same way from the same draft, so they have the same hashes.
+      const me = (_connectedAddress || '').toLowerCase(), token = tokenHexOf(tokenId);
+      for (const part of parts.filter((p) => p.carrier)) {
+        try {
+          const res = await fetch(`${POSTS_API}/posts/${part.hash}`, { cache: 'no-store' });
+          const auths = res.ok ? ((await res.json()).authorizations || []).filter((a) => a.tokenId === token && a.author === me) : [];
+          if (auths.length) { part.authorized = true; part.removed = !!auths[auths.length - 1].removed; }
+        } catch (_) {}
+      }
+      const done = parts.filter((p) => p.carrier && p.authorized && p.removed).length;
       // Each image post is authorized, then taken off the name's list (its pictures stay in its blob,
       // where /img finds them); then the post itself.
       const iface = new ethers.Interface(POSTS_ABI);
       const calls = [], labels = [];
       parts.forEach((part, i) => {
-        calls.push({ to: POSTS_CONTRACT, data: iface.encodeFunctionData('authorize', [tokenId, part.hash, part.blob, POSTS_PUBLISHER]), value: '0x' + part.fee.toString(16) });
-        labels.push(part.carrier ? `image post ${i + 1}` : 'the post');
-        if (part.carrier) {
+        if (!(part.carrier && part.authorized)) {
+          calls.push({ to: POSTS_CONTRACT, data: iface.encodeFunctionData('authorize', [tokenId, part.hash, part.blob, POSTS_PUBLISHER]), value: '0x' + part.fee.toString(16) });
+          labels.push(part.carrier ? `image post ${i + 1}` : 'the post');
+        }
+        if (part.carrier && !part.removed) {
           calls.push({ to: POSTS_CONTRACT, data: iface.encodeFunctionData('remove', [tokenId, part.hash]), value: '0x0' });
           labels.push(`keep image post ${i + 1} off your list`);
         }
       });
+      if (done) {
+        showStatus(`${done} image post${done === 1 ? ' is' : 's are'} already on Ethereum. ${calls.length} step${calls.length === 1 ? '' : 's'} left: ${labels.join(', ')}.`, '');
+        await new Promise((r) => setTimeout(r, 2500));
+      }
       // Remembered before sending, so a refund is offered even if this tab closes partway.
-      savePaidPosts(tokenId, [...paidPosts(tokenId).filter((p) => !parts.some((x) => x.blob === p.blob)),
-        ...parts.filter((p) => p.fee > 0n).map((p) => ({ hash: p.hash, blob: p.blob, publisher: POSTS_PUBLISHER, title: p.title }))]);
+      savePaidPosts(tokenId, [...paidPosts(tokenId).filter((p) => !parts.some((x) => x.blob === p.blob && !x.authorized)),
+        ...parts.filter((p) => p.fee > 0n && !p.authorized).map((p) => ({ hash: p.hash, blob: p.blob, publisher: POSTS_PUBLISHER, title: p.title }))]);
       await postSendCalls(calls, labels);
     }
     showStatus('Confirmed. Adding it to your page...', '', confirmedTx);
