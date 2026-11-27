@@ -825,6 +825,10 @@ def main(argv):
         reopened = poster.db.execute("UPDATE jobs SET status = 'new', next_try = 0, tries = 0 WHERE status IN ('expired', 'failed')").rowcount
         poster.db.commit()
         log.warning("rescue mode: refundable fees count as paid; reopened %d jobs", reopened)
+        for vh, post, status, tries, next_try, raw in poster.db.execute(
+                "SELECT blob, post, status, tries, next_try, bytes IS NOT NULL FROM jobs WHERE status != 'done' ORDER BY block"):
+            log.warning("job %s post %s: %s, tries %d, due in %ds, bytes %s", vh[:14], post[:14], status, tries,
+                        next_try - int(poster.now()), "held" if raw else "not yet")
     failures = 0
     while True:
         try:
