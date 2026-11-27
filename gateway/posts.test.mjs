@@ -349,6 +349,22 @@ eq('img: … other images are left alone', ownImages('<img src="https://x.test/a
   eq('archive: after a restart, a post still waiting for its blob gets its bytes back', after.bytes.has(postHash(waiting)), true)
 }
 
+{
+  // A shared link whose post lost its bytes before its blob went out follows the owner's republished
+  // post with the same title.
+  const lostHash = '0x' + 'd1866ee38726'.padEnd(64, '7')
+  authorize(70, T_ALICE, lostHash, ALICE, '0x01' + 'ab'.repeat(31))
+  const again = encodePost({ title: 'crypto and the new e-state', body: 'republished' })
+  index.upload(again, 'ip8')
+  authorize(71, T_ALICE, postHash(again), ALICE, blobVersionedHash(encodeBlob([again])))
+  published(72, blobVersionedHash(encodeBlob([again])))
+  await sync()
+  res = await host('/alice.wei/posts/d1866ee38726-crypto-and-the-new-e-state')
+  eq('lost: the shared link goes to the republished post', [res.status, new URL(res.headers.get('location') || 'https://x/').pathname], [302, `/alice.wei${postPath(postHash(again), 'crypto and the new e-state')}`])
+  eq('lost: … not when the title in the link differs', (await host('/alice.wei/posts/d1866ee38726-something-else')).status, 404)
+  eq('lost: … never for a post that still has its text', (await host(`/alice.wei/posts/${firstHash.slice(2, 14)}-crypto-and-the-new-e-state`)).status, 200)
+}
+
 // --- link-preview cards ------------------------------------------------------------------------------
 
 const isPng = async (r) => { const b = new Uint8Array(await r.arrayBuffer()); return r.headers.get('content-type') === 'image/png' && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47 }

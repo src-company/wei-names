@@ -365,7 +365,18 @@ export async function serveNamePosts(index, { name, token, path, base, canonical
   }
   const m = POST_PATH.exec(path)
   const post = m && findPost(posts, m[1])
-  if (!post) return notFound()
+  if (!post) {
+    // A post its name's owner authorized whose bytes were lost before its blob went out (a gateway
+    // restart once did this to a shared link): its link goes to the newest post on the same name with
+    // the same title, which the link spells. Only the owner can publish on the name, so only the
+    // owner's republished post can answer for it.
+    const slug = /^\/posts\/[0-9a-f]{12}-([a-z0-9-]+)\/?$/.exec(path)?.[1]
+    if (m && slug && index.lostPost?.(token, m[1])) {
+      const again = posts.find((p) => postPath(p.hash, p.title).endsWith(`-${slug}`))
+      if (again) return Response.redirect(new URL(postPath(again.hash, again.title), (base || canonical) + '/').href, 302)
+    }
+    return notFound()
+  }
   const bodyHtml = await postBodyHtml(post.body)
   return html(200, renderPost({ name, base, canonical: canonical + postPath(post.hash, post.title), post, seed: token, bodyHtml }))
 }

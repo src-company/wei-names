@@ -471,6 +471,17 @@ export class PostIndex {
     return name
   }
 
+  // Whether `id` (a post hash's first 12 hex digits) is a post this name authorized whose bytes no
+  // copy has: authorized, never in a blob, nothing held. Its link can then point at a republished post.
+  lostPost(token, id) {
+    for (const hash of this.byToken.get(token) || []) {
+      if (hash.slice(2, 14) !== id) continue
+      if (this.bytes.has(hash)) return false
+      return !this.byHash.get(hash).some((a) => this.isCarried(a.blob, hash))
+    }
+    return false
+  }
+
   knows(token) {
     return this.byToken.has(token)
   }
