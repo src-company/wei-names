@@ -369,10 +369,23 @@ export async function serveNamePosts(index, { name, token, path, base, canonical
     // A post its name's owner authorized whose bytes were lost before its blob went out (a gateway
     // restart once did this to a shared link): its link goes to the newest post on the same name with
     // the same title, which the link spells. Only the owner can publish on the name, so only the
-    // owner's republished post can answer for it.
+    // owner's republished post can answer for it. A link without the title (/posts/<id>, as a short
+    // link carries it) goes to the first post on the name authorized after the lost one: the owner's
+    // republish of it, which stays its answer however many posts come later.
     const slug = /^\/posts\/[0-9a-f]{12}-([a-z0-9-]+)\/?$/.exec(path)?.[1]
+    const bare = /^\/posts\/[0-9a-f]{12}\/?$/.test(path)
     if (m && slug && index.lostPost?.(token, m[1])) {
       const again = posts.find((p) => postPath(p.hash, p.title).endsWith(`-${slug}`))
+      if (again) return Response.redirect((base || canonical) + postPath(again.hash, again.title), 302)
+    }
+    const lost = m && bare && index.lostHash?.(token, m[1])
+    if (lost) {
+      const after = index.authorizedOrder(token, lost)
+      let again = null, at = Infinity
+      for (const p of posts) {
+        const order = index.authorizedOrder(token, p.hash)
+        if (order != null && order > after && order < at) { again = p; at = order }
+      }
       if (again) return Response.redirect((base || canonical) + postPath(again.hash, again.title), 302)
     }
     return notFound()

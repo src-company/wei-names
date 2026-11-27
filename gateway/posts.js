@@ -474,12 +474,23 @@ export class PostIndex {
   // Whether `id` (a post hash's first 12 hex digits) is a post this name authorized whose bytes no
   // copy has: authorized, never in a blob, nothing held. Its link can then point at a republished post.
   lostPost(token, id) {
+    return !!this.lostHash(token, id)
+  }
+
+  // The hash of a post authorized on this name whose bytes are gone and whose blob never went out, or null.
+  lostHash(token, id) {
     for (const hash of this.byToken.get(token) || []) {
       if (hash.slice(2, 14) !== id) continue
-      if (this.bytes.has(hash)) return false
-      return !this.byHash.get(hash).some((a) => this.isCarried(a.blob, hash))
+      if (this.bytes.has(hash)) return null
+      return this.byHash.get(hash).some((a) => this.isCarried(a.blob, hash)) ? null : hash
     }
-    return false
+    return null
+  }
+
+  // Where a post was first authorized on this name, in event order, or null.
+  authorizedOrder(token, hash) {
+    const a = (this.byHash.get(hash) || []).find((x) => x.token === token)
+    return a ? a.order : null
   }
 
   knows(token) {

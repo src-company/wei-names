@@ -363,6 +363,16 @@ eq('img: … other images are left alone', ownImages('<img src="https://x.test/a
   eq('lost: the shared link goes to the republished post', [res.status, new URL(res.headers.get('location') || 'https://x/').pathname], [302, `/alice.wei${postPath(postHash(again), 'crypto and the new e-state')}`])
   eq('lost: … not when the title in the link differs', (await host('/alice.wei/posts/d1866ee38726-something-else')).status, 404)
   eq('lost: … never for a post that still has its text', (await host(`/alice.wei/posts/${firstHash.slice(2, 14)}-crypto-and-the-new-e-state`)).status, 200)
+  res = await host('/alice.wei/posts/d1866ee38726')
+  eq('lost: a link without the title goes to the first post authorized after the lost one', [res.status, new URL(res.headers.get('location') || 'https://x/').pathname], [302, `/alice.wei${postPath(postHash(again), 'crypto and the new e-state')}`])
+  const later = encodePost({ title: 'a later post', body: 'published after the republish' })
+  index.upload(later, 'ip9')
+  authorize(73, T_ALICE, postHash(later), ALICE, blobVersionedHash(encodeBlob([later])))
+  published(74, blobVersionedHash(encodeBlob([later])))
+  await sync()
+  res = await host('/alice.wei/posts/d1866ee38726')
+  eq('lost: … and still to the republish once later posts follow it', new URL(res.headers.get('location') || 'https://x/').pathname, `/alice.wei${postPath(postHash(again), 'crypto and the new e-state')}`)
+  eq('lost: … never for a post that still has its text, without the title either', (await host(`/alice.wei/posts/${firstHash.slice(2, 14)}`)).status, 200)
 }
 
 // --- link-preview cards ------------------------------------------------------------------------------
