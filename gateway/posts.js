@@ -181,6 +181,7 @@ export class PostIndex {
       try {
         await this.load()
         await this.syncLogs()
+        await this.restoreWaiting()
         await this.checkBlobs()
         this.prune()
         await this.save()
@@ -357,6 +358,34 @@ export class PostIndex {
     return null
   }
 
+  // An upload is copied to the archive the moment it arrives: until its blob is out, these bytes exist
+  // nowhere else, and this index keeps them in memory, so a restart here would lose a post that was
+  // authorized and paid for (it did, once). The archive keeps them on disk.
+  forwardToArchive(bytes) {
+    if (!this.archiveUrl) return
+    this.fetchImpl(`${this.archiveUrl}/api/posts`, { method: 'POST', body: bytes, signal: AbortSignal.timeout(ARCHIVE_TIMEOUT_MS) })
+      .then((res) => res.body?.cancel().catch(() => {}))
+      .catch(() => {})
+  }
+
+  // Authorized posts still waiting for their blob, whose bytes this index lost: back from the archive,
+  // so the post shows and its publisher can fetch it. (Posts already in a blob come back in checkBlobs.)
+  async restoreWaiting() {
+    if (!this.archiveUrl) return
+    const now = Math.floor(this.now() / 1000)
+    let asked = 0
+    for (const [hash, auths] of this.byHash) {
+      if (asked >= ARCHIVE_FETCHES_PER_SYNC) break
+      if (this.bytes.has(hash) || this.restoreTried?.has(hash)) continue
+      const latest = auths[auths.length - 1]
+      const at = this.times.get(latest.block)
+      if (at && now - at > AUTHORIZED_TTL_SECONDS) continue
+      ;(this.restoreTried ||= new Set()).add(hash)
+      asked++
+      await this.fetchArchive(hash)
+    }
+  }
+
   async fetchArchive(hash) {
     try {
       const res = await this.fetchImpl(`${this.archiveUrl}/api/posts/${hash}/raw`, { signal: AbortSignal.timeout(ARCHIVE_TIMEOUT_MS) })
@@ -412,6 +441,7 @@ export class PostIndex {
       if (this.uploads.size > 10_000) this.uploads.delete(this.uploads.keys().next().value)
     }
     this.keep(hash, bytes, 'upload')
+    this.forwardToArchive(bytes)
     return { status: 200, hash }
   }
 

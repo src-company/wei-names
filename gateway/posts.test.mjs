@@ -327,6 +327,28 @@ eq('img: … other images are left alone', ownImages('<img src="https://x.test/a
   eq('archive: … and asked for only what was missing', archiveCalls > 0, true)
 }
 
+{
+  // An upload goes to the archive at once; after a restart, an authorized post still waiting for its
+  // blob gets its bytes back from there (a deploy once wiped such a post).
+  const stored = new Map()
+  const archiveFetch = async (url, init) => {
+    if (url === 'https://archive.internal/api/posts' && init?.method === 'POST') { const b = new Uint8Array(init.body); stored.set(postHash(b), b); return new Response('{}') }
+    const m = /^https:\/\/archive\.internal\/api\/posts\/(0x[0-9a-f]{64})\/raw$/.exec(url)
+    if (m) return stored.has(m[1]) ? new Response(stored.get(m[1])) : new Response('', { status: 404 })
+    return new Response('not found', { status: 404 })
+  }
+  const mk = () => new PostIndex({ contract: POSTS, nameNFT: NFT, fromBlock: 1, rpc, call, now: () => clock, ipfs: null, blobSources: { blobscan: null, beacons: [] }, archive: 'https://archive.internal', fetchImpl: archiveFetch })
+  const waiting = encodePost({ title: 'Waiting for its blob', body: 'authorized, not yet delivered' })
+  const before = mk()
+  before.upload(waiting, 'ip7')
+  await new Promise((r) => setTimeout(r, 20))
+  eq('archive: an upload is copied to the archive at once', stored.has(postHash(waiting)), true)
+  authorize(60, T_ALICE, postHash(waiting), ALICE, blobVersionedHash(encodeBlob([waiting])))
+  const after = mk() // the restart: nothing in memory
+  await after.maybeSync()
+  eq('archive: after a restart, a post still waiting for its blob gets its bytes back', after.bytes.has(postHash(waiting)), true)
+}
+
 // --- link-preview cards ------------------------------------------------------------------------------
 
 const isPng = async (r) => { const b = new Uint8Array(await r.arrayBuffer()); return r.headers.get('content-type') === 'image/png' && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47 }
