@@ -242,17 +242,49 @@ def http(url, data=None, headers=None, timeout=20, method=None):
         return response.status, response.read()
 
 
+# An endpoint's own limits, not an answer about the chain: try the next endpoint. A spent quota, an
+# "archive" refusal for old logs, a plan that caps log ranges, rate limits, and a node that can't decode
+# blob transactions (some can't take the EIP-7594 wrapper) all read like this.
+ENDPOINT_REFUSAL = re.compile(r"quota|rate.?limit|too many|archive|not supported|not available|upgrade|plan|forbidden|"
+                              r"capacity|exceeded|deserializ|unsupported|method not found", re.I)
+
+
 class Rpc:
+    """JSON-RPC over one or more endpoints (POSTER_RPC, comma-separated), tried in order: a transport
+    failure or an endpoint refusing the request moves on to the next, so one free tier running out
+    (it happened) can't stall the publisher. A real answer, an error included, comes from the first
+    endpoint that gives one. List an endpoint that takes blob transactions first."""
+
     def __init__(self, url):
-        self.url = url
+        self.urls = [u.strip() for u in str(url).split(",") if u.strip()]
+        self.url = self.urls[0]
 
     def __call__(self, method, *params):
         body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": list(params)}).encode()
-        _, raw = http(self.url, body, {"content-type": "application/json"}, timeout=30)
-        reply = json.loads(raw)
-        if reply.get("error"):
-            raise RpcError(f"{method}: {reply['error'].get('message', reply['error'])}")
-        return reply.get("result")
+        last = None
+        for i, url in enumerate(self.urls):
+            final = i == len(self.urls) - 1
+            try:
+                _, raw = http(url, body, {"content-type": "application/json"}, timeout=30)
+                reply = json.loads(raw)
+            except urllib.error.HTTPError as error:
+                last = error
+                if final:
+                    raise
+                continue
+            except (urllib.error.URLError, TimeoutError, ValueError, OSError) as error:
+                last = error
+                if final:
+                    raise
+                continue
+            if reply.get("error"):
+                message = str(reply["error"].get("message", reply["error"]))
+                if not final and ENDPOINT_REFUSAL.search(message):
+                    last = RpcError(f"{method}: {message}")
+                    continue
+                raise RpcError(f"{method}: {message}")
+            return reply.get("result")
+        raise last or RpcError(f"{method}: no endpoint answered")
 
 
 SCHEMA = """

@@ -298,10 +298,13 @@ services:
         value: /var/data/key
       - key: POSTER_TRUSTED_SETUP
         value: trusted_setup.txt
-      # A mainnet node that takes Fusaka (EIP-7594) blob transactions. Set in
-      # the dashboard: an authenticated endpoint carries its key in the URL.
-      # Checked 2026-11-03: Tenderly and publicnode decode the wrapper,
-      # mevblocker does not.
+      # Mainnet endpoints, comma-separated, tried in order (an endpoint out of
+      # quota or refusing a request passes the call to the next). The first
+      # must take Fusaka (EIP-7594) blob transactions; one must serve old logs.
+      # Set in the dashboard: an authenticated endpoint carries its key. Since
+      # 2026-11-27: publicnode (sends; refuses logs past ~128 blocks without a
+      # token), mevblocker (logs; can't decode blob txs), then Tenderly (its
+      # free quota ran out on 2026-11 and stalled a single-endpoint setup).
       - key: POSTER_RPC
         sync: false
 

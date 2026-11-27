@@ -238,6 +238,42 @@ def free_port():
         return s.getsockname()[1]
 
 
+class RpcFailover(unittest.TestCase):
+    """POSTER_RPC can list several endpoints: one that's out of quota or refuses a request moves the
+    call to the next, but a real answer (an error included) is never skipped."""
+
+    def serve(self, reply):
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers["content-length"])))
+                status, payload = reply(body["method"])
+                data = json.dumps({"jsonrpc": "2.0", "id": 1, **payload}).encode()
+                self.send_response(status)
+                self.send_header("content-type", "application/json")
+                self.end_headers()
+                self.wfile.write(data)
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        return f"http://127.0.0.1:{server.server_port}"
+
+    def test_failover(self):
+        quota = self.serve(lambda m: (403, {"error": {"code": -32004, "message": "You've reached the quota limit for your current plan"}}))
+        archive = self.serve(lambda m: (200, {"error": {"code": -32000, "message": "Archive requests require a personal token"}}) if m == "eth_getLogs" else (200, {"result": "0x1"}))
+        logs = self.serve(lambda m: (200, {"result": []}) if m == "eth_getLogs" else (200, {"result": "0x2"}))
+        rpc = gp.Rpc(f"{quota},{archive},{logs}")
+        self.assertEqual(rpc("eth_blockNumber"), "0x1", "past the spent quota, the first that answers")
+        self.assertEqual(rpc("eth_getLogs", {}), [], "old logs from the endpoint that serves them")
+        reverts = self.serve(lambda m: (200, {"error": {"code": 3, "message": "execution reverted"}}))
+        with self.assertRaises(gp.RpcError):
+            gp.Rpc(f"{reverts},{logs}")("eth_call", {})  # a real answer is not skipped
+        with self.assertRaises(Exception):
+            gp.Rpc(quota)("eth_blockNumber")  # with nowhere else to go, the refusal surfaces
+
+
 class FakeApi(http.server.BaseHTTPRequestHandler):
     posts = {}
     blobs = {}
