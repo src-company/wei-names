@@ -373,7 +373,7 @@ export async function serveNamePosts(index, { name, token, path, base, canonical
     const slug = /^\/posts\/[0-9a-f]{12}-([a-z0-9-]+)\/?$/.exec(path)?.[1]
     if (m && slug && index.lostPost?.(token, m[1])) {
       const again = posts.find((p) => postPath(p.hash, p.title).endsWith(`-${slug}`))
-      if (again) return Response.redirect(new URL(postPath(again.hash, again.title), (base || canonical) + '/').href, 302)
+      if (again) return Response.redirect((base || canonical) + postPath(again.hash, again.title), 302)
     }
     return notFound()
   }
