@@ -31,7 +31,9 @@ const SYNC_EVERY_MS = 60_000
 const FORCED_SYNC_GAP_MS = 10_000 // POST /api/sync, at most this often
 const PENDING_SECONDS = 86_400 // an authorized post shows for a day while it waits for its blob
 const UPLOAD_TTL_SECONDS = 86_400 // uploaded bytes nobody authorized are dropped after this
-const AUTHORIZED_TTL_SECONDS = 3 * 86_400 // authorized bytes that never reach a blob, after this
+// Authorized bytes that never reach a blob, after this. Long enough to outlast a publisher outage:
+// one once stranded three days of posts, and the oldest's bytes were gone by the time it was fixed.
+const AUTHORIZED_TTL_SECONDS = 30 * 86_400
 const MAX_UNCLAIMED_BYTES = 64 * 1024 * 1024
 const UPLOADS_PER_HOUR = 20 // per client key; bytes an owner already authorized skip this
 const OWNER_TTL_MS = 60_000

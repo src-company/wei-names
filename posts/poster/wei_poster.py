@@ -322,8 +322,13 @@ class Poster:
     deposits cover sending it alone, and no transaction may ever spend more than they add up to."""
 
     def __init__(self, *, rpc, api, contract, from_block, signer, db, setup, ipfs_api=None, notify=None,
-                 chain_id=1, wrapper_version=1, now=time.time):
+                 chain_id=1, wrapper_version=1, now=time.time, rescue=False):
         self.rpc = rpc
+        # POSTER_RESCUE: deliver posts whose fees are already refundable (a publisher that was down
+        # past their safety margin). Each still only spends what its blobs hold; an author refunding
+        # while it's in flight costs at most that transaction's gas. Meant to be switched on once,
+        # to catch up, then off again.
+        self.rescue = rescue
         self.api = api.rstrip("/")
         self.contract = contract.lower()
         self.from_block = from_block
@@ -452,7 +457,7 @@ class Poster:
         for payer in payers:
             out = self.call("0x" + SEL_DEPOSITS + key.hex() + payer[2:].rjust(64, "0"))[2:]
             amount, refundable_at = int(out[:64], 16), int(out[64:128], 16)
-            if refundable_at - chain_time >= SAFETY_MARGIN:
+            if refundable_at - chain_time >= SAFETY_MARGIN or (self.rescue and amount):
                 total += amount
         return total
 
@@ -638,6 +643,21 @@ class Poster:
         waited = head - sent_block
         if waited < REPLACE_AFTER_BLOCKS:
             return True
+        # A transaction no node knows was never broadcast (the endpoint refused it: it happened when a
+        # free tier ran out), or has left every pool. Waiting on it would hold its nonce, and every
+        # delivery behind it, forever: drop it, so its jobs go out again in a fresh transaction.
+        try:
+            known = self.rpc("eth_getTransactionByHash", tx_hash)
+        except Exception:
+            known = True  # can't tell: keep waiting rather than double up
+        if known is None:
+            for tx_hash_, _, hashes_json_, *_ in same_nonce:
+                # Deleted, not marked: it never existed on chain, and its rebuild may be the very same bytes.
+                self.db.execute("DELETE FROM txs WHERE hash = ?", (tx_hash_,))
+                for vh in json.loads(hashes_json_):
+                    self.db.execute("UPDATE jobs SET status = 'new', next_try = 0 WHERE blob = ? AND status = 'sent'", (vh,))
+            log.warning("%s was never seen by the node: dropped, its blobs go out again", tx_hash)
+            return False
         base_fee, _, blob_base_fee, chain_time = self.prices()
         # What the blobs still hold safely. Once a deposit nears its refund time it stops counting, so
         # a transaction that can't land soon is neither resent nor replaced.
@@ -777,7 +797,7 @@ def build_from_env():
         rpc=rpc, api=env.get("POSTER_API", "https://posts.wei.domains/api"), contract=env["POSTER_CONTRACT"],
         from_block=int(env["POSTER_FROM_BLOCK"]), signer=Signer(read_key(env.get("POSTER_KEY_FILE", "/run/secrets/poster-key"))),
         db=db, setup=setup, ipfs_api=env.get("POSTER_IPFS_API"), notify=ntfy_from_env(), chain_id=chain_id,
-        wrapper_version=int(env.get("POSTER_WRAPPER_VERSION", "1")),
+        wrapper_version=int(env.get("POSTER_WRAPPER_VERSION", "1")), rescue=env.get("POSTER_RESCUE") == "1",
     )
 
 
@@ -801,6 +821,10 @@ def main(argv):
         return
     interval = int(os.environ.get("POSTER_INTERVAL", "12"))
     log.info("publishing as %s for %s", poster.signer.address, poster.contract)
+    if poster.rescue:
+        reopened = poster.db.execute("UPDATE jobs SET status = 'new', next_try = 0, tries = 0 WHERE status IN ('expired', 'failed')").rowcount
+        poster.db.commit()
+        log.warning("rescue mode: refundable fees count as paid; reopened %d jobs", reopened)
     failures = 0
     while True:
         try:

@@ -166,6 +166,7 @@ class FakeChain:
         self.sent = []
         self.receipts = {}
         self.send_error = None
+        self.forget = False  # True: no node knows any sent transaction (never broadcast, or left every pool)
         self.deposits = {}  # escrow key → {payer: (amount, refundableAt)}
         self.delivered = set()
 
@@ -229,6 +230,8 @@ class FakeChain:
             return "0x" + "00" * 32
         if method == "eth_getTransactionReceipt":
             return self.receipts.get(params[0])
+        if method == "eth_getTransactionByHash":
+            return None if self.forget else {"hash": params[0]}
         raise AssertionError("unexpected " + method)
 
 
@@ -536,6 +539,29 @@ class Griefing(unittest.TestCase):
             self.assertGreaterEqual(caps[1], blob)
             self.assertGreater(gp.quote(base, tip, blob), floor, "the dapp's quote clears the minimum")
             self.assertIsNone(gp.fee_caps(floor // 2, gp.gas_limit(1), 1, base, tip, blob))
+
+    def test_a_transaction_no_node_has_seen_is_dropped_and_its_blob_goes_out_again(self):
+        vh, _ = self.job("ghost", self.quote)
+        self.poster.step()
+        first = tx_fields(self.chain.sent[0])
+        self.chain.forget = True  # the endpoint took it and never broadcast it (a spent free tier did this)
+        self.chain.head += gp.REPLACE_AFTER_BLOCKS
+        self.poster.step()
+        self.assertEqual(len(self.chain.sent), 2, "a ghost must not hold its nonce and every delivery behind it")
+        again = tx_fields(self.chain.sent[1])
+        self.assertEqual((again["nonce"], again["hashes"]), (first["nonce"], [vh]))
+
+    def test_rescue_mode_delivers_posts_whose_fees_are_already_refundable(self):
+        vh, _ = self.job("late", self.quote)
+        self.chain.time += 86400 - 3600  # an hour from refundable: past the safety margin
+        self.poster.step()
+        self.assertEqual(self.chain.sent, [], "normally a fee about to become refundable doesn't count")
+        self.poster.rescue = True
+        self.poster.db.execute("UPDATE jobs SET next_try = 0")
+        self.poster.step()
+        self.assertEqual(self.sent_hashes(), [vh])
+        self.assertLessEqual(gp.worst_case(gp.gas_limit(1), tx_fields(self.chain.sent[0])["max_fee"],
+                                           tx_fields(self.chain.sent[0])["max_blob_fee"], 1), self.quote, "and still spends only what it holds")
 
     def test_replacement_stays_within_what_the_blobs_hold(self):
         self.job("p", self.quote)
