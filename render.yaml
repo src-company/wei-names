@@ -77,6 +77,11 @@ services:
     buildCommand: echo "no build — plain ESM, zero deps"
     startCommand: node server.js
     healthCheckPath: /healthz
+    # Posts waiting for their blob, and the index, live here, so a deploy or restart keeps them.
+    disk:
+      name: wns-gateway-data
+      mountPath: /var/data
+      sizeGB: 1
     domains:
       # Wildcards: catch every subdomain of wei.limo / wei.is that lacks a more
       # specific record. Render issues a wildcard TLS cert per domain (each needs
@@ -251,7 +256,7 @@ services:
       - key: POSTS_FROM_BLOCK
         value: "26335211"
       - key: POSTS_DIR
-        sync: false
+        value: /var/data/posts
       # The private archive below (wei-posts-archive), at its internal address
       # (http://<its host>:10000). Lost post bytes come back from it first,
       # checked against Ethereum like any other copy. Set from the dashboard:
