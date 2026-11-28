@@ -13,8 +13,8 @@ GET alice.wei.limo/some/path
   │    │             serve the returned body, status and headers  ← from chain
   │    └─ auto/manual -> 302 / proxy  https://<addr>.1.w3link.io/…
   ├─ else eth_call addr.html()                -> ERC-8244 document, served as-is
-  └─ else eth_call WNS.contenthash(tokenId)   -> 0xe301…/0xe501…  (EIP-1577)
-       ├─ decode contenthash                   -> bafy… (IPFS) or k51… (IPNS)
+  └─ else eth_call WNS.contenthash(tokenId)   -> 0xe301…/0xe501…/0xe401…  (EIP-1577)
+       ├─ decode contenthash                   -> bafy… (IPFS), k51… (IPNS) or a bzz ref (Swarm)
        ├─ redirect mode: 302  https://bafy….ipfs.<IPFS_SUBDOMAIN_GATEWAY>/
        │    (none set: straight to the browser gateway below)
        └─ proxy mode: stream from any subdomain gateways, then the path
@@ -22,11 +22,15 @@ GET alice.wei.limo/some/path
              if none holds it, a page load is 302'd to
              https://bafy….ipfs.inbrowser.link/  (verified in the browser)
              (IPNS keys go to the .ipns. form of the same gateways)
+       └─ Swarm, in EITHER mode: stream from
+             https://download.gateway.ethswarm.org/bzz/<ref>/path
+             (see "Swarm" below for why it is never a redirect)
 
 GET 0x1234…cdef.wei.limo/          # an address label: skips WNS, serves that
                                    # exact contract and no other
 GET bafy…rqu.wei.limo/             # a content label: skips WNS, serves that
-                                   # exact CID (or k51… IPNS key) and no other
+                                   # exact CID (or k51… IPNS key, or bah5acgza…
+                                   # Swarm reference) and no other
 ```
 
 A newly registered `.wei` name works **instantly**, with zero provisioning.
@@ -90,7 +94,13 @@ whoever holds the name that used to carry it.
 ```
 GET bafybeib…r7d4.wei.limo/paper.pdf     # base32 CIDv1        -> IPFS
 GET k51qzi…v0v8.wei.limo/feed            # base36 libp2p-key   -> IPNS
+GET bah5acgza…w2pq.wei.limo/             # base32 swarm-manifest CIDv1 -> Swarm
 ```
+
+A Swarm reference is 64 hex characters, one more than a DNS label holds, so its
+label is the base32 CIDv1 of the reference instead (61 characters, always
+starting `bah5acgza`). That shape is also a valid base32 CIDv1, so it is checked
+before the IPFS one.
 
 It costs **no `eth_call` at all**: the label is already the answer, so there is
 no registry lookup to do. In `proxy` mode it inherits the
@@ -192,6 +202,49 @@ The gateway also keeps a `RESERVED_LABELS` guard as defense-in-depth.
 | `x-embed.js` | An X post link alone on a line becomes a card (author, text, photos), from X's public syndication endpoint, cached for a day; a plain link card when X doesn't answer |
 | `share-card.js`, `card-font.js` | 1200x630 link-preview cards for post pages (`/posts/<id>/card.png`, `/card.png`), each name with its own generated mark; ported from gwei-names. The font is a GNU Unifont subset (SIL OFL, `card-font.LICENSE`), loaded on the first card |
 
+## Swarm
+
+A contenthash of `0xe40101fa011b20` + a 32-byte reference (what `bzz://<ref>`
+encodes to, and what ENS names hosted on Swarm carry) is served from
+`<SWARM_GATEWAY>/bzz/<ref>/<path>`. Unlike IPFS it is **always proxied**, even
+with `GATEWAY_MODE=redirect`, because of what the public Swarm gateways do:
+
+| Upstream | Arbitrary reference | Renders in a browser |
+|---|---|---|
+| `download.gateway.ethswarm.org` | yes | no: every response is `content-disposition: attachment` |
+| `api.gateway.ethswarm.org`, `<cid>.bzz.link` | no: unmoderated references go to `bzz.link/forbidden` | yes |
+| `gateway.ethswarm.org` | no: its own app shell at every `/bzz/` path | — |
+
+So the gateway fetches from the first and drops `content-disposition` on the
+way out. Proxied, the site still arrives on `<label>.<zone>`, which is its own
+origin (see [the Public Suffix List note](#operator-note-the-public-suffix-list)).
+Swarm bodies are **not** held in the proxy cache, for the same reason IPNS ones
+aren't: a bzz reference can be a feed manifest, which Bee resolves to the feed's
+latest update on every request (swarm.eth is one), so the reference alone fixes
+nothing. Bee also answers unknown paths with the site's index document at 200,
+so holding them would let one client fill the shared budget with junk paths.
+Redirects are `no-store` for the same reason. What does not apply: the browser gateway (an IPFS
+service worker can't fetch Swarm), `_redirects` (an IPFS gateway convention),
+and query strings (Bee ignores them, so they are dropped upstream). Only unencrypted 32-byte references are served.
+
+A visitor's `Range` is not forwarded either: the download gateway can cache a
+206 under the plain URL, so after one ranged request (a video seek) later plain
+requests for that path may get the fragment. Measured, a fresh connection got it
+some of the time and a reused one, which is what this gateway holds, every time.
+Swarm files arrive whole, without `accept-ranges`. A 206 that comes back anyway
+is a fragment someone else left in that cache, and is asked for once more with
+`Pragma: no-cache`, which got past it where `Cache-Control: no-cache` didn't.
+
+The cost: every Swarm page load is bandwidth through this gateway, in either
+mode. And the default upstream is one public service run by the Swarm
+Foundation; a self-hosted Bee node (`SWARM_GATEWAY=https://bee.example:1633`)
+removes that dependency; `SWARM_GATEWAY=off` stops serving Swarm (a plain 404).
+
+The content label is the reference's base32 CIDv1 in its canonical spelling
+only: the last base32 character has four spare bits, and the other fifteen
+spellings of the same reference 404 rather than becoming fifteen more origins
+for one site. A Swarm-shaped label is never sent to IPFS.
+
 ## Config (env vars)
 
 | Var | Default | Notes |
@@ -200,6 +253,7 @@ The gateway also keeps a `RESERVED_LABELS` guard as defense-in-depth.
 | `IPFS_SUBDOMAIN_GATEWAY` | — | Subdomain gateways used in **both** modes → `https://<id>.<ipfs\|ipns>.<gw>`. Comma-separated and tried in order, before the path gateways — see [Upstream failover](#upstream-failover). Subdomain form applies the site's `_redirects`/SPA fallback upstream. No default and `off` in production: the old default `dweb.link` is retired (see [Why this exists](#why-this-exists)). |
 | `IPFS_BROWSER_GATEWAY` | `inbrowser.link` | Page-load fallback for IPFS/IPNS in **`proxy`** mode: when every upstream fails, or only a path gateway answers and 404s (a NoFetch node that doesn't hold the CID), a navigation is 302'd to `https://<id>.<ipfs\|ipns>.<gw>/<path>`, which fetches and verifies in the visitor's browser. Never fetched by the gateway itself (it serves a loader page). `off` disables. |
 | `IPFS_PATH_GATEWAY` | `https://ipfs.filebase.io` | Path gateways → `<origin>/ipfs/<cid>/<path>`. Comma-separated, tried after every subdomain entry, **`proxy` mode only**; `off` for none. Filebase is path style only — `<cid>.ipfs.filebase.io` does not resolve. The gateway reads the site's `_redirects` itself here (exact rules only) — see [`_redirects` on a path gateway](#_redirects-on-a-path-gateway). |
+| `SWARM_GATEWAY` | `https://download.gateway.ethswarm.org` | Swarm upstreams → `<origin>/bzz/<ref>/<path>`. Comma-separated, same failover rules; used in **both** modes, because Swarm is always proxied — see [Swarm](#swarm). A Bee node's API port works as an entry; `off` serves no Swarm (404) |
 | `WEB3_GATEWAY` | `w3link.io` | web3:// HTTP gateways for on-chain (ERC-4804) dapps → `https://<addr>.<chainId>.<gw>`. Comma-separated, same failover rules |
 | `WEB3_CHAIN_ID` | `1` | Chain id used in the web3:// gateway host (mainnet) |
 | `RPC_URLS` | built-in list | Comma-separated mainnet RPCs, preferred over the built-in public pool, which backs them up when they fail and takes their overflow when they are saturated. **Set dedicated authenticated endpoints in production** — see [Load behaviour](#load-behaviour) |
@@ -593,7 +647,8 @@ wrangler deploy
 > Note: zFi previously moved **off** Cloudflare Workers after hitting the
 > free-plan request cap (error 1027, see `../render.yaml`). If you go this
 > route, use a paid Workers plan or keep `GATEWAY_MODE=redirect` so the Worker
-> stays out of the data path.
+> stays out of the data path. Swarm names are proxied in either mode — see
+> [Swarm](#swarm).
 
 ## Local test
 

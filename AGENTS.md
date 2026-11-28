@@ -14,7 +14,7 @@ is about developing wei-names itself.)
 - `test/`, `script/` — Foundry tests and deploy scripts.
 - `gateway/` — the `*.wei.limo` / `.wei.is` / `.wei.domains` HTTP gateway.
   Zero-dependency ESM; `handler.js` is runtime-agnostic, wrapped by `worker.js`
-  (Cloudflare) and `server.js` (Node/Render). Serves IPFS/IPNS contenthashes and
+  (Cloudflare) and `server.js` (Node/Render). Serves IPFS/IPNS/Swarm contenthashes and
   contract pages read straight from chain (`onchain.js`: ERC-5219 `request()`,
   ERC-8244 `html()`), plus `0x<address>.<zone>` labels that skip WNS.
 - `dapp/` — static client-side app (no build step; vendored bundles committed,

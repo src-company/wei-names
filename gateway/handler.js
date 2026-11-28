@@ -10,7 +10,7 @@
 
 import { computeId, contenthashOf, localComputeId, normalizeName, registryRecords, resolveAddress, resolveMode, rpcIdle, WEB3_MODES, WNS_CONTRACT } from './wns.js'
 import { namesFromPunycode } from './punycode.js'
-import { decodeContenthash } from './contenthash.js'
+import { decodeContenthash, swarmRefFromCid, SWARM_CID_LABEL } from './contenthash.js'
 import { fetchErc5219, fetchErc8244 } from './onchain.js'
 import { TtlCache, singleFlight, parseCacheControl } from './cache.js'
 import { postIndex } from './posts.js'
@@ -481,7 +481,10 @@ const ADDRESS_LABEL = /^0x[0-9a-f]{40}$/
 // entire point is that it does not depend on anybody's goodwill. This serves it
 // through our own gateway instead, inheriting the failover in the proxy path.
 //
-// Shapes are restricted to the two multibase prefixes decodeContenthash emits:
+// Shapes are restricted to the multibase prefixes a contenthash can be spelled in:
+//   base32 Swarm  `bah5acgza` + 52 — the swarm-manifest CIDv1 of a bzz
+//                 reference (see swarmCid), checked first because it is also
+//                 a valid base32 CIDv1 shape and would otherwise go to IPFS
 //   base32 CIDv1  `b` + [a-z2-7] — 59 chars for the usual sha-256 dag-pb
 //   base36 IPNS   `k` + [0-9a-z] — 62 for an ed25519 libp2p-key, ~57 for a
 //                 sha-256 one, so this is a range and not a fixed width
@@ -499,7 +502,19 @@ const ADDRESS_LABEL = /^0x[0-9a-f]{40}$/
 const IPFS_CID_LABEL = /^b[a-z2-7]{49,62}$/
 const IPNS_KEY_LABEL = /^k[0-9a-z]{49,62}$/
 
+// A label of content shape that names nothing servable: resolves to no content,
+// with no registry read.
+const NO_CONTENT = Object.freeze({ kind: 'none' })
+
 function contentLabel(sub) {
+  // Swarm-shaped labels are never IPFS (no IPFS gateway serves codec 0xfa).
+  // Only the canonical spelling is a label: base32 leaves 4 spare bits in the
+  // last character, so 16 spellings decode to one reference — 16 origins for
+  // one site. The other 15 are no content, not a second route to it.
+  if (SWARM_CID_LABEL.test(sub)) {
+    const ref = swarmRefFromCid(sub)
+    return ref ? { kind: 'swarm', id: ref } : NO_CONTENT
+  }
   if (IPFS_CID_LABEL.test(sub)) return { kind: 'ipfs', id: sub }
   if (IPNS_KEY_LABEL.test(sub)) return { kind: 'ipns', id: sub }
   return null
@@ -669,6 +684,17 @@ const BROWSER_GATEWAY = 'inbrowser.link'
 // pinned on Filebase answers in about a second; anything else may be slow or
 // time out there, and then falls to the browser gateway like any other miss.
 const PATH_GATEWAY = 'https://ipfs.filebase.io'
+
+// Default Swarm upstream (`<origin>/bzz/<ref>/<path>`), overridable with the
+// comma-separated SWARM_GATEWAY. Of the Swarm Foundation's public endpoints this
+// is the only one that serves ANY reference: api.gateway.ethswarm.org and the
+// `<cid>.bzz.link` subdomain gateway answer only moderated references and send
+// the rest to `bzz.link/forbidden`, and gateway.ethswarm.org returns its own
+// app shell at every /bzz/ path. The catch is that it stamps every response
+// `content-disposition: attachment`, so a browser sent there downloads the page
+// instead of rendering it. That is why Swarm is always proxied (never
+// redirected) and why that header is dropped for Swarm on the way out.
+const SWARM_GATEWAY = 'https://download.gateway.ethswarm.org'
 
 function browserGateway(env) {
   const v = String(readEnv(env, 'IPFS_BROWSER_GATEWAY', BROWSER_GATEWAY)).trim()
@@ -922,7 +948,7 @@ async function resolveTarget(sub, opts) {
   if (ADDRESS_LABEL.test(sub)) return classifyContract(sub, opts)
   // A content label is already the answer — no registry lookup, no RPC at all.
   const direct = contentLabel(sub)
-  if (direct) return { resolved: direct }
+  if (direct) return { resolved: direct === NO_CONTENT ? null : direct }
 
   const name = namesFromPunycode(sub)
   const idKey = `${opts.contract || ''}|${name}`
@@ -1099,7 +1125,7 @@ function resolveFresh(sub, opts) {
       missCache.set(sub, true, { expires: at + RESOLUTION_TTL_MS })
     } else {
       resolutionCache.set(sub, out.resolved, { expires: at + RESOLUTION_TTL_MS })
-      if (out.resolved.kind === 'ipfs' || out.resolved.kind === 'ipns') {
+      if (out.resolved.kind === 'ipfs' || out.resolved.kind === 'ipns' || out.resolved.kind === 'swarm') {
         staleResolutions.set(sub, out.resolved, { expires: at + STALE_RESOLUTION_MS })
       }
     }
@@ -1144,6 +1170,8 @@ async function serve(request, env, url, sub) {
   //   { kind: 'ipfs' | 'ipns', id } — a contenthash. For IPNS `id` is a stable
   //       key the gateway resolves fresh each request, so the owner can update
   //       the site with no new on-chain transaction.
+  //   { kind: 'swarm', id } — a Swarm contenthash; `id` is the 64-hex bzz
+  //       reference. Always proxied, whatever GATEWAY_MODE says (see below).
   //
   // Concurrent requests for the same label share one resolution.
   let resolved
@@ -1200,7 +1228,7 @@ async function serve(request, env, url, sub) {
     return new Response(
       ADDRESS_LABEL.test(sub)
         ? `${sub} is not an on-chain page: it answers neither ERC-4804 resolveMode() nor ERC-8244 html().\n`
-        : `No on-chain dapp or IPFS/IPNS content set for ${sub}.\n` +
+        : `No on-chain dapp or IPFS/IPNS/Swarm content set for ${sub}.\n` +
             `Set an addr (ERC-4804 contract) or a contenthash on this name at https://wei.domains to publish here.\n`,
       // `no-store` for the same reason the depth guard above carries it: 404 is
       // heuristically cacheable (RFC 9111 4.2.2), and this is precisely the 404
@@ -1326,8 +1354,17 @@ async function serve(request, env, url, sub) {
     return new Response(page.body, { status: page.status, headers })
   }
 
-  const mode = readEnv(env, 'GATEWAY_MODE', 'redirect')
+  // Swarm ignores GATEWAY_MODE: the only public gateway that serves arbitrary
+  // references forces a download (see SWARM_GATEWAY), so a redirect there would
+  // hand visitors a file instead of a site. Proxied, it still arrives on the
+  // name's own <label>.<zone>, which is its own origin like every other label.
+  const mode = resolved.kind === 'swarm' ? 'proxy' : readEnv(env, 'GATEWAY_MODE', 'redirect')
   const pathAndQuery = url.pathname + url.search
+  // What reaches a storage upstream of the visitor's query. IPFS gateways get
+  // the parameters they honour (ipfsQuery). Bee answers a /bzz/ path the same
+  // whatever the query says, so for Swarm it is dropped from the upstream URL
+  // and the cache key alike; the page's own scripts still see it in the bar.
+  const contentQuery = resolved.kind === 'swarm' ? '' : ipfsQuery(url.search)
 
   // Build the upstream target + the id header that records what we served.
   //   web3 -> a web3:// HTTP gateway: `https://<addr>.<chainId>.<gw>/<path>`.
@@ -1336,6 +1373,9 @@ async function serve(request, env, url, sub) {
   //     base32 CIDv1 / base36 IPNS name (fits a DNS label) — decodeContenthash
   //     emits it. Then, in proxy mode, the PATH gateways (`<gw>/ipfs/<id>`) —
   //     by default Filebase, and today the only upstream in production.
+  //   swarm -> the SWARM_GATEWAY origins, path style (`<gw>/bzz/<ref>`), in
+  //     order. Path targets like the IPFS ones, so a redirect from one is held
+  //     inside the reference (visitorPath) and a 404 may fall to the next.
   // `targets` is an ordered list, not one URL: in proxy mode each is tried
   // until one answers something that isn't shouldFailover(). One entry — the
   // historical setting — behaves exactly as before, so a single gateway's
@@ -1349,9 +1389,39 @@ async function serve(request, env, url, sub) {
       url: `https://${resolved.address}.${chainId}.${gw}${pathAndQuery}`,
     }))
     idHeader = ['x-wns-contract', resolved.address]
+  } else if (resolved.kind === 'swarm') {
+    const origins = envList(env, 'SWARM_GATEWAY', SWARM_GATEWAY)
+    // `off`, as for the IPFS lists: this gateway serves no Swarm. Said plainly,
+    // rather than a 502 blaming an upstream that was never asked.
+    if (origins.length && origins.every((o) => o === 'off')) {
+      return new Response(`${sub} points at Swarm content, which this gateway does not serve.\n`, {
+        status: 404,
+        headers: {
+          'content-type': 'text/plain; charset=utf-8',
+          'cache-control': 'no-store',
+          'x-content-type-options': 'nosniff',
+          'x-swarm-reference': resolved.id,
+        },
+      })
+    }
+    targets = origins.filter((o) => o !== 'off').map((origin) => {
+      const base = origin.replace(/\/+$/, '')
+      let host = base
+      try {
+        host = new URL(base).host
+      } catch {}
+      const root = `${base}/bzz/${resolved.id}`
+      return { host, url: `${root}${url.pathname}`, root }
+    })
+    // Separators and nothing else: the documented default, not a 502 for every name.
+    if (!targets.length) {
+      const root = `${SWARM_GATEWAY}/bzz/${resolved.id}`
+      targets = [{ host: new URL(SWARM_GATEWAY).host, url: `${root}${url.pathname}`, root }]
+    }
+    idHeader = ['x-swarm-reference', resolved.id]
   } else {
     // Only the parameters the gateway honours reach it; see ipfsQuery.
-    const query = ipfsQuery(url.search)
+    const query = contentQuery
     const browserGw = browserGateway(env)
     // No default: the public subdomain fleet (dweb.link) is retired, and no
     // replacement serves content pinned only on Filebase. Unset or `off`, proxy
@@ -1397,9 +1467,10 @@ async function serve(request, env, url, sub) {
   if (!targets.length && resolved.kind === 'web3') {
     targets = [{ host: 'w3link.io', url: `https://${resolved.address}.1.w3link.io${pathAndQuery}` }]
   }
-  // IPFS/IPNS with nothing to fetch from: hand page loads to the browser gateway
+  // IPFS/IPNS with nothing to fetch from: hand page loads to the browser gateway.
+  // An IPFS service worker can't fetch Swarm, so Swarm never has one.
   const browserTarget = () => {
-    const gw = resolved.kind !== 'web3' && browserGateway(env)
+    const gw = (resolved.kind === 'ipfs' || resolved.kind === 'ipns') && browserGateway(env)
     return gw ? `https://${resolved.id}.${resolved.kind}.${gw}${url.pathname}${ipfsQuery(url.search)}` : null
   }
   const toBrowser = (why) =>
@@ -1432,18 +1503,27 @@ async function serve(request, env, url, sub) {
     //
     // A held body is only correct where the id is content-addressed, so this is
     // `ipfs` and GET only — see the proxyCache note above for why `ipns` is
-    // excluded. HEAD shares the key with nothing: it has no body to store.
+    // excluded. `swarm` is excluded for the same reason: a bzz reference may be
+    // a feed manifest, which Bee resolves to the feed's latest update on every
+    // request (swarm.eth's is one), so the reference fixes nothing. And Bee
+    // answers unknown paths with the site's index document at 200, so holding
+    // Swarm bodies would let one client fill the shared budget with junk paths.
+    // HEAD shares the key with nothing: it has no body to store.
     const accept = request.headers.get('accept') || '*/*'
     // Trustless-gateway formats (raw blocks, CAR, tar, dag-json) are chosen by
     // Accept, which is not in the key — those are fetched but never shared.
     const negotiated = /application\/(vnd\.ipld\.|x-tar|json|cbor)/i.test(accept)
     // A byte range is a different response from the whole file, so it is
     // forwarded (media seeking needs it) and never held or shared.
-    const range = request.headers.get('range')
+    // Not to Swarm: the public download gateway can cache a 206 under the plain
+    // URL, so after one ranged request later plain requests may get that
+    // fragment, and over a reused connection, as here, they all did. Swarm is
+    // fetched whole.
+    const range = resolved.kind === 'swarm' ? null : request.headers.get('range')
     const ifNoneMatch = request.headers.get('if-none-match')
     const proxyKey =
       resolved.kind === 'ipfs' && request.method === 'GET' && !negotiated && !range
-        ? `${resolved.id}|${url.pathname}${ipfsQuery(url.search)}`
+        ? `${resolved.id}|${url.pathname}${contentQuery}`
         : null
     if (proxyKey) {
       const hit = proxyCache.get(proxyKey, now)
@@ -1522,23 +1602,34 @@ async function serve(request, env, url, sub) {
       const attempts = byHealth(targets, now)
       for (let i = 0; i < attempts.length; i++) {
         const candidate = attempts[i]
-        let res
-        try {
+        const ask = async (headers) => {
           await proxyAcquire()
           // The timer is cleared the moment headers land, so the abort covers
           // connect-and-hang and nothing else — a large body still streams.
           const controller = new AbortController()
           const timer = setTimeout(() => controller.abort(), proxyTimeoutMs)
           try {
-            res = await fetch(candidate.url, {
+            return await fetch(candidate.url, {
               method: request.method,
-              headers: upstreamHeaders,
+              headers,
               redirect: 'manual',
               signal: controller.signal,
             })
           } finally {
             clearTimeout(timer)
             proxyRelease()
+          }
+        }
+        let res
+        try {
+          res = await ask(upstreamHeaders)
+          // Swarm is never asked for a range, so a 206 is someone else's ranged
+          // request that the public download gateway cached under the plain URL.
+          // Ask once more past its cache, as a browser's hard reload does. Pragma
+          // is what got past it when measured; Cache-Control alone still hit the 206.
+          if (res.status === 206 && resolved.kind === 'swarm') {
+            cancelBody(res)
+            res = await ask({ ...upstreamHeaders, 'cache-control': 'no-cache', pragma: 'no-cache' })
           }
         } catch (e) {
           lastError = e
@@ -1601,7 +1692,7 @@ async function serve(request, env, url, sub) {
           status: upstream.status,
           headers: {
             location: redirectTo,
-            // Content-addressed, so as stable as the bytes; IPNS can move.
+            // Content-addressed, so as stable as the bytes; IPNS and Swarm feeds can move.
             'cache-control': resolved.kind === 'ipfs' ? 'public, max-age=300' : 'no-store',
             'x-wns-name': sub,
             'x-wns-mode': resolved.kind,
@@ -1634,8 +1725,9 @@ async function serve(request, env, url, sub) {
       // failover — it just gets one declared rewrite honoured first.
       //
       // Only path targets (`servedBy.root`) reach this. A subdomain gateway
-      // already applied the rules, so a 404 from one is final.
-      if (upstream.status === 404 && servedBy?.root) {
+      // already applied the rules, so a 404 from one is final. `_redirects` is
+      // an IPFS gateway convention (IPIP-290); a Swarm manifest has none.
+      if (upstream.status === 404 && servedBy?.root && resolved.kind !== 'swarm') {
         const rules = await redirectRulesFor(servedBy.root, resolved, {
           timeoutMs: proxyTimeoutMs,
           idle: idleMs(env),
@@ -1714,7 +1806,12 @@ async function serve(request, env, url, sub) {
       // content-range/accept-ranges ride along with a forwarded Range (a 206
       // without them is unusable); content-disposition is the gateway's answer to
       // `?download=`/`?filename=`, which IPFS_QUERY_KEYS keeps for exactly that.
-      const PASS = ['content-type', 'etag', 'last-modified', 'content-range', 'accept-ranges', 'content-disposition']
+      //
+      // Not for Swarm: SWARM_GATEWAY marks every response an attachment, which
+      // would make a browser download each page instead of rendering it; and
+      // since no Range is forwarded there, no accept-ranges is promised either.
+      const PASS = ['content-type', 'etag', 'last-modified', 'content-range']
+      if (resolved.kind !== 'swarm') PASS.push('accept-ranges', 'content-disposition')
       const headers = new Headers()
       for (const h of PASS) {
         const v = upstream.headers.get(h)

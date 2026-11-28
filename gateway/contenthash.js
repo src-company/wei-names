@@ -23,6 +23,18 @@
 // off-chain on every update — no further on-chain transaction. The gateway
 // never resolves IPNS itself; it hands the name to the IPNS subdomain gateway,
 // which resolves it fresh on each request.
+//
+//   Swarm (swarm-ns, 0xe4, varint `e401`):
+//     e4 01            <- swarm-ns protocol code
+//     01 fa 01 1b 20 ..<- CIDv1: version=1, codec=swarm-manifest(0xfa),
+//                         keccak-256(0x1b), 32-byte digest = the bzz reference
+//   Exactly the bytes `bzz://<64 hex>` encodes to, and what ENS names hosted on
+//   Swarm store (swarm.eth among them). Only the unencrypted 32-byte reference
+//   is accepted: an encrypted one is 64 bytes and no public gateway serves it.
+//   The id is the reference as bare hex, the form a Bee `/bzz/<ref>/` path
+//   wants. Swarm content is fetched by the gateway in every mode — see
+//   handler.js — because no public Swarm gateway both serves arbitrary
+//   references and lets a browser render them.
 
 const BASE32_ALPHABET = 'abcdefghijklmnopqrstuvwxyz234567' // RFC 4648, lowercase
 const BASE36_ALPHABET = '0123456789abcdefghijklmnopqrstuvwxyz' // multibase 'k'
@@ -108,6 +120,58 @@ export function decodeContenthash(contenthash) {
     return { ns: 'ipns', id: 'k' + base36Encode(cidBytes) } // multibase 'k' = base36
   }
 
-  // Other namespaces (swarm, arweave, …) are not served by this gateway.
+  // swarm-ns (0xe4) + CIDv1 swarm-manifest keccak-256, fixed length.
+  if (hex.startsWith(SWARM_PREFIX)) {
+    const ref = hex.slice(SWARM_PREFIX.length)
+    return ref.length === 64 ? { ns: 'swarm', id: ref } : null
+  }
+
+  // Other namespaces (arweave, onion, …) are not served by this gateway.
   return null
+}
+
+// `e401` (swarm-ns) + `01 fa01 1b 20` (CIDv1, swarm-manifest, keccak-256, 32 bytes).
+const SWARM_PREFIX = 'e40101fa011b20'
+// The CIDv1 bytes ahead of the reference, and their base32 spelling. Every
+// 32-byte reference shares these 5 bytes, so every base32 Swarm CID shares its
+// first 8 characters after the multibase `b`: `bah5acgza` + 52 more, 61 in all.
+const SWARM_CID_PREFIX = Uint8Array.from([0x01, 0xfa, 0x01, 0x1b, 0x20])
+export const SWARM_CID_LABEL = /^bah5acgza[a-z2-7]{52}$/
+
+// RFC 4648 base32, lowercase, no padding -> bytes. Trailing bits are dropped.
+function base32Decode(str) {
+  let bits = 0
+  let value = 0
+  const out = []
+  for (const ch of str) {
+    const v = BASE32_ALPHABET.indexOf(ch)
+    if (v < 0) return null
+    value = ((value << 5) | v) & 0xffff
+    bits += 5
+    if (bits >= 8) {
+      bits -= 8
+      out.push((value >>> bits) & 0xff)
+    }
+  }
+  return Uint8Array.from(out)
+}
+
+// A Swarm reference (64 hex) as the base32 CIDv1 that fits in one DNS label —
+// the shape of a `<cid>.<zone>` content label. 64 hex characters are one over
+// the 63-character label limit, so the bare reference can never be a host.
+export function swarmCid(ref) {
+  return 'b' + base32Encode(Uint8Array.from([...SWARM_CID_PREFIX, ...hexToBytes(ref)]))
+}
+
+// The inverse: a `bah5acgza…` label -> its 64-hex reference, or null.
+// Canonical spellings only. 37 bytes are 296 bits and 60 base32 characters 300,
+// so the last character carries one data bit and four that decoding ignores:
+// 16 spellings per reference. Only the one swarmCid() produces is accepted.
+export function swarmRefFromCid(label) {
+  if (!SWARM_CID_LABEL.test(label)) return null
+  const bytes = base32Decode(label.slice(1))
+  if (!bytes || bytes.length !== SWARM_CID_PREFIX.length + 32) return null
+  for (let i = 0; i < SWARM_CID_PREFIX.length; i++) if (bytes[i] !== SWARM_CID_PREFIX[i]) return null
+  const ref = [...bytes.slice(SWARM_CID_PREFIX.length)].map((b) => b.toString(16).padStart(2, '0')).join('')
+  return swarmCid(ref) === label ? ref : null
 }

@@ -1351,7 +1351,7 @@ const REGISTRAR_ABI = [
   'function register(uint256 parentId, string label) payable returns (uint256)'
 ];
 
-// Gateway for .wei websites - resolves name.wei.domains to IPFS contenthash
+// Gateway for .wei websites - resolves name.wei.domains to its contenthash (IPFS/IPNS/Swarm)
 // URL pattern: https://name.wei.domains (not name.wei.wei.domains)
 const WEI_GATEWAY = 'wei.domains';
 // Posts (posts/SPEC.md). Reading (recent posts, a name's Blog row) needs only the contract; the
@@ -4076,14 +4076,7 @@ async function showManage(tokenId, name, prefetched) {
       const gatewayUrl = `https://${escapeHtml(name)}.${WEI_GATEWAY}`;
       infoHtml += `<div><span>Website:</span><a href="${gatewayUrl}" target="_blank" rel="noopener" style="color:inherit;">${gatewayUrl}</a></div>`;
       if (content) {
-        const short = content.id.slice(0, 16) + '...' + content.id.slice(-6);
-        // Through our own gateway's content-label surface, not a public one.
-        // This link's whole point is that it names fixed bytes rather than
-        // whatever the name currently resolves to, which is worth very little
-        // if reaching them depends on a third party — and the public fleet
-        // this used to use (ipfs.io / dweb.link) is being retired.
-        const href = `https://${content.id}.${WEI_GATEWAY}`;
-        const label = content.ns === 'ipns' ? 'ipns://' + short : short;
+        const { href, label } = contentLink(content);
         infoHtml += `<div><span>Content:</span><a href="${escapeHtml(href)}" target="_blank" rel="noopener" style="color:inherit;font-family:monospace;font-size:11px;">${escapeHtml(label)}</a></div>`;
       }
     }
@@ -4215,9 +4208,9 @@ function showManageForm(action) {
       break;
     case 'setContent':
       html = `
-        <label for="contentHash">IPFS / IPNS Content</label>
-        <div style="font-size:11px;opacity:0.5;margin-bottom:8px;">Host a website at ${escapeHtml(currentTokenName)}.wei. Use an IPFS CID for a fixed site, or an IPNS name (ipns://k51...) to update the site later without a new transaction.</div>
-        <input type="text" id="contentHash" placeholder="bafy... / Qm... (IPFS) · ipns://k51... (IPNS) · 0x (raw)" autocapitalize="none" autocorrect="off" spellcheck="false">
+        <label for="contentHash">IPFS / IPNS / Swarm Content</label>
+        <div style="font-size:11px;opacity:0.5;margin-bottom:8px;">Host a website at ${escapeHtml(currentTokenName)}.wei. Use an IPFS CID for a fixed site, or an IPNS name (ipns://k51...) to update the site later without a new transaction. A Swarm site works too: paste its bzz:// reference.</div>
+        <input type="text" id="contentHash" placeholder="bafy... / Qm... (IPFS) · ipns://k51... (IPNS) · bzz://... (Swarm) · 0x (raw)" autocapitalize="none" autocorrect="off" spellcheck="false">
         <div style="font-size:11px;opacity:0.5;margin-top:4px;">Visit via: <a href="https://${escapeHtml(currentTokenName)}.${WEI_GATEWAY}" target="_blank" rel="noopener">${escapeHtml(currentTokenName)}.${WEI_GATEWAY}</a></div>
         <button onclick="doSetContent()">Set Website</button>
         <button class="secondary" onclick="$('manageForm').classList.remove('show')">Cancel</button>
@@ -5895,9 +5888,12 @@ function isWellFormedCidV1(bytes) {
   return len > 0 && bytes.length - i === len;
 }
 
-// Decode an ENSIP-7 contenthash into { ns: 'ipfs'|'ipns', id }, or null.
-//   ipfs -> id is a base32 CIDv1 (bafy...)
-//   ipns -> id is a base36 IPNS name (k51...)
+// Decode an ENSIP-7 contenthash into { ns: 'ipfs'|'ipns'|'swarm', id }, or null.
+//   ipfs  -> id is a base32 CIDv1 (bafy...)
+//   ipns  -> id is a base36 IPNS name (k51...)
+//   swarm -> id is the base32 swarm-manifest CIDv1 (bah5acgza...), the one
+//            spelling of a bzz reference that fits a DNS label; ref is the
+//            64-hex reference itself, as bzz:// shows it
 function decodeContenthash(hex) {
   try {
     const bytes = ethers.getBytes(hex);
@@ -5931,8 +5927,41 @@ function decodeContenthash(hex) {
       if (!isWellFormedCidV1(cidBytes)) return null;
       return { ns: 'ipns', id: 'k' + base36Encode(cidBytes) };
     }
+    if (proto === 0xe4) {
+      // Swarm: CIDv1 swarm-manifest (0xfa) keccak-256 (0x1b) over the 32-byte
+      // reference, and nothing else — what encodeContenthash writes for bzz://
+      // and the only shape the gateway serves.
+      if (cidBytes.length !== 37 || cidBytes[0] !== 0x01 || cidBytes[1] !== 0xfa || cidBytes[2] !== 0x01 ||
+          cidBytes[3] !== 0x1b || cidBytes[4] !== 0x20) return null;
+      return { ns: 'swarm', id: 'b' + base32Encode(cidBytes), ref: ethers.hexlify(cidBytes.slice(5)).slice(2) };
+    }
     return null;
   } catch { return null; }
+}
+
+// The manage panel's "Content:" link for a decoded contenthash.
+// Through our own gateway's content-label surface, not a public one. This
+// link's whole point is that it names fixed bytes rather than whatever the name
+// currently resolves to, which is worth very little if reaching them depends on
+// a third party — and the public fleet this used to use (ipfs.io / dweb.link)
+// is being retired. Swarm is labelled by its bzz:// hash, the form people paste,
+// but linked by its CID: the 64-hex hash is one character too long for a host.
+function contentLink(content) {
+  const short = content.id.slice(0, 16) + '...' + content.id.slice(-6);
+  const label = content.ns === 'ipns' ? 'ipns://' + short
+    : content.ns === 'swarm' ? 'bzz://' + content.ref.slice(0, 12) + '...' + content.ref.slice(-6)
+    : short;
+  return { href: `https://${content.id}.${WEI_GATEWAY}`, label };
+}
+
+// A Swarm reference as its base32 swarm-manifest CIDv1 (bah5acgza..., the form
+// the manage panel links to) -> the 64-hex reference, or null if it isn't one.
+function swarmRefFromCid(cid) {
+  if (!/^bah5acgza[a-z2-7]{52}$/i.test(cid)) return null;
+  const bytes = base32Decode(cid.slice(1));
+  if (bytes.length !== 37 || bytes[0] !== 0x01 || bytes[1] !== 0xfa || bytes[2] !== 0x01 ||
+      bytes[3] !== 0x1b || bytes[4] !== 0x20) return null;
+  return ethers.hexlify(bytes.slice(5)).slice(2);
 }
 
 // Encode an IPNS name (ipns://k51..., a bare k.../baf.../f... CID, or a base58
@@ -5950,9 +5979,42 @@ function encodeIpnsCid(name) {
 function encodeContenthash(input) {
   let cid = input.trim();
 
-  // Raw bytes passthrough (for advanced users)
+  // Raw bytes passthrough (for advanced users) — except 32 bare bytes, which is
+  // no contenthash at all (no namespace) but exactly what a Swarm hash with a
+  // 0x in front looks like. Written as-is it would be a dead site for real gas.
+  if (/^0x[0-9a-f]{64}$/i.test(cid)) {
+    throw new Error('That looks like a bare Swarm reference, which is not a contenthash on its own — paste it as bzz://<hash>.');
+  }
   if (cid.startsWith('0x')) {
     return ethers.getBytes(cid);
+  }
+
+  // Swarm: bzz://<64 hex> (or /bzz/<64 hex>) -> swarm-ns contenthash, the same
+  // bytes ENS names hosted on Swarm carry:
+  //   e4 01 (swarm-ns) | 01 fa 01 1b 20 (CIDv1, swarm-manifest, keccak-256, 32 bytes) | ref
+  // A trailing slash is what Bee and gateway URLs usually end in, so it is
+  // forgiven; anything after it is a path, which a contenthash cannot hold.
+  // The bah5acgza... CID the manage panel links to is accepted too, bare or
+  // behind bzz://, so copying a name's own Content link back in works.
+  const bzz = /^(?:bzz:\/\/|\/bzz\/)(.*)$/i.exec(cid);
+  if (bzz || /^bah5acgza/i.test(cid)) {
+    const rest = bzz ? bzz[1].replace(/\/$/, '') : cid;
+    const fromCid = swarmRefFromCid(rest);
+    if (fromCid) return ethers.getBytes('0xe40101fa011b20' + fromCid);
+    const m = /^(?:0x)?([0-9a-f]{64})([/?#].*)?$/i.exec(rest);
+    if (m && m[2]) {
+      throw new Error('That Swarm reference has a path or query after the hash — a website points at the hash alone: bzz://<hash>.');
+    }
+    if (!m) {
+      throw new Error('That Swarm reference looks incomplete or mistyped — bzz:// takes the 64-character hex hash.');
+    }
+    return ethers.getBytes('0xe40101fa011b20' + m[1].toLowerCase());
+  }
+  // Swarm in a shape this box does not take: the bare hash, a gateway URL, or a
+  // swarm:// / bzz:/ spelling. Each gets told the one form that works, rather
+  // than an IPFS "unsupported CID" error that leaves them guessing.
+  if (/^[0-9a-f]{64}$/i.test(cid) || /^swarm:\/\/|^bzz:\/(?!\/)/i.test(cid) || /^https?:\/\/[^/]+\/bzz\//i.test(cid)) {
+    throw new Error('That looks like a Swarm reference — paste just the hash as bzz://<64 hex characters>.');
   }
 
   // IPNS: ipns:// / /ipns/ prefix, or a bare base36 libp2p-key name (k51.../k2k...).
@@ -5994,7 +6056,7 @@ function encodeContenthash(input) {
     // CIDv1 - base16 (hex) encoded
     cidBytes = ethers.getBytes('0x' + cid.slice(1));
   } else {
-    throw new Error('Unsupported CID format. Use Qm.../baf... (IPFS) or ipns://k51... (IPNS).');
+    throw new Error('Unsupported CID format. Use Qm.../baf... (IPFS), ipns://k51... (IPNS) or bzz://... (Swarm).');
   }
 
   // Reject a CID that decoded to the wrong number of bytes BEFORE it costs a
@@ -6002,6 +6064,11 @@ function encodeContenthash(input) {
   // on-chain, leaving a dead website and no error anywhere.
   if (!isWellFormedCidV1(cidBytes)) {
     throw new Error('That CID looks incomplete or mistyped — check you copied the whole value.');
+  }
+  // A swarm-manifest CID (codec 0xfa, varint fa 01) is well formed, so it would
+  // be written under the IPFS namespace and every IPFS gateway would refuse it.
+  if (cidBytes[1] === 0xfa && cidBytes[2] === 0x01) {
+    throw new Error('That CID is a Swarm reference, not IPFS — paste it as bzz://<hash>.');
   }
 
   // ENSIP-7 contenthash format: uvarint(protoCode) + CID bytes
@@ -6047,7 +6114,7 @@ async function doSetContent() {
     $('manageForm').classList.remove('show');
     refreshAfterTx(name, panelRepainted, receipt); // Refresh to show updated website link
   } catch (e) {
-    if (e.message?.includes('CID') || e.message?.includes('IPNS name')) {
+    if (e.message?.includes('CID') || e.message?.includes('IPNS name') || e.message?.includes('Swarm reference')) {
       showStatus(e.message, 'error');
     } else {
       handleError(e);

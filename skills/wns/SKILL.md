@@ -1,6 +1,6 @@
 ---
 name: wns
-description: Use when resolving, registering, or integrating .wei names — the Wei Name Service, an ENS-compatible ERC-721 naming system on Ethereum mainnet. Covers namehash→tokenId, address/contenthash/text resolution, reverse resolution, commit-reveal registration, subdomains, and serving IPFS/IPNS websites through the wei.limo / wei.is / wei.domains gateway. Applies to both onchain integration (a single resolver+registry+NFT contract) and offchain resolution (the HTTP gateway, no wallet needed).
+description: Use when resolving, registering, or integrating .wei names — the Wei Name Service, an ENS-compatible ERC-721 naming system on Ethereum mainnet. Covers namehash→tokenId, address/contenthash/text resolution, reverse resolution, commit-reveal registration, subdomains, and serving IPFS/IPNS/Swarm websites through the wei.limo / wei.is / wei.domains gateway. Applies to both onchain integration (a single resolver+registry+NFT contract) and offchain resolution (the HTTP gateway, no wallet needed).
 ---
 
 # WNS — Wei Name Service (.wei)
@@ -12,7 +12,7 @@ description: Use when resolving, registering, or integrating .wei names — the 
 - **WNS is not ENS, but it is ENS-*compatible*.** Same namehash (EIP-137), same resolver interface IDs (`addr`, `text`, `contenthash`). Existing ENS resolver-read code works if you point it at the WNS contract.
 - **It is ONE contract.** Not a registry + registrar + resolver split like ENS. A single non-upgradeable contract is the ERC-721 (ownership), the registrar (commit-reveal), and the resolver (addr/text/contenthash) all at once.
 - **Token ID = `uint256(namehash(name))`.** The NFT tokenId *is* the ENS namehash. No separate node/id mapping.
-- **You do not need a wallet or a library to resolve a website.** `https://<name>.wei.limo` (also `.wei.is`, `.wei.domains`) serves the name's IPFS/IPNS contenthash over plain HTTPS. Just fetch the URL.
+- **You do not need a wallet or a library to resolve a website.** `https://<name>.wei.limo` (also `.wei.is`, `.wei.domains`) serves the name's IPFS/IPNS/Swarm contenthash over plain HTTPS. Just fetch the URL.
 - **Names expire.** 365-day registration + 90-day grace. During grace and after, resolver reads return empty. Don't cache resolutions forever.
 
 ## Contract
@@ -63,17 +63,18 @@ cast call $WNS "reverseResolve(address)(string)" 0xUser --rpc-url $RPC
 
 Returns the owner's **primary name**, or `""` if unset/inactive. A user sets it with `setPrimaryName(tokenId)` (callable by the owner or the address the token resolves to). `setPrimaryName(0)` clears it.
 
-## Serve a website (IPFS/IPNS)
+## Serve a website (IPFS/IPNS/Swarm)
 
-Set an IPFS or IPNS contenthash on the name, and the gateway serves it — no per-name DNS, no config:
+Set an IPFS, IPNS or Swarm contenthash on the name, and the gateway serves it — no per-name DNS, no config:
 
 ```
-https://alice.wei.limo        ->  IPFS/IPNS content of alice.wei
+https://alice.wei.limo        ->  IPFS/IPNS/Swarm content of alice.wei
 https://alice.wei.is          ->  same, alternate zone
 https://alice.wei.domains     ->  same, alternate zone
 ```
 
 - **IPNS** contenthash means the owner can update the site with no new onchain transaction (the gateway resolves the IPNS key fresh each request).
+- **Swarm** contenthash is `0xe40101fa011b20` + the 32-byte reference (what `bzz://<hash>` encodes to). The gateway fetches it from a public Swarm gateway and streams it back; a Swarm reference also resolves on its own at `https://<bah5acgza… CID>.wei.limo`.
 - **Subdomains resolve too**, to any depth the owner registers: `https://send.slow.wei.limo` serves the contenthash of `send.slow.wei`.
 - The gateway reads the contenthash live from the contract on each request, so a name published to IPFS works instantly.
 - **A CID resolves on its own**, with no name and no onchain read at all — `https://<cid>.wei.limo` serves that exact content, and `https://<k51…>.wei.limo` that exact IPNS key. Use it when you want the bytes you audited rather than whatever the name points at now; a name can be repointed, a CID cannot. (Same idea as `https://0x<address>.wei.limo`, which serves one exact contract.)

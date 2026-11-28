@@ -1443,5 +1443,180 @@ eq('hardening: a full CSP is dropped', res.headers.get('content-security-policy'
 eq('hardening: unsafe-url is dropped', res.headers.get('referrer-policy'), null)
 eq('hardening: the page itself still serves', await res.text(), '<h1>l</h1>')
 
+// --- 34. Swarm (bzz) contenthash -------------------------------------------
+//
+// swarm-ns 0xe4 + CIDv1 swarm-manifest keccak-256 + the 32-byte reference —
+// swarm.eth's own contenthash. Swarm is proxied in every mode: the only public
+// gateway serving arbitrary references forces a download, so a redirect there
+// would hand visitors a file instead of a site.
+const SWARM_REF = '03b80b08353b288c08b161fcf0e904eff3001c88006bcc7087290929197eb69f'
+const SWARM_CID = 'bah5acgzaao4awcbvhmuiycfrmh6pb2ie57zqaheiabv4y4ehfeessgl6w2pq'
+const abiBytes = (h) =>
+  '0x' + word('20') + word((h.length / 2).toString(16)) + h.padEnd(Math.ceil(h.length / 64) * 64, '0')
+function swarmName(tokenId, ch = 'e40101fa011b20' + SWARM_REF) {
+  return {
+    [`${WNS}:${COMPUTE_ID}`]: uint(tokenId),
+    [`${WNS}:${RESOLVE}`]: addressWord('0x' + '00'.repeat(20)),
+    [`${WNS}:${CONTENTHASH}`]: abiBytes(ch),
+  }
+}
+const SWARM_ORIGIN = `https://download.gateway.ethswarm.org/bzz/${SWARM_REF}`
+const swarmPage = (body, type = 'text/html; charset=utf-8') => () =>
+  new Response(body, { status: 200, headers: { 'content-type': type, 'content-disposition': 'attachment', 'etag': '"sw"' } })
+const navigate = { headers: { 'sec-fetch-mode': 'navigate' } }
+async function swarmGet(hostAndPath, extra = {}, init = {}) {
+  calls = []
+  upstreamHealth.clear()
+  return handleRequest(new Request('https://' + hostAndPath, init), { ...ENV, ...extra })
+}
+
+// Default (redirect) mode: proxied anyway, attachment header dropped.
+routes = swarmName(340)
+seen = []
+proxyResponse = async (u) => { seen.push(u); return swarmPage('<h1>swarm site</h1>')() }
+res = await swarmGet('sw340.wei.limo/')
+eq('swarm: redirect mode still proxies (200)', res.status, 200)
+eq('swarm: no redirect', res.headers.get('location'), null)
+eq('swarm: body from the bzz upstream', await res.text(), '<h1>swarm site</h1>')
+eq('swarm: fetched from download.gateway /bzz/<ref>/', seen, [`${SWARM_ORIGIN}/`])
+eq('swarm: content-disposition is dropped', res.headers.get('content-disposition'), null)
+eq('swarm: content-type kept', res.headers.get('content-type'), 'text/html; charset=utf-8')
+eq('swarm: records the reference', res.headers.get('x-swarm-reference'), SWARM_REF)
+eq('swarm: x-wns-mode', res.headers.get('x-wns-mode'), 'swarm')
+eq('swarm: cacheable', res.headers.get('cache-control'), 'public, max-age=300')
+
+// Asset paths keep their path; the query never reaches Bee or the cache key.
+seen = []
+proxyResponse = async (u) => { seen.push(u); return swarmPage('export const ready = true', 'text/javascript')() }
+res = await swarmGet('sw340.wei.limo/assets/app.js?v=1')
+eq('swarm: asset path, query dropped upstream', seen, [`${SWARM_ORIGIN}/assets/app.js`])
+eq('swarm: asset MIME kept', res.headers.get('content-type'), 'text/javascript')
+// Never held: a bzz reference may be a feed (swarm.eth's is), which Bee
+// resolves to its latest update per request — an update must show at once.
+seen = []
+proxyResponse = async (u) => { seen.push(u); return swarmPage('feed update 0x67', 'text/javascript')() }
+res = await swarmGet('sw340.wei.limo/assets/app.js?v=1')
+eq('swarm: same path again is fetched again (feeds move)', seen, [`${SWARM_ORIGIN}/assets/app.js`])
+eq('swarm: and serves the new update', await res.text(), 'feed update 0x67')
+// Bee answers unknown paths with the index document at 200. None of it is held,
+// so junk paths can't fill the cache every name shares.
+seen = []
+proxyResponse = async (u) => { seen.push(u); return swarmPage('<h1>index fallback</h1>')() }
+for (const junk of ['/j1', '/j2', '/j1']) await swarmGet('sw340.wei.limo' + junk).then((r) => r.text())
+eq('swarm: 200 fallbacks for junk paths are each fetched, never held', seen.length, 3)
+
+// Proxy mode with an IPFS path gateway configured: Swarm never goes there.
+seen = []
+proxyResponse = async (u) => { seen.push(u); return swarmPage('<p>proxied</p>')() }
+res = await swarmGet('sw340.wei.limo/p', { GATEWAY_MODE: 'proxy', IPFS_PATH_GATEWAY: 'https://pin.gw' })
+eq('swarm: proxy mode uses the bzz upstream only', seen, [`${SWARM_ORIGIN}/p`])
+
+// SWARM_GATEWAY is an ordered list, failed over like the IPFS ones.
+routes = swarmName(341)
+seen = []
+proxyResponse = byHost([
+  ['bee-a.gw', () => new Response('down', { status: 502 })],
+  ['bee-b.gw', swarmPage('<p>from b</p>')],
+])
+res = await swarmGet('sw341.wei.limo/x', { SWARM_GATEWAY: 'https://bee-a.gw/, https://bee-b.gw' })
+eq('swarm: a 5xx falls over to the next SWARM_GATEWAY', res.status, 200)
+eq('swarm: served by the second', res.headers.get('x-wns-upstream'), 'bee-b.gw')
+eq('swarm: both tried in order', seen, [`https://bee-a.gw/bzz/${SWARM_REF}/x`, `https://bee-b.gw/bzz/${SWARM_REF}/x`])
+// Separators alone fall back to the default rather than 502ing.
+seen = []
+proxyResponse = async (u) => { seen.push(u); return swarmPage('ok')() }
+res = await swarmGet('sw341.wei.limo/sep', { SWARM_GATEWAY: ' , ' })
+eq('swarm: an empty SWARM_GATEWAY list uses the default', seen, [`${SWARM_ORIGIN}/sep`])
+
+// A redirect inside the reference is handed to the visitor as a path on the
+// name; one leaving it is not followed.
+routes = swarmName(342)
+proxyResponse = async () => new Response(null, { status: 301, headers: { location: `/bzz/${SWARM_REF}/docs/` } })
+res = await swarmGet('sw342.wei.limo/docs')
+eq('swarm: in-reference redirect passes through', res.status, 301)
+eq('swarm: as a path on the name', res.headers.get('location'), '/docs/')
+eq('swarm: a redirect is not cacheable (feeds move)', res.headers.get('cache-control'), 'no-store')
+proxyResponse = async () => new Response(null, { status: 302, headers: { location: 'https://bzz.link/forbidden' } })
+res = await swarmGet('sw342.wei.limo/off')
+eq('swarm: an off-site redirect is not passed on', res.headers.get('location'), null)
+eq('swarm: and is an upstream error, not a 3xx', res.status, 502)
+// Nor a redirect to another reference on the same upstream.
+proxyResponse = async () => new Response(null, { status: 301, headers: { location: `/bzz/${'ab'.repeat(32)}/` } })
+res = await swarmGet('sw342.wei.limo/other')
+eq('swarm: a redirect to another reference is not passed on', res.headers.get('location'), null)
+
+// A 404 is final: no `_redirects` read, no IPFS browser gateway, even for a page load.
+routes = swarmName(343)
+seen = []
+proxyResponse = async (u) => { seen.push(u); return new Response('{"code":404}', { status: 404, headers: { 'content-type': 'application/json' } }) }
+res = await swarmGet('sw343.wei.limo/missing', {}, navigate)
+eq('swarm: 404 passes through', res.status, 404)
+eq('swarm: no _redirects read', seen, [`${SWARM_ORIGIN}/missing`])
+// Unreachable: an upstream error, never a redirect to an IPFS service worker.
+proxyResponse = async () => { throw new Error('connect ECONNREFUSED') }
+res = await swarmGet('sw343.wei.limo/dead', {}, navigate)
+eq('swarm: unreachable is a 502', res.status, 502)
+eq('swarm: and no browser-gateway redirect', res.headers.get('location'), null)
+
+// Range is never forwarded to Swarm: the public download gateway can cache a 206
+// under the plain URL, so one ranged request (a video seek) could truncate that
+// file for later visitors, here and at the upstream.
+routes = swarmName(346)
+let sent = []
+proxyResponse = async (u, init) => {
+  sent.push(init.headers)
+  return new Response('whole file', { status: 200, headers: { 'content-type': 'video/mp4', 'accept-ranges': 'bytes' } })
+}
+res = await swarmGet('sw346.wei.limo/clip.mp4', {}, { headers: { range: 'bytes=0-0' } })
+eq('swarm range: not forwarded upstream', sent.map((h) => h.range ?? null), [null])
+eq('swarm range: the whole file is served', [res.status, await res.text()], [200, 'whole file'])
+eq('swarm range: no accept-ranges promised', res.headers.get('accept-ranges'), null)
+// A 206 nobody asked for is a fragment someone else left in the upstream cache:
+// asked once more past it, as a hard reload does.
+sent = []
+proxyResponse = async (u, init) => {
+  sent.push(init.headers)
+  return init.headers.pragma === 'no-cache'
+    ? new Response('whole page', { status: 200, headers: { 'content-type': 'text/html' } })
+    : new Response('w', { status: 206, headers: { 'content-range': 'bytes 0-0/10' } })
+}
+res = await swarmGet('sw346.wei.limo/', {}, navigate)
+eq('swarm stale 206: asked again past the cache', sent.map((h) => h.pragma ?? null), [null, 'no-cache'])
+eq('swarm stale 206: the whole page is served', [res.status, await res.text()], [200, 'whole page'])
+eq('swarm stale 206: no content-range', res.headers.get('content-range'), null)
+
+// A truncated reference is not content.
+routes = swarmName(344, 'e40101fa011b20' + SWARM_REF.slice(0, 62))
+proxyResponse = async (u) => { throw new Error('unexpected fetch ' + u) }
+res = await swarmGet('sw344.wei.limo/')
+eq('swarm: truncated reference -> no content (404)', res.status, 404)
+
+// A Swarm content label: the base32 CIDv1 of the reference serves it directly,
+// no registry read — and is not mistaken for an IPFS CID.
+routes = {}
+seen = []
+proxyResponse = async (u) => { seen.push(u); return swarmPage('<h1>pinned</h1>')() }
+res = await swarmGet(`${SWARM_CID}.wei.limo/label`)
+eq('swarm label: 200', res.status, 200)
+eq('swarm label: no RPC', calls.length, 0)
+eq('swarm label: fetched as bzz, not ipfs', seen, [`${SWARM_ORIGIN}/label`])
+eq('swarm label: records the reference', res.headers.get('x-swarm-reference'), SWARM_REF)
+// The other 15 spellings of the same reference (spare bits in the last base32
+// character) are not a label: no content, no fetch, no RPC — and not IPFS.
+seen = []
+res = await swarmGet(`${SWARM_CID.slice(0, -1)}r.wei.limo/label`)
+eq('swarm label: non-canonical alias -> 404', res.status, 404)
+eq('swarm label: alias costs no fetch', seen.length, 0)
+eq('swarm label: alias costs no RPC', calls.length, 0)
+
+// SWARM_GATEWAY=off serves no Swarm, plainly, rather than a 502 for an upstream never asked.
+routes = swarmName(345)
+seen = []
+res = await swarmGet('sw345.wei.limo/', { SWARM_GATEWAY: 'off' })
+eq('swarm off: 404', res.status, 404)
+eq('swarm off: no fetch', seen.length, 0)
+eq('swarm off: not cacheable', res.headers.get('cache-control'), 'no-store')
+proxyResponse = null
+
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail ? 1 : 0)
